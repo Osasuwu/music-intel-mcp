@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "music-intel-mcp"
+version = "0.0.1"
+description = "Track-level anti-bubble music recommender with MCP surface for Jarvis."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Osasuwu" }
+]
+keywords = ["music", "recommendation", "mcp", "anti-bubble", "lastfm", "spotify", "musicbrainz"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "ruff>=0.3",
+  "pre-commit>=3.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/Osasuwu/music-intel-mcp"
+Issues = "https://github.com/Osasuwu/music-intel-mcp/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]

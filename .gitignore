@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+*.so
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+.env.local
+*.secrets.json
+*.credentials.json
+
+# Local data + scratch (large dumps live outside repo)
+.scratch/
+cache/
+data/raw/
+data/dumps/
+
+# Logs
+*.log
+
+# Java legacy (in case anyone checks out legacy/java accidentally into main worktree)
+target/
+*.class

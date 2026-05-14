@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: Detect secrets with gitleaks
+        stages: [pre-commit]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: ruff
+        name: ruff lint
+        args: [--fix]
+        stages: [pre-commit]
+      - id: ruff-format
+        name: ruff format
+        stages: [pre-commit]
+
+  # Commit-message hook — commit should reference an issue (#NNN) or use [no-issue]
+  # for hotfixes / repo-mechanics. Install: pre-commit install --hook-type commit-msg
+  - repo: local
+    hooks:
+      - id: commit-msg-issue-ref
+        name: Commit message references an issue (#NNN) or [no-issue]
+        language: pygrep
+        entry: '(#\d+|\[no-issue\]|^Merge |^Revert |^fixup!|^squash!)'
+        args: [--negate]
+        stages: [commit-msg]

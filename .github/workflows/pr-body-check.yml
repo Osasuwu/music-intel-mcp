@@ -1,0 +1,54 @@
+name: PR Body Check
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  require-linked-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const labels = (pr.labels || []).map(l => l.name);
+
+            // Bot bypass: dependabot/renovate cannot author linked issues.
+            const author = (pr.user && pr.user.login) || '';
+            if (author === 'dependabot[bot]' || author === 'renovate[bot]') {
+              console.log(`bot author (${author}) — skipping linked-issue requirement.`);
+              return;
+            }
+
+            // Hotfix escape: priority:critical label bypasses the linked-issue requirement.
+            if (labels.includes('priority:critical')) {
+              console.log('priority:critical — skipping linked-issue requirement (hotfix).');
+              return;
+            }
+
+            const issueMatches = [...body.matchAll(/(?:closes|fixes|resolves)\s+#(\d+)/gi)];
+            const issueNumbers = [...new Set(issueMatches.map(m => parseInt(m[1], 10)))];
+
+            if (issueNumbers.length === 0) {
+              core.setFailed('PR body must include a linked issue reference (e.g. "Closes #123"). For hotfixes, apply the priority:critical label instead.');
+              return;
+            }
+
+            const errors = [];
+            for (const issueNumber of issueNumbers) {
+              try {
+                await github.rest.issues.get({ ...repo, issue_number: issueNumber });
+              } catch (e) {
+                errors.push(`Linked issue #${issueNumber} does not exist or is not accessible.`);
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(errors.join('\n'));
+            }
