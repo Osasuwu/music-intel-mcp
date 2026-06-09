@@ -12,10 +12,12 @@ from music_intel_mcp.models import (
     ListenEvent,
     MethodParams,
     RootProfile,
+    SceneParams,
     TrackRef,
     ValidationParams,
 )
-from music_intel_mcp.shared_store import AudioFeatures, InMemorySharedStore
+from music_intel_mcp.scene import InMemoryTagSource
+from music_intel_mcp.shared_store import AudioFeatures, InMemorySharedStore, TrackTag
 
 FIXED_NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
@@ -128,3 +130,107 @@ def test_analyze_without_audio_source_stays_honest_empty():
     profile = analyze(events, user_id="petr", generated_at=FIXED_NOW)
     assert profile.roots == []
     assert profile.generated_from.coverage_per_category["audio"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Scene stage end-to-end (#64): events -> seed -> tag-enrich -> NMF -> roots
+# --------------------------------------------------------------------------- #
+
+SCENE_METHOD_PARAMS = MethodParams(
+    scene=SceneParams(K_grid_explored=[2]),
+    validation=ValidationParams(
+        N_THRESHOLD=5, T_THRESHOLD_DAYS=5, evidence_count_floor=5, confidence_floor=0.5
+    ),
+)
+_SCENE_TAGS = {
+    "metal": ["metal", "thrash", "heavy"],
+    "jazz": ["jazz", "bebop", "swing"],
+}
+
+
+def _scene_events_and_source():
+    """Two coherent tag blobs over 12 tracks; each played in both history halves."""
+    mapping: dict[tuple[str, str], list[TrackTag]] = {}
+    events: list[ListenEvent] = []
+    for label, tags in _SCENE_TAGS.items():
+        artist = f"{label}-band"
+        for i in range(6):
+            name = f"{label} {i}"
+            mapping[(artist, name)] = [TrackTag(tag=t, weight=1.0, source="lastfm") for t in tags]
+            track = TrackRef(mbid=f"{label}-{i}", name=name, artist=artist)
+            for played_at in (EARLY, LATE):
+                events.append(ListenEvent(track=track, played_at=played_at, source="lastfm"))
+    return events, InMemoryTagSource(mapping)
+
+
+def test_analyze_runs_scene_stage_when_store_and_tag_source_supplied():
+    events, tag_source = _scene_events_and_source()
+    store = InMemorySharedStore()
+
+    profile = analyze(
+        events,
+        user_id="petr",
+        generated_at=FIXED_NOW,
+        method_params=SCENE_METHOD_PARAMS,
+        shared_store=store,
+        tag_source=tag_source,
+    )
+
+    assert len(profile.roots) == 2
+    assert {r.category for r in profile.roots} == {"scene"}
+    assert {r.id for r in profile.roots} == {"r-scene-1", "r-scene-2"}
+    assert profile.generated_from.coverage_per_category["scene"] == 1.0
+    # the chosen K is recorded back into method_params for provenance
+    assert profile.method_params.scene.K_selected == 2
+
+
+def test_analyze_does_not_mutate_caller_method_params():
+    events, tag_source = _scene_events_and_source()
+    analyze(
+        events,
+        user_id="petr",
+        generated_at=FIXED_NOW,
+        method_params=SCENE_METHOD_PARAMS,
+        shared_store=InMemorySharedStore(),
+        tag_source=tag_source,
+    )
+    # recording K_selected on the deep copy must not touch the module-level params
+    assert SCENE_METHOD_PARAMS.scene.K_selected is None
+
+
+def test_analyze_without_tag_source_stays_honest_empty_scene():
+    events, _ = _scene_events_and_source()
+    profile = analyze(events, user_id="petr", generated_at=FIXED_NOW)
+    assert profile.roots == []
+    assert profile.generated_from.coverage_per_category["scene"] == 0.0
+
+
+def test_analyze_runs_audio_and_scene_together():
+    """Both enrichers wired → both categories surface in one profile, on the same
+    seeded store."""
+    audio_events, audio_source = _audio_events_and_source()
+    scene_events, tag_source = _scene_events_and_source()
+    params = MethodParams(
+        audio=AudioParams(min_cluster_size=5, min_samples=2),
+        scene=SceneParams(K_grid_explored=[2]),
+        validation=ValidationParams(
+            N_THRESHOLD=5, T_THRESHOLD_DAYS=5, evidence_count_floor=5, confidence_floor=0.5
+        ),
+    )
+    store = InMemorySharedStore()
+
+    profile = analyze(
+        audio_events + scene_events,
+        user_id="petr",
+        generated_at=FIXED_NOW,
+        method_params=params,
+        shared_store=store,
+        audio_source=audio_source,
+        tag_source=tag_source,
+    )
+
+    categories = {r.category for r in profile.roots}
+    assert categories == {"audio", "scene"}
+    # 24 tracks total; each enricher covers only its own 12 → honest 0.5 each
+    assert profile.generated_from.coverage_per_category["audio"] == 0.5
+    assert profile.generated_from.coverage_per_category["scene"] == 0.5

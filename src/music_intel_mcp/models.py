@@ -130,6 +130,12 @@ class SceneParams(BaseModel):
     coherence_floor: float = 0.15
     tag_canonicalization: Any = None
     stop_tags_version: str = "v1"
+    # Presentation counts (not thresholds): how many top tags drive the coherence
+    # measure + descriptor, how many top artists to surface, how many sample
+    # tracks per topic. Mirrors AudioParams.sample_track_count.
+    coherence_top_n: int = 10
+    top_artists_count: int = 5
+    sample_track_count: int = 5
 
 
 def _default_temporal_calendar() -> dict[str, Any]:

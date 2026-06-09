@@ -46,7 +46,10 @@
       "K_grid_explored": [3, 5, 8, 13],
       "coherence_floor": 0.15,
       "tag_canonicalization": null,
-      "stop_tags_version": "v1"
+      "stop_tags_version": "v1",
+      "coherence_top_n": 10,
+      "top_artists_count": 5,
+      "sample_track_count": 5
     },
     "temporal": {
       "temporal_calendar": {

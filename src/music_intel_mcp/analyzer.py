@@ -3,9 +3,10 @@
 Loads events -> computes ``generated_from`` -> runs each derivation stage in the
 forced order (audio -> scene -> temporal -> epochs) -> assembles a schema-valid
 ``RootProfile``. Stages are *opt-in by dependency*: the audio stage runs only
-when a shared store **and** an audio feature source are supplied. With no
-enrichment wired, every derived section is empty — a *correct* output under the
-honest-empty invariant, not a failure. Scene/temporal stages land in #64/#65.
+when a shared store **and** an audio feature source are supplied; the scene
+stage when a shared store **and** a tag source are supplied. With no enrichment
+wired, every derived section is empty — a *correct* output under the honest-empty
+invariant, not a failure. The temporal stage lands in #65.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .models import (
     RootProfile,
     TrackRef,
 )
+from .scene import TagSource, derive_scene_roots, enrich_tags
 from .shared_store import SharedStore, TrackMetadataRecord, canonical_track_id
 from .validation import DatasetContext, ValidationOutcome
 
@@ -53,21 +55,17 @@ def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
     )
 
 
-def _derive_audio(
+def _group_and_seed(
     events: Sequence[ListenEvent],
-    generated_from: GeneratedFrom,
-    method_params: MethodParams,
-    *,
     store: SharedStore,
-    source: AudioFeatureSource,
     now: datetime,
-):
-    """Audio stage: group plays by canonical id, seed any unknown tracks into the
-    shared store, enrich by MBID, then cluster the enriched population.
+) -> tuple[dict[str, list[datetime]], list[str]]:
+    """Group plays by canonical id and seed any unknown tracks into the shared
+    store, returning the play map and the unique id list both stages share.
 
     Seeds carry only anonymous track facts (ids + name/artist) — never per-user
-    fields — so writing them to the shared store is safe. Reads/writes are bulk
-    only (the no-round-trip discipline)."""
+    fields — so writing them to the shared store is safe. Naive timestamps are
+    coerced to UTC. Done once so audio and scene reuse the same seeded store."""
     plays: dict[str, list[datetime]] = {}
     refs: dict[str, TrackRef] = {}
     for event in events:
@@ -95,19 +93,13 @@ def _derive_audio(
     ]
     if seeds:
         store.upsert_tracks(seeds)
+    return plays, unique_ids
 
-    enrich_audio_features(unique_ids, store, source, now=now)
-    records = store.get_tracks(unique_ids)
 
-    return derive_audio_roots(
-        records,
-        plays,
-        params=method_params.audio,
-        validation_params=method_params.validation,
-        dataset_ctx=DatasetContext(
-            n_unique_tracks=generated_from.n_unique_tracks,
-            history_span_days=generated_from.history_span_days,
-        ),
+def _dataset_ctx(generated_from: GeneratedFrom) -> DatasetContext:
+    return DatasetContext(
+        n_unique_tracks=generated_from.n_unique_tracks,
+        history_span_days=generated_from.history_span_days,
     )
 
 
@@ -119,30 +111,54 @@ def analyze(
     method_params: MethodParams | None = None,
     shared_store: SharedStore | None = None,
     audio_source: AudioFeatureSource | None = None,
+    tag_source: TagSource | None = None,
 ) -> RootProfile:
     """Run the derivation pipeline over ``events`` and assemble a ``RootProfile``.
 
-    The audio stage (#63) runs when both ``shared_store`` and ``audio_source``
-    are supplied; otherwise it is skipped and the audio sections stay empty
-    (honest-empty, never fabricated). ``generated_from`` counts are always
-    correct. Scene/temporal stages plug in here in #64/#65.
+    The audio stage (#63) runs when a ``shared_store`` and an ``audio_source``
+    are supplied; the scene stage (#64) when a ``shared_store`` and a
+    ``tag_source`` are supplied. Each is independent — either, both, or neither
+    may run; unrun categories stay honest-empty (never fabricated).
+    ``generated_from`` counts are always correct. The temporal stage plugs in
+    here in #65.
     """
     generated_at = generated_at or datetime.now(UTC)
     generated_from = _generated_from(events)
-    params = method_params or MethodParams()
+    # Deep copy so recording chosen params (e.g. scene.K_selected) never mutates
+    # the caller's MethodParams.
+    params = (method_params or MethodParams()).model_copy(deep=True)
 
     outcome = ValidationOutcome()
-    if events and shared_store is not None and audio_source is not None:
-        derivation = _derive_audio(
-            events,
-            generated_from,
-            params,
-            store=shared_store,
-            source=audio_source,
-            now=generated_at,
-        )
-        outcome = derivation.outcome
-        generated_from.coverage_per_category["audio"] = derivation.coverage
+    if events and shared_store is not None and (audio_source is not None or tag_source is not None):
+        plays, unique_ids = _group_and_seed(events, shared_store, generated_at)
+        ctx = _dataset_ctx(generated_from)
+
+        if audio_source is not None:
+            enrich_audio_features(unique_ids, shared_store, audio_source, now=generated_at)
+            records = shared_store.get_tracks(unique_ids)
+            audio = derive_audio_roots(
+                records,
+                plays,
+                params=params.audio,
+                validation_params=params.validation,
+                dataset_ctx=ctx,
+            )
+            _merge(outcome, audio.outcome)
+            generated_from.coverage_per_category["audio"] = audio.coverage
+
+        if tag_source is not None:
+            enrich_tags(unique_ids, shared_store, tag_source, now=generated_at)
+            records = shared_store.get_tracks(unique_ids)
+            scene = derive_scene_roots(
+                records,
+                plays,
+                params=params.scene,
+                validation_params=params.validation,
+                dataset_ctx=ctx,
+            )
+            _merge(outcome, scene.outcome)
+            generated_from.coverage_per_category["scene"] = scene.coverage
+            params.scene.K_selected = scene.k_selected
 
     return RootProfile(
         snapshot_id=f"{user_id}/{generated_at.isoformat()}",
@@ -154,3 +170,10 @@ def analyze(
         epochs=[],
         quality_log=outcome.quality_log,
     )
+
+
+def _merge(into: ValidationOutcome, other: ValidationOutcome) -> None:
+    """Accumulate one stage's outcome into the running profile outcome."""
+    into.roots.extend(other.roots)
+    into.tendencies.extend(other.tendencies)
+    into.quality_log.extend(other.quality_log)
