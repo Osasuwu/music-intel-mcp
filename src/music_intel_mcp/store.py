@@ -24,7 +24,9 @@ _DATA_DIR_ENV = "MUSIC_INTEL_DATA_DIR"
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _resolve_root(root: str | Path | None) -> Path:
+def resolve_data_root(root: str | Path | None) -> Path:
+    """Resolve the data root: explicit arg > ``MUSIC_INTEL_DATA_DIR`` > default.
+    Shared by the per-user store and the (local) shared-metadata cache."""
     if root is not None:
         return Path(root)
     return Path(os.environ.get(_DATA_DIR_ENV, DEFAULT_DATA_DIR))
@@ -34,7 +36,7 @@ class UserStore:
     """Read history, read/write RootProfile snapshots for one user."""
 
     def __init__(self, root: str | Path | None = None) -> None:
-        self.root = _resolve_root(root)
+        self.root = resolve_data_root(root)
 
     @property
     def history_path(self) -> Path:

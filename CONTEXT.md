@@ -59,6 +59,21 @@ This reorders the brainstorm's "3 pillars" (which presented them as parallel).
 
 *(More terms added as they resolve.)*
 
+## Shared-store schema (V0)
+
+The shared metadata store (Supabase Postgres) holds **anonymous track-level facts only** — no `user_id`, no `played_at`, no play-context in any table. Migration: `supabase/migrations/20260609000000_shared_metadata.sql`. Python client: `src/music_intel_mcp/shared_store.py`. Issue #60, decision `f7a9fcbd`.
+
+Tables:
+
+- **`tracks`** — canonical identity + denormalised display facts. PK is a **canonical string id** (`mbid:…` > `isrc:…` > `spotify:…` > `name:<casefold>\x1f<casefold>`), built by `canonical_track_id()` — the same waterfall #61 formalises. Columns: `id`, `spotify_id`, `isrc`, `mbid`, `name`, `artist`, `artist_id`→artists, `fetched_at` (TTL anchor). Indexed on spotify_id/isrc/mbid for the identity waterfall.
+- **`artists`** — artist-level facts (`mbid`, `name`). Defined for #61 + future artist enrichment; V0's `TrackMetadataRecord` denormalises `artist` onto `tracks` and does not yet populate this table.
+- **`audio_features`** — one row per track (PK = `track_id`): `bpm`, `energy`, `valence`, `danceability`, `acousticness`, `instrumentalness`, `source`. All nullable (partial enrichment is valid).
+- **`tags`** — many rows per track: `(track_id, tag, weight, source)`, unique on `(track_id, tag, source)`. Scene/cultural tags from Last.fm etc.
+
+`TrackMetadataRecord` (pydantic, `extra="forbid"`) is the **pull unit** — a track's `tracks` row + its `audio_features` + its `tags`, plus `fetched_at`. `extra="forbid"` is the structural guard that personal data can never leak into a shared-store record.
+
+**Store access** is `SharedStore` (Protocol) with only **bulk** ops — `get_tracks(ids)` / `upsert_tracks(records)`; no singular getter exists, so the no-round-trip rule is enforced by the type. Implementations: `InMemorySharedStore` (real store in tests + offline fallback) and `SupabaseSharedStore` (network-only, lazy-imports the `supabase` optional extra, never run in CI). `pull_and_cache(ids, store, cache, now, ttl_days=90)` serves fresh entries from the local `MetadataCache` (`data/cache/`), collects uncached/stale ids, and fetches them in **one** bulk call; stale (past-TTL) store entries are surfaced for re-enrichment, missing ids for enrichment.
+
 ## Invariants
 
 - **Transparency.** Every insight, score, and recommendation carries its evidence chain. No opaque numbers. If we can't explain it, we don't ship it.

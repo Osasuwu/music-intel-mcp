@@ -31,6 +31,11 @@ dev = [
   "ruff>=0.3",
   "pre-commit>=3.6",
 ]
+# Production shared-metadata store. Network-only (SupabaseSharedStore); CI uses
+# the in-memory store, so this stays out of the default/dev install.
+supabase = [
+  "supabase>=2.0",
+]
 
 [project.scripts]
 music-intel = "music_intel_mcp.cli:main"
