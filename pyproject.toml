@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "python-dotenv>=1.0.1",
+  "pydantic>=2.7",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,9 @@ dev = [
   "ruff>=0.3",
   "pre-commit>=3.6",
 ]
+
+[project.scripts]
+music-intel = "music_intel_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Osasuwu/music-intel-mcp"
