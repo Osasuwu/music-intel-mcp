@@ -155,6 +155,15 @@ The owner's listening history arrives as a directory of **IFTTT "Spotify → spr
 - **Idempotent.** `load_ifttt_dir` concatenates all workbooks, dedups by `(canonical_track_id, played_at)` keeping first, sorts ascending by `played_at`. `import-ifttt` merges existing-history-first (so events from other sources survive) then dedups → re-running over the same dir yields the same file. `UserStore.replace_history` rewrites the file from scratch (vs `append_events`).
 - **⚠ TIMEZONE CAVEAT (flagged, not locked).** IFTTT records the trigger time as a **zone-less local wall-clock** string. V0 coerces it to UTC, which is *wrong by the local UTC offset* and will skew temporal day-part/season buckets once temporal roots run on real IFTTT data. It does **not** affect the honest-empty V0 run (no enrichment → no temporal roots). Must be resolved (carry/normalise the zone) before any temporal root derived from this source is trusted — see Open question 14.
 
+## Analyze CLI — enrichment surface (V0)
+
+`music-intel analyze --user-id <id> [--data-dir ...]` loads the per-user `history.jsonl`, runs the derivation engine, writes a RootProfile snapshot, and prints a one-line summary plus per-category `coverage:` (audio/scene/temporal). Issue #78. The pipelines are locked (#63/#64); the CLI only *wires* the already-built source adapters into `analyze()` — no new domain logic.
+
+- **Enrichment is off by default.** With no `--with-*` flag, `analyze` constructs no sources and emits the honest-empty V0 baseline (the audio/scene stages are opt-in by dependency, so they stay silent). This default is regression-guarded by the CLI tests.
+- **Opt-in flags.** `--with-audio` runs the audio stage (needs an `AcousticBrainz` dump); `--with-scene` runs the scene stage (needs `LASTFM_API_KEY`). `--ab-index PATH` overrides the dump location (else `$ACOUSTICBRAINZ_FEATURES_INDEX` → `$ACOUSTICBRAINZ_DUMP_DIR/acousticbrainz_features.jsonl`). `--shared-store {supabase,memory}` (default `supabase`) chooses the metadata store; `memory` is an ephemeral single-run store needing no creds.
+- **Fail-fast on missing credentials, presence-only.** `plan_enrichment(args, env)` resolves flags → sources purely (offline, unit-tested). A flag whose credential is absent (`--with-scene` without `LASTFM_API_KEY`; `--shared-store supabase` without `SUPABASE_URL`+`SUPABASE_KEY`) aborts **before** touching history/store with a clear `error:` line and exit code 2. The env is checked for **presence only** — the secret value is never read or printed.
+- **Empty coverage is honest, not an error.** A dump that isn't installed or tracks that don't resolve to MBIDs yield `audio=0.00` (rc 0) plus a diagnostic `note:` — distinct from the credential-missing abort. A missing dump file is an empty index, never a crash (`AcousticBrainzDump` resolves its path lazily).
+
 ## Invariants
 
 - **Transparency.** Every insight, score, and recommendation carries its evidence chain. No opaque numbers. If we can't explain it, we don't ship it.
