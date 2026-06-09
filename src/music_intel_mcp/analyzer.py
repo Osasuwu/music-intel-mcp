@@ -17,20 +17,8 @@ from .models import (
     ListenEvent,
     MethodParams,
     RootProfile,
-    TrackRef,
 )
-
-
-def _track_key(track: TrackRef) -> tuple:
-    """Stable identity key for unique-track counting. Uses the best id
-    available; falls back to case-folded (name, artist) when none resolves."""
-    if track.mbid:
-        return ("mbid", track.mbid)
-    if track.isrc:
-        return ("isrc", track.isrc)
-    if track.spotify_id:
-        return ("spotify", track.spotify_id)
-    return ("name", track.name.casefold(), track.artist.casefold())
+from .shared_store import canonical_track_id
 
 
 def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
@@ -48,7 +36,7 @@ def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
 
     timestamps = [e.played_at for e in events]
     earliest, latest = min(timestamps), max(timestamps)
-    unique = {_track_key(e.track) for e in events}
+    unique = {canonical_track_id(e.track) for e in events}
     sources = sorted({e.source for e in events})
 
     return GeneratedFrom(

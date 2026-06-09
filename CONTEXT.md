@@ -74,6 +74,19 @@ Tables:
 
 **Store access** is `SharedStore` (Protocol) with only **bulk** ops — `get_tracks(ids)` / `upsert_tracks(records)`; no singular getter exists, so the no-round-trip rule is enforced by the type. Implementations: `InMemorySharedStore` (real store in tests + offline fallback) and `SupabaseSharedStore` (network-only, lazy-imports the `supabase` optional extra, never run in CI). `pull_and_cache(ids, store, cache, now, ttl_days=90)` serves fresh entries from the local `MetadataCache` (`data/cache/`), collects uncached/stale ids, and fetches them in **one** bulk call; stale (past-TTL) store entries are surfaced for re-enrichment, missing ids for enrichment.
 
+## Identity resolution (V0)
+
+The **identity waterfall** turns whatever id a history event happens to carry into the one stable join key the enrichers need — the MusicBrainz **recording MBID** (the key into the AcousticBrainz/MusicBrainz dumps for #63/#64). Python: `src/music_intel_mcp/identity.py`. Issue #61.
+
+Waterfall, deepest rung wins: **`mbid`** (already present, passthrough) → **`isrc`** → MBID via the MB dump → **`spotify_id`** → ISRC (Spotify) → MBID. The rung reached is the `ResolvedIdentity.level` ∈ {`mbid`, `isrc`, `spotify`, `name`}; only `mbid` counts as *resolved* (`ResolvedIdentity.resolved`).
+
+- **`IsrcMbidIndex`** (Protocol) — `lookup(isrc) -> mbid|None`, the dump leg. `MusicBrainzIsrcIndex` reads a prebuilt `<isrc>\t<mbid>` TSV extract; path is **env-pointed** (`MUSICBRAINZ_ISRC_INDEX`, falling back to `$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv`) and **never committed** — a missing file yields an empty index (honest low coverage, never a crash). `InMemoryIsrcMbidIndex` is the test fixture.
+- **`SpotifyIsrcSource`** (Protocol) — `lookup(spotify_id) -> isrc|None`, the Spotify leg. Optional: when absent, spotify-only tracks are honestly flagged at the `spotify` level, not dropped. A live Spotify source plugs into this seam in a later slice (Spotify track metadata carries ISRC; it is *not* one of the constrained endpoints).
+- **`IdentityCache`** (`data/identity/<input-key>.json`) — keyed by the *input* canonical id, so a re-run with the same history **skips the waterfall entirely** (no re-resolution). Regenerable + gitignored, percent-encoded filenames (shared `encode_cache_key` with the metadata cache).
+- **`ResolutionReport`** — keyed by input canonical id (deduplicated). Derives `counts` (per-level ledger), `mbid_coverage` (fraction resolved to MBID — feeds `generated_from.coverage_per_category`), and `unresolved` (input keys that did not reach MBID — **flagged, never dropped**, per the transparent-rejection invariant). `to_metadata_records(report, now)` writes resolved identities back to the shared store, keyed by the *resolved* canonical id (so the store dedups across users by MBID).
+
+The same `canonical_track_id()` waterfall (mbid > isrc > spotify > name/artist) is the single source of truth for track keys — the analyser's unique-track counting now calls it directly (the old `analyzer._track_key` tuple was folded into it).
+
 ## Invariants
 
 - **Transparency.** Every insight, score, and recommendation carries its evidence chain. No opaque numbers. If we can't explain it, we don't ship it.
