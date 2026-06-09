@@ -1,0 +1,5 @@
+# Synthetic ISRC -> recording MBID extract for tests ONLY.
+# The real index is derived from the MusicBrainz dump, which lives OUTSIDE the
+# repo (env-pointed). Format: <isrc>\t<recording_mbid>, one pair per line.
+USABC1234567	aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+GBXYZ0000001	11112222-3333-4444-5555-666677778888

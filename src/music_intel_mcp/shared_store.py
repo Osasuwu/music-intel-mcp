@@ -63,6 +63,15 @@ def canonical_track_id(track: TrackRef) -> str:
     return f"name:{track.name.casefold()}\x1f{track.artist.casefold()}"
 
 
+def encode_cache_key(key: str) -> str:
+    """Percent-encode a canonical id into a collision-free filename stem.
+
+    Any canonical id round-trips — including the ``name:<n>\\x1f<a>`` fallback,
+    whose ``\\x1f`` separator and spaces are not filesystem-safe. Shared by the
+    metadata cache and the identity cache (#61)."""
+    return quote(key, safe="")
+
+
 # --------------------------------------------------------------------------- #
 # Records — anonymous track-level facts (no per-user fields, ever)
 # --------------------------------------------------------------------------- #
@@ -308,7 +317,7 @@ class MetadataCache:
         return self.root / "cache"
 
     def _path(self, track_id: str) -> Path:
-        return self.cache_dir / f"{quote(track_id, safe='')}.json"
+        return self.cache_dir / f"{encode_cache_key(track_id)}.json"
 
     def read(self, track_id: str) -> TrackMetadataRecord | None:
         path = self._path(track_id)

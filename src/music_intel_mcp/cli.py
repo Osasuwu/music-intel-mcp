@@ -1,10 +1,12 @@
-"""CLI surface. V0 exposes a single ``analyze`` command.
+"""CLI surface. V0 exposes ``analyze`` and ``resolve``.
 
     music-intel analyze --user-id petr [--data-dir ./data]
+    music-intel resolve [--data-dir ./data] [--mb-index PATH]
 
-Loads the per-user history, runs the derivation engine, writes a RootProfile
-snapshot to the per-user store, and prints the snapshot path + a one-line
-summary.
+``analyze`` loads the per-user history, runs the derivation engine, writes a
+RootProfile snapshot, and prints the path + a one-line summary. ``resolve``
+walks the history through the spotify_id -> ISRC -> MBID identity waterfall and
+reports resolution coverage (caching resolved identities for re-runs).
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import argparse
 from collections.abc import Sequence
 
 from .analyzer import analyze
+from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .store import UserStore
 
 
@@ -35,6 +38,25 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    store = UserStore(root=args.data_dir)
+    events = store.load_history()
+    index = MusicBrainzIsrcIndex(path=args.mb_index)
+    cache = IdentityCache(root=args.data_dir)
+    resolver = IdentityResolver(index, cache=cache)
+    report = resolver.resolve_all([e.track for e in events])
+
+    c = report.counts
+    print(
+        f"resolved {c['mbid']}/{report.n_unique} unique tracks to MBID "
+        f"(coverage={report.mbid_coverage:.2f})"
+    )
+    print(f"  levels: mbid={c['mbid']} isrc={c['isrc']} spotify={c['spotify']} name={c['name']}")
+    if report.unresolved:
+        print(f"  unresolved (flagged, not dropped): {len(report.unresolved)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="music-intel", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -47,6 +69,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_analyze.set_defaults(func=_cmd_analyze)
+
+    p_resolve = sub.add_parser("resolve", help="resolve track identity (spotify->ISRC->MBID)")
+    p_resolve.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_resolve.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV (default: $MUSICBRAINZ_ISRC_INDEX)",
+    )
+    p_resolve.set_defaults(func=_cmd_resolve)
     return parser
 
 
