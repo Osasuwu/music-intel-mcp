@@ -44,6 +44,9 @@ cache/
 data/raw/
 data/dumps/
 
+# Per-user store — personal data, never leaves the machine (CONTEXT.md invariant)
+/data/
+
 # Logs
 *.log
 

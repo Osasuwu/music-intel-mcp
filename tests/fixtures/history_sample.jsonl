@@ -1,0 +1,5 @@
+{"track": {"spotify_id": "spotify:track:AAA", "name": "Track One", "artist": "Artist X"}, "played_at": "2025-01-01T08:00:00Z", "source": "ifttt_csv", "context": {"ms_played": 210000, "skipped": false}}
+{"track": {"spotify_id": "spotify:track:AAA", "name": "Track One", "artist": "Artist X"}, "played_at": "2025-01-02T09:15:00Z", "source": "ifttt_csv", "context": {"ms_played": 30000, "skipped": true}}
+{"track": {"isrc": "USABC1234567", "name": "Track Two", "artist": "Artist Y"}, "played_at": "2025-02-15T20:00:00Z", "source": "lastfm", "context": null}
+{"track": {"mbid": "11111111-2222-3333-4444-555555555555", "name": "Track Three", "artist": "Artist Z"}, "played_at": "2025-03-20T23:30:00Z", "source": "lastfm"}
+{"track": {"isrc": "USABC1234567", "name": "Track Two", "artist": "Artist Y"}, "played_at": "2025-03-20T23:34:00Z", "source": "lastfm", "context": {"ms_played": 180000}}

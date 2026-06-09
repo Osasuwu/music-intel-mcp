@@ -38,7 +38,7 @@ Before marking any task complete:
 
 ## Project-specific rules
 
-- **External APIs are rate-limited and rate-cost real money** — cache aggressively (file-based at v0, Supabase later). Tests must not call live APIs; use fixtures or `respx`-style mocks.
+- **External APIs are rate-limited and rate-cost real money** — cache aggressively. Shared track-level metadata → Supabase Postgres (anonymous, 90-day TTL per entry, see CONTEXT.md). Per-user data → local JSON/JSONL files; never to the cloud at V0/V1. Tests must not call live APIs; use fixtures or `respx`-style mocks.
 - **AcousticBrainz / MusicBrainz dumps live OUTSIDE the repo** — `.scratch/` or env-pointed paths. Never commit the dump.
 - **Spotify API scope is constrained** — our app is NOT grandfathered: no audio-features, no related-artists, no recommendations endpoints. ISRC waterfall via MusicBrainz dump is the fallback. Document any new endpoint dependency in `CONTEXT.md`.
 
@@ -46,7 +46,7 @@ Before marking any task complete:
 
 | What | Where |
 |---|---|
-| Domain model | `CONTEXT.md` (currently empty — fill via `/grill`) |
+| Domain model | `CONTEXT.md` |
 | Python package | `src/music_intel_mcp/` |
 | Tests | `tests/` |
 | Workflows | `.github/workflows/` |

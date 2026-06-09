@@ -1,0 +1,239 @@
+{
+  "_comment": "Canonical example of RootProfile v0. Illustrative values — not a real snapshot. Tests assert structure against this shape; see CONTEXT.md and the schema decision in memory.",
+
+  "schema_version": "v0",
+  "model_maturity": "proxy",
+  "snapshot_id": "u-petr/2026-05-13T18:00:00Z",
+  "user_id": "petr",
+
+  "generated_from": {
+    "history_range": ["2024-12-01T00:00:00Z", "2026-05-13T18:00:00Z"],
+    "n_events": 32145,
+    "n_unique_tracks": 20019,
+    "history_span_days": 528,
+    "data_sources": ["ifttt_csv", "lastfm_cache", "musicbrainz_dump", "acousticbrainz_dump"],
+    "coverage_per_category": {
+      "audio": 0.62,
+      "scene": 0.88,
+      "temporal": 1.0
+    }
+  },
+
+  "category_weights": {
+    "audio": 1.0,
+    "temporal": 1.0,
+    "scene": 1.0,
+    "timbre": null,
+    "career_phase": null,
+    "lyrics": null,
+    "structural": null,
+    "context_chain": null
+  },
+
+  "method_params": {
+    "audio": {
+      "algorithm": "HDBSCAN",
+      "min_cluster_size": 50,
+      "min_samples": 10,
+      "feature_set": ["bpm", "energy", "valence", "danceability", "acousticness", "instrumentalness"]
+    },
+    "scene": {
+      "algorithm": "NMF",
+      "K_selected": 5,
+      "K_grid_explored": [3, 5, 8, 13],
+      "coherence_floor": 0.15,
+      "tag_canonicalization": null,
+      "stop_tags_version": "v1"
+    },
+    "temporal": {
+      "temporal_calendar": {
+        "day_parts": {"morning": [6, 12], "day": [12, 18], "evening": [18, 23], "night": [23, 6]},
+        "weekday_kind": {"weekday": [1, 5], "weekend": [6, 7]},
+        "seasons": {"winter": [12, 2], "spring": [3, 5], "summer": [6, 8], "autumn": [9, 11]}
+      },
+      "lift_floor": 1.3,
+      "event_count_floor": 30
+    },
+    "epochs": {
+      "window_days": 60,
+      "step_days": 14,
+      "ks_significance_threshold": 0.01
+    },
+    "validation": {
+      "N_THRESHOLD": 1000,
+      "T_THRESHOLD_DAYS": 180,
+      "confidence_floor": 0.6,
+      "evidence_count_floor": 50,
+      "coverage_floors": {"root": 0.5, "tendency": 0.3, "artifact_suspect": 0.0}
+    }
+  },
+
+  "roots": [
+    {
+      "id": "r-audio-1",
+      "category": "audio",
+      "classification": "root",
+      "structural_descriptor": {
+        "bpm_band": "high",
+        "energy_band": "high",
+        "valence_band": "low",
+        "danceability_band": "mid",
+        "centroid_raw": {"bpm": 168, "energy": 0.81, "valence": 0.28, "danceability": 0.62}
+      },
+      "evidence": {
+        "cluster_size": 4117,
+        "cluster_share": 0.34,
+        "evidence_count": 4117,
+        "sample_tracks": [
+          {"track_id": "spotify:track:EXAMPLE1", "name": "Example A", "artist": "Artist X", "distance_to_centroid": 0.12}
+        ],
+        "coverage": 0.71
+      },
+      "validation_scores": {
+        "confidence": 0.78,
+        "temporal_stability": {"status": "evaluated", "score": 0.83},
+        "coverage_pass": true,
+        "confidence_pass": true
+      },
+      "epoch_presence": {"e-1": 0.45, "e-2": 0.92},
+      "actionability_hint": "amplify: search BPM>160 + valence<0.3 outside listened set; dampen: cap weekly count of this cluster",
+      "curator_prose": null,
+      "caveats": ["Coverage 0.71 — 29% of cluster tracks lack full AcousticBrainz features."]
+    },
+    {
+      "id": "r-temporal-1",
+      "category": "temporal",
+      "classification": "root",
+      "structural_descriptor": {
+        "time_bucket": {"day_part": "evening", "weekday_kind": "weekday", "season": "winter"},
+        "conditioned_root_id": "r-audio-1",
+        "lift": 2.4,
+        "p_root_given_bucket": 0.61,
+        "p_root_overall": 0.25,
+        "n_events_in_bucket": 1872
+      },
+      "evidence": {
+        "cluster_size": 1142,
+        "cluster_share": 0.27,
+        "evidence_count": 1142,
+        "sample_tracks": [],
+        "coverage": 1.0
+      },
+      "validation_scores": {
+        "confidence": 0.71,
+        "temporal_stability": {"status": "evaluated", "score": 0.79},
+        "coverage_pass": true,
+        "confidence_pass": true
+      },
+      "epoch_presence": {"e-1": 0.10, "e-2": 0.88},
+      "actionability_hint": "amplify root r-audio-1 with new candidates during weekday winter evenings",
+      "curator_prose": null,
+      "caveats": []
+    },
+    {
+      "id": "r-scene-1",
+      "category": "scene",
+      "classification": "root",
+      "structural_descriptor": {
+        "top_tags": [
+          {"tag": "japanese", "weight": 0.82},
+          {"tag": "breakcore", "weight": 0.71},
+          {"tag": "female vocal", "weight": 0.55}
+        ],
+        "top_artists": [
+          {"name": "Mili", "count_in_topic": 134},
+          {"name": "Artist Y", "count_in_topic": 41}
+        ],
+        "coherence_score": 0.42,
+        "topic_index_in_K": 2
+      },
+      "evidence": {
+        "cluster_size": 873,
+        "cluster_share": 0.18,
+        "evidence_count": 873,
+        "sample_tracks": [
+          {"track_id": "spotify:track:EXAMPLE2", "name": "Example B", "artist": "Mili", "topic_weight": 0.81}
+        ],
+        "coverage": 0.95
+      },
+      "validation_scores": {
+        "confidence": 0.69,
+        "temporal_stability": {"status": "evaluated", "score": 0.74},
+        "coverage_pass": true,
+        "confidence_pass": true
+      },
+      "epoch_presence": {"e-1": 0.62, "e-2": 0.81},
+      "actionability_hint": "amplify: search for japanese underground / breakcore-adjacent artists outside listened set",
+      "curator_prose": null,
+      "caveats": []
+    }
+  ],
+
+  "tendencies": [
+    {
+      "id": "t-audio-1",
+      "category": "audio",
+      "classification": "tendency",
+      "failed_tests": ["temporal_stability"],
+      "structural_descriptor": {
+        "bpm_band": "mid",
+        "energy_band": "mid",
+        "valence_band": "high",
+        "danceability_band": "high",
+        "centroid_raw": {"bpm": 122, "energy": 0.58, "valence": 0.72, "danceability": 0.78}
+      },
+      "evidence": {
+        "cluster_size": 320,
+        "cluster_share": 0.07,
+        "evidence_count": 320,
+        "sample_tracks": [],
+        "coverage": 0.66
+      },
+      "validation_scores": {
+        "confidence": 0.55,
+        "temporal_stability": {"status": "evaluated", "score": 0.22},
+        "coverage_pass": true,
+        "confidence_pass": false
+      },
+      "epoch_presence": {"e-1": 0.91, "e-2": 0.05},
+      "actionability_hint": "transient — may have been a phase; see epochs[] for context"
+    }
+  ],
+
+  "epochs": [
+    {
+      "id": "e-1",
+      "range": ["2024-12-01T00:00:00Z", "2025-04-21T00:00:00Z"],
+      "n_events": 6210,
+      "change_point_in_significance": 0.003,
+      "dominant_roots": ["r-audio-2", "r-scene-3"]
+    },
+    {
+      "id": "e-2",
+      "range": ["2025-04-21T00:00:00Z", "2026-05-13T18:00:00Z"],
+      "n_events": 25935,
+      "change_point_in_significance": null,
+      "dominant_roots": ["r-audio-1", "r-scene-1"]
+    }
+  ],
+
+  "quality_log": [
+    {
+      "candidate_id": "q-audio-3",
+      "category": "audio",
+      "failed_test": "coverage_floor",
+      "details": {"coverage": 0.21, "floor_artifact": 0.30}
+    },
+    {
+      "candidate_id": "q-scene-2",
+      "category": "scene",
+      "failed_test": "coherence_floor",
+      "details": {"coherence": 0.08, "floor": 0.15, "K": 8, "top_tags": ["chillout", "various", "good"]}
+    }
+  ],
+
+  "analytics": {
+    "novelty_curve": null,
+    "cluster_share_over_time": null
+  }
+}
