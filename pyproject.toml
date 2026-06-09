@@ -57,6 +57,12 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Source roots so isort classifies the package as first-party deterministically
+# across ruff versions (otherwise local/CI can disagree on import ordering).
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["music_intel_mcp"]

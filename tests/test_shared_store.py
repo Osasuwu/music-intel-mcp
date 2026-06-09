@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
+
 from music_intel_mcp.models import TrackRef
 from music_intel_mcp.shared_store import (
     AudioFeatures,
@@ -19,7 +21,6 @@ from music_intel_mcp.shared_store import (
     is_stale,
     pull_and_cache,
 )
-from pydantic import ValidationError
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
