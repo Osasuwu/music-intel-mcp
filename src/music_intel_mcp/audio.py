@@ -231,6 +231,8 @@ class AudioDerivation:
     - ``n_clustered`` — feature vectors fed to HDBSCAN.
     - ``n_noise`` — points HDBSCAN left unclustered (label -1).
     - ``n_clusters`` — clusters found (1:1 with candidates before validation).
+    - ``members`` — candidate id (``r-audio-N``) → its member canonical track
+      ids, for the temporal stage (#65) to condition lift on root membership.
     """
 
     outcome: ValidationOutcome
@@ -238,6 +240,7 @@ class AudioDerivation:
     n_clustered: int
     n_noise: int
     n_clusters: int
+    members: dict[str, list[str]]
 
 
 def derive_audio_roots(
@@ -268,7 +271,7 @@ def derive_audio_roots(
 
     if n_clustered < params.min_cluster_size:
         # Too few points to form even one cluster — everything is noise.
-        return AudioDerivation(ValidationOutcome(), coverage, n_clustered, n_clustered, 0)
+        return AudioDerivation(ValidationOutcome(), coverage, n_clustered, n_clustered, 0, {})
 
     x_raw = np.array(
         [[_feature(r, dim) for dim in cluster_features] for r in clusterable],
@@ -326,10 +329,11 @@ def derive_audio_roots(
         )
         for rank, c in enumerate(built, start=1)
     ]
+    members = {f"r-audio-{rank}": c["member_ids"] for rank, c in enumerate(built, start=1)}
 
     outcome = Validator(validation_params).validate(candidates, dataset_ctx)
     n_noise = int(np.sum(labels == -1))
-    return AudioDerivation(outcome, coverage, n_clustered, n_noise, len(cluster_labels))
+    return AudioDerivation(outcome, coverage, n_clustered, n_noise, len(cluster_labels), members)
 
 
 # --------------------------------------------------------------------------- #
@@ -407,6 +411,7 @@ def _build_cluster(
     return {
         "cluster_size": size,
         "min_id": min(r.track_id for r in member_records),
+        "member_ids": [r.track_id for r in member_records],
         "cluster_share": size / n_clustered,
         "coverage": covered / size,
         "confidence": round(float(probabilities[members].mean()), 6),

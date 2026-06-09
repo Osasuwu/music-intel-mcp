@@ -4,9 +4,12 @@ Loads events -> computes ``generated_from`` -> runs each derivation stage in the
 forced order (audio -> scene -> temporal -> epochs) -> assembles a schema-valid
 ``RootProfile``. Stages are *opt-in by dependency*: the audio stage runs only
 when a shared store **and** an audio feature source are supplied; the scene
-stage when a shared store **and** a tag source are supplied. With no enrichment
-wired, every derived section is empty — a *correct* output under the honest-empty
-invariant, not a failure. The temporal stage lands in #65.
+stage when a shared store **and** a tag source are supplied. The temporal stage
+(#65) runs whenever either upstream stage produced at least one root/tendency to
+condition on — it qualifies those roots by calendar bucket and detects epochs;
+with no upstream members its ordering guard skips it. With no enrichment wired,
+every derived section is empty — a *correct* output under the honest-empty
+invariant, not a failure.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from datetime import UTC, datetime
 
 from .audio import AudioFeatureSource, derive_audio_roots, enrich_audio_features
 from .models import (
+    Epoch,
     GeneratedFrom,
     ListenEvent,
     MethodParams,
@@ -24,6 +28,7 @@ from .models import (
 )
 from .scene import TagSource, derive_scene_roots, enrich_tags
 from .shared_store import SharedStore, TrackMetadataRecord, canonical_track_id
+from .temporal import derive_temporal_roots
 from .validation import DatasetContext, ValidationOutcome
 
 
@@ -118,9 +123,9 @@ def analyze(
     The audio stage (#63) runs when a ``shared_store`` and an ``audio_source``
     are supplied; the scene stage (#64) when a ``shared_store`` and a
     ``tag_source`` are supplied. Each is independent — either, both, or neither
-    may run; unrun categories stay honest-empty (never fabricated).
-    ``generated_from`` counts are always correct. The temporal stage plugs in
-    here in #65.
+    may run; unrun categories stay honest-empty (never fabricated). The temporal
+    stage (#65) then conditions the surviving roots/tendencies on calendar
+    buckets and detects epochs. ``generated_from`` counts are always correct.
     """
     generated_at = generated_at or datetime.now(UTC)
     generated_from = _generated_from(events)
@@ -129,6 +134,10 @@ def analyze(
     params = (method_params or MethodParams()).model_copy(deep=True)
 
     outcome = ValidationOutcome()
+    epochs: list[Epoch] = []
+    # candidate id (r-audio-N / r-scene-N) -> member track ids, for the temporal
+    # stage to condition lift on root membership.
+    members: dict[str, list[str]] = {}
     if events and shared_store is not None and (audio_source is not None or tag_source is not None):
         plays, unique_ids = _group_and_seed(events, shared_store, generated_at)
         ctx = _dataset_ctx(generated_from)
@@ -144,6 +153,7 @@ def analyze(
                 dataset_ctx=ctx,
             )
             _merge(outcome, audio.outcome)
+            members.update(audio.members)
             generated_from.coverage_per_category["audio"] = audio.coverage
 
         if tag_source is not None:
@@ -157,8 +167,28 @@ def analyze(
                 dataset_ctx=ctx,
             )
             _merge(outcome, scene.outcome)
+            members.update(scene.members)
             generated_from.coverage_per_category["scene"] = scene.coverage
             params.scene.K_selected = scene.k_selected
+
+        # Temporal qualifies only roots/tendencies that actually survived
+        # validation — artifact_suspects are not real patterns to condition on.
+        surviving = {item.id for item in (*outcome.roots, *outcome.tendencies)}
+        members = {rid: ids for rid, ids in members.items() if rid in surviving}
+        temporal = derive_temporal_roots(
+            members,
+            plays,
+            params=params.temporal,
+            epoch_params=params.epochs,
+            validation_params=params.validation,
+            dataset_ctx=ctx,
+        )
+        if not temporal.skipped:
+            _merge(outcome, temporal.outcome)
+            epochs = temporal.epochs
+            for item in (*outcome.roots, *outcome.tendencies):
+                if item.id in temporal.epoch_presence:
+                    item.epoch_presence = temporal.epoch_presence[item.id]
 
     return RootProfile(
         snapshot_id=f"{user_id}/{generated_at.isoformat()}",
@@ -167,7 +197,7 @@ def analyze(
         method_params=params,
         roots=outcome.roots,
         tendencies=outcome.tendencies,
-        epochs=[],
+        epochs=epochs,
         quality_log=outcome.quality_log,
     )
 
