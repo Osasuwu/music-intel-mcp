@@ -74,6 +74,7 @@ class ValidationParams(BaseModel):
     N_THRESHOLD: int = 1000
     T_THRESHOLD_DAYS: int = 180
     confidence_floor: float = 0.6
+    temporal_stability_floor: float = 0.5
     evidence_count_floor: int = 50
     coverage_floors: dict[str, float] = Field(
         default_factory=lambda: {"root": 0.5, "tendency": 0.3, "artifact_suspect": 0.0}
