@@ -35,7 +35,10 @@
       "algorithm": "HDBSCAN",
       "min_cluster_size": 50,
       "min_samples": 10,
-      "feature_set": ["bpm", "energy", "valence", "danceability", "acousticness", "instrumentalness"]
+      "feature_set": ["bpm", "energy", "valence", "danceability", "acousticness", "instrumentalness"],
+      "cluster_features": ["bpm", "energy", "valence", "danceability"],
+      "band_cutoffs": {"bpm": [100.0, 140.0], "energy": [0.4, 0.66], "valence": [0.4, 0.66], "danceability": [0.4, 0.66]},
+      "sample_track_count": 5
     },
     "scene": {
       "algorithm": "NMF",

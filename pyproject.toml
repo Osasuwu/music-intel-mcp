@@ -23,6 +23,11 @@ classifiers = [
 dependencies = [
   "python-dotenv>=1.0.1",
   "pydantic>=2.7",
+  # Numeric + clustering backend for the audio root pipeline (#63). HDBSCAN is
+  # locked by decision 01ba9bb7; scikit-learn>=1.3 ships sklearn.cluster.HDBSCAN
+  # (no separate hdbscan package needed, keeps the tree to numpy/scipy).
+  "numpy>=1.26",
+  "scikit-learn>=1.3",
 ]
 
 [project.optional-dependencies]

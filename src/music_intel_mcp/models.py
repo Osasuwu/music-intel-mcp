@@ -81,12 +81,25 @@ class ValidationParams(BaseModel):
     )
 
 
+def _default_band_cutoffs() -> dict[str, tuple[float, float]]:
+    # (low|mid, mid|high) cut points per clustered dim. v < lo -> low,
+    # lo <= v < hi -> mid, v >= hi -> high. Placeholders; calibrated in #66.
+    return {
+        "bpm": (100.0, 140.0),
+        "energy": (0.4, 0.66),
+        "valence": (0.4, 0.66),
+        "danceability": (0.4, 0.66),
+    }
+
+
 class AudioParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     algorithm: str = "HDBSCAN"
     min_cluster_size: int = 50
     min_samples: int = 10
+    # The full enrichment target — coverage = fraction of a cluster's tracks
+    # carrying *every* one of these (drives evidence_coverage downgrade).
     feature_set: list[str] = Field(
         default_factory=lambda: [
             "bpm",
@@ -97,6 +110,15 @@ class AudioParams(BaseModel):
             "instrumentalness",
         ]
     )
+    # The dims that actually define the distance metric, the bands, and the raw
+    # centroid. A track must carry all of these to enter clustering. Subset of
+    # feature_set: the 2 it omits (acousticness/instrumentalness) are coverage
+    # signal in V0, not yet cluster axes.
+    cluster_features: list[str] = Field(
+        default_factory=lambda: ["bpm", "energy", "valence", "danceability"]
+    )
+    band_cutoffs: dict[str, tuple[float, float]] = Field(default_factory=_default_band_cutoffs)
+    sample_track_count: int = 5
 
 
 class SceneParams(BaseModel):
