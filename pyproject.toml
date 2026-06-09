@@ -31,6 +31,11 @@ dev = [
   "ruff>=0.3",
   "pre-commit>=3.6",
 ]
+# Production shared-metadata store. Network-only (SupabaseSharedStore); CI uses
+# the in-memory store, so this stays out of the default/dev install.
+supabase = [
+  "supabase>=2.0",
+]
 
 [project.scripts]
 music-intel = "music_intel_mcp.cli:main"
@@ -52,6 +57,12 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Source roots so isort classifies the package as first-party deterministically
+# across ruff versions (otherwise local/CI can disagree on import ordering).
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["music_intel_mcp"]
