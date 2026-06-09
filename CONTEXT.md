@@ -145,6 +145,16 @@ The **temporal** category's deep module — `members → bucketize → lift → 
 
 Candidates are handed to the #62 `Validator` — the temporal pipeline never classifies itself; lift rejections are prepended to the validator's own `quality_log[]`. `_history_midpoint` is imported from `audio.py`.
 
+## History ingestion (V0)
+
+The owner's listening history arrives as a directory of **IFTTT "Spotify → spreadsheet" `.xlsx` exports**. `src/music_intel_mcp/ingest.py` is the adapter; `music-intel import-ifttt --from <dir> [--data-dir ...]` merges it into the per-user `history.jsonl`. Issue #76. This is the only source-format-specific code — everything downstream sees source-agnostic `ListenEvent`s (`source="ifttt"`).
+
+- **Workbook shape.** No header row. Columns, in order: `(played_at_string, track_name, artist_name, spotify_track_id, spotify_url)`. The id is **bare** (`56O4Wl...`, no `spotify:track:` prefix) → maps straight onto `TrackRef.spotify_id`, canonical id `spotify:<id>`. The url (col 4) is ignored.
+- **Timestamp form.** `"December 3, 2024 at 12:31AM"` — parsed by `parse_ifttt_timestamp` (`%B %d, %Y at %I:%M%p`, padding-lenient). Minute resolution; no seconds.
+- **Row tolerance.** Fully-blank/trailing rows, rows with no identity (no spotify id *and* no name), and rows whose timestamp does not parse are skipped, never fatal — counts surface in the `IngestStats` the CLI prints. The real export had **1 date-only cell (`"June 7, 2026"`, no time-of-day) out of 34,676 rows**: skipped, never coerced to a fabricated clock time. Export *drift* shows as a large `skipped_unparseable` count (loud) rather than aborting on the first odd row. A row with no spotify id keeps its name/artist fallback identity.
+- **Idempotent.** `load_ifttt_dir` concatenates all workbooks, dedups by `(canonical_track_id, played_at)` keeping first, sorts ascending by `played_at`. `import-ifttt` merges existing-history-first (so events from other sources survive) then dedups → re-running over the same dir yields the same file. `UserStore.replace_history` rewrites the file from scratch (vs `append_events`).
+- **⚠ TIMEZONE CAVEAT (flagged, not locked).** IFTTT records the trigger time as a **zone-less local wall-clock** string. V0 coerces it to UTC, which is *wrong by the local UTC offset* and will skew temporal day-part/season buckets once temporal roots run on real IFTTT data. It does **not** affect the honest-empty V0 run (no enrichment → no temporal roots). Must be resolved (carry/normalise the zone) before any temporal root derived from this source is trusted — see Open question 14.
+
 ## Invariants
 
 - **Transparency.** Every insight, score, and recommendation carries its evidence chain. No opaque numbers. If we can't explain it, we don't ship it.
@@ -193,3 +203,4 @@ Decisions live in queryable memory (`record_decision` episodes), not duplicated 
 11. **Validation thresholds.** Concrete defaults for `N_THRESHOLD` (tracks), `T_THRESHOLD` (history span), `cluster_share` floor, `evidence_count` floor, `evidence_coverage` floors for `root`/`tendency`/`artifact_suspect`. Will be calibrated on owner's real data in the first analysis run.
 12. ~~Root unit / granularity.~~ → resolved across all V0 categories. `audio`: 1:1 HDBSCAN cluster. `temporal`: 1:1 `(time_bucket, conditioned_root)` pair. `scene`: 1:1 NMF topic that passed coherence floor.
 13. **V1 feedback channel.** F (user feedback on tendencies) requires *some* interface — CLI prompt, simple HTTP form, MCP tool. Choice deferred to V1 grill.
+14. **IFTTT timestamp timezone.** IFTTT exports a zone-less local wall-clock string (`"December 3, 2024 at 12:31AM"`); V0 (`ingest.py`, #76) coerces it to UTC. Harmless for the honest-empty run (no temporal roots without enrichment), but wrong by the local offset → skews `day_part`/`season` buckets once temporal roots derive on real IFTTT data. Open: pin the export's source zone (Europe/* for the owner) and normalise at ingest, or carry a per-event zone on `ListenEvent`. Must resolve before trusting any temporal root from this source.

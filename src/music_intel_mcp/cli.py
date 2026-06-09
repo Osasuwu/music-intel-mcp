@@ -1,12 +1,15 @@
-"""CLI surface. V0 exposes ``analyze`` and ``resolve``.
+"""CLI surface. V0 exposes ``analyze``, ``resolve``, and ``import-ifttt``.
 
+    music-intel import-ifttt --from <dir> [--data-dir ./data]
     music-intel analyze --user-id petr [--data-dir ./data]
     music-intel resolve [--data-dir ./data] [--mb-index PATH]
 
-``analyze`` loads the per-user history, runs the derivation engine, writes a
-RootProfile snapshot, and prints the path + a one-line summary. ``resolve``
-walks the history through the spotify_id -> ISRC -> MBID identity waterfall and
-reports resolution coverage (caching resolved identities for re-runs).
+``import-ifttt`` merges a directory of IFTTT Spotify ``.xlsx`` exports into the
+per-user ``history.jsonl`` (dedup + idempotent re-import). ``analyze`` loads that
+history, runs the derivation engine, writes a RootProfile snapshot, and prints
+the path + a one-line summary. ``resolve`` walks the history through the
+spotify_id -> ISRC -> MBID identity waterfall and reports resolution coverage
+(caching resolved identities for re-runs).
 """
 
 from __future__ import annotations
@@ -16,7 +19,33 @@ from collections.abc import Sequence
 
 from .analyzer import analyze
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
+from .ingest import IngestStats, dedup_events, load_ifttt_dir
 from .store import UserStore
+
+
+def _cmd_import_ifttt(args: argparse.Namespace) -> int:
+    store = UserStore(root=args.data_dir)
+    before = store.load_history()
+    stats = IngestStats()
+    imported = load_ifttt_dir(args.source, stats=stats)
+    # Merge existing-first so events from other sources survive, then dedup so a
+    # re-import over the same dir is idempotent.
+    merged = dedup_events([*before, *imported])
+    store.replace_history(merged)
+
+    added = len(merged) - len(before)
+    print(f"imported {len(imported)} IFTTT plays from {args.source}")
+    print(f"  history.jsonl: {len(before)} -> {len(merged)} events (+{added} new after dedup)")
+    if stats.total_skipped:
+        # Surfaced, never silent: a large unparseable count signals export drift.
+        print(
+            f"  skipped {stats.total_skipped} rows "
+            f"(empty={stats.skipped_empty} no-identity={stats.skipped_no_identity} "
+            f"unparseable-timestamp={stats.skipped_unparseable})"
+        )
+        if stats.unparseable_samples:
+            print(f"    unparseable e.g.: {stats.unparseable_samples}")
+    return 0
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -82,6 +111,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="MusicBrainz ISRC->MBID index TSV (default: $MUSICBRAINZ_ISRC_INDEX)",
     )
     p_resolve.set_defaults(func=_cmd_resolve)
+
+    p_import = sub.add_parser("import-ifttt", help="import IFTTT .xlsx history exports")
+    p_import.add_argument(
+        "--from",
+        dest="source",
+        required=True,
+        help="directory of IFTTT Spotify_data*.xlsx exports",
+    )
+    p_import.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_import.set_defaults(func=_cmd_import_ifttt)
     return parser
 
 

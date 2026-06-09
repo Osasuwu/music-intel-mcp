@@ -51,3 +51,25 @@ def test_env_var_sets_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSIC_INTEL_DATA_DIR", str(tmp_path / "envdata"))
     store = UserStore()
     assert store.root == tmp_path / "envdata"
+
+
+def test_replace_history_overwrites_not_appends(tmp_path):
+    from datetime import UTC, datetime
+
+    from music_intel_mcp.models import ListenEvent, TrackRef
+
+    store = UserStore(root=tmp_path)
+    e1 = ListenEvent(
+        track=TrackRef(spotify_id="A", name="a", artist="x"),
+        played_at=datetime(2025, 1, 1, tzinfo=UTC),
+        source="ifttt",
+    )
+    e2 = ListenEvent(
+        track=TrackRef(spotify_id="B", name="b", artist="y"),
+        played_at=datetime(2025, 2, 1, tzinfo=UTC),
+        source="ifttt",
+    )
+    store.append_events([e1])
+    store.replace_history([e2])  # replaces, does not append
+    reloaded = store.load_history()
+    assert reloaded == [e2]
