@@ -63,6 +63,7 @@
       "N_THRESHOLD": 1000,
       "T_THRESHOLD_DAYS": 180,
       "confidence_floor": 0.6,
+      "temporal_stability_floor": 0.5,
       "evidence_count_floor": 50,
       "coverage_floors": {"root": 0.5, "tendency": 0.3, "artifact_suspect": 0.0}
     }
