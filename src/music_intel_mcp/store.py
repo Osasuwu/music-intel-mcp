@@ -68,6 +68,15 @@ class UserStore:
             for event in events:
                 fh.write(event.model_dump_json() + "\n")
 
+    def replace_history(self, events: list[ListenEvent]) -> None:
+        """Rewrite ``history.jsonl`` from scratch (overwrite, not append).
+        Used by idempotent importers that merge+dedup, then write the full
+        history back so re-running the same source yields the same file."""
+        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.history_path.open("w", encoding="utf-8") as fh:
+            for event in events:
+                fh.write(event.model_dump_json() + "\n")
+
     # --- profiles -------------------------------------------------------- #
 
     def write_profile(self, profile: RootProfile) -> Path:

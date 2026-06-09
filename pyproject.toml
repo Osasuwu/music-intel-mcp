@@ -33,6 +33,9 @@ dependencies = [
   # imports scipy.stats.ks_2samp directly (exact p-values beat re-deriving the
   # Kolmogorov distribution by hand — decision 00f7e1eb).
   "scipy>=1.11",
+  # IFTTT history arrives as .xlsx workbooks (#76); openpyxl is the reader for
+  # the import-ifttt adapter. Pure-Python, small tree (et-xmlfile only).
+  "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
