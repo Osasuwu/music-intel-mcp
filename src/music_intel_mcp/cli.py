@@ -28,6 +28,8 @@ import argparse
 import os
 from collections.abc import Mapping, Sequence
 
+from dotenv import find_dotenv, load_dotenv
+
 from .analyzer import analyze
 from .audio import AcousticBrainzDump, AudioFeatureSource
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
@@ -247,6 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Populate os.environ from a gitignored .env (the documented credential
+    # mechanism: copy .env.example -> .env, fill in the keys). Anchored on the
+    # invocation directory (usecwd=True) so it works both from a source checkout
+    # and an installed wheel; host env wins (override=False) and a missing .env
+    # is a silent no-op. This is the single load point — every subcommand reads
+    # its credentials through os.environ downstream.
+    load_dotenv(find_dotenv(usecwd=True), override=False)
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

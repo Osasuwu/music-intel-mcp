@@ -238,3 +238,35 @@ def test_cli_analyze_with_audio_no_dump_notes_zero_coverage(
     out = capsys.readouterr().out
     assert "audio=0.00" in out
     assert "note: audio coverage 0" in out
+
+
+def test_cli_main_loads_dotenv_credentials(tmp_path, capsys, monkeypatch):
+    """``main`` loads a gitignored ``.env`` so the documented unblock mechanism
+    works: a ``LASTFM_API_KEY`` present only in ``.env`` (not the host env)
+    clears the ``--with-scene`` fail-fast gate instead of exiting 2.
+
+    This test exercises the *real* loader, re-pointing ``cli.load_dotenv`` back
+    over the hermetic autouse stub."""
+    from dotenv import load_dotenv as real_load_dotenv
+
+    monkeypatch.setattr(cli, "load_dotenv", real_load_dotenv)
+    monkeypatch.delenv("LASTFM_API_KEY", raising=False)  # only .env provides it
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("LASTFM_API_KEY=x\n", encoding="utf-8")
+    # offline scene source so the gate-pass doesn't reach live Last.fm
+    monkeypatch.setattr(cli, "LastfmTagSource", lambda: InMemoryTagSource({}))
+
+    rc = main(
+        [
+            "analyze",
+            "--user-id",
+            "petr",
+            "--data-dir",
+            str(tmp_path),
+            "--with-scene",
+            "--shared-store",
+            "memory",
+        ]
+    )
+    assert rc == 0  # gate cleared: the key crossed from .env into os.environ
+    assert "LASTFM_API_KEY" not in capsys.readouterr().out  # no fail-fast error
