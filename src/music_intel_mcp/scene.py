@@ -254,6 +254,8 @@ class SceneDerivation:
     - ``n_tagged`` — docs that entered NMF (had ≥1 non-stop tag).
     - ``k_selected`` — the chosen K, or ``None`` on honest-empty.
     - ``k_coherences`` — mean coherence per evaluated K (transparency).
+    - ``members`` — candidate id (``r-scene-N``) → its member canonical track
+      ids, for the temporal stage (#65) to condition lift on root membership.
     """
 
     outcome: ValidationOutcome
@@ -261,6 +263,7 @@ class SceneDerivation:
     n_tagged: int
     k_selected: int | None
     k_coherences: dict[int, float]
+    members: dict[str, list[str]]
 
 
 def derive_scene_roots(
@@ -296,7 +299,7 @@ def derive_scene_roots(
 
     valid_ks = [k for k in sorted(set(params.K_grid_explored)) if 1 <= k <= min(n_docs, n_tags)]
     if not valid_ks:
-        return SceneDerivation(ValidationOutcome(), coverage, n_tagged, None, {})
+        return SceneDerivation(ValidationOutcome(), coverage, n_tagged, None, {}, {})
 
     tag_index = {t: j for j, t in enumerate(vocab)}
     x = np.zeros((n_docs, n_tags), dtype=float)
@@ -327,7 +330,7 @@ def derive_scene_roots(
 
     passing = [k for k in valid_ks if fits[k].mean_coherence >= floor]
     if not passing:
-        return SceneDerivation(ValidationOutcome(), coverage, n_tagged, None, k_coherences)
+        return SceneDerivation(ValidationOutcome(), coverage, n_tagged, None, k_coherences, {})
 
     # Highest mean coherence wins; ties resolve to the smaller (simpler) K.
     k_selected = max(passing, key=lambda k: (fits[k].mean_coherence, -k))
@@ -375,11 +378,12 @@ def derive_scene_roots(
         )
         for rank, c in enumerate(built, start=1)
     ]
+    members = {f"r-scene-{rank}": c["member_ids"] for rank, c in enumerate(built, start=1)}
 
     outcome = Validator(validation_params).validate(candidates, dataset_ctx)
     # Coherence rejections precede the validator's own rejections in the log.
     outcome.quality_log = rejections + outcome.quality_log
-    return SceneDerivation(outcome, coverage, n_tagged, k_selected, k_coherences)
+    return SceneDerivation(outcome, coverage, n_tagged, k_selected, k_coherences, members)
 
 
 # --------------------------------------------------------------------------- #
@@ -509,6 +513,7 @@ def _build_scene_cluster(
     return {
         "cluster_size": size,
         "min_id": min(member_ids) if member_ids else "",
+        "member_ids": member_ids,
         "cluster_share": size / n_docs,
         "coverage": coverage,
         "confidence": confidence,

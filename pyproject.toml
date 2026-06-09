@@ -28,6 +28,11 @@ dependencies = [
   # (no separate hdbscan package needed, keeps the tree to numpy/scipy).
   "numpy>=1.26",
   "scikit-learn>=1.3",
+  # KS-test for sliding-window epoch detection (#65). Already pulled in
+  # transitively by scikit-learn; declared explicitly because temporal.py
+  # imports scipy.stats.ks_2samp directly (exact p-values beat re-deriving the
+  # Kolmogorov distribution by hand — decision 00f7e1eb).
+  "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
