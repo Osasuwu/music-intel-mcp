@@ -3,7 +3,8 @@
     music-intel import-ifttt --from <dir> [--data-dir ./data]
     music-intel analyze --user-id petr [--data-dir ./data]
                         [--with-audio] [--with-scene]
-                        [--ab-index PATH] [--shared-store supabase|memory]
+                        [--ab-index PATH] [--shared-store local|supabase|memory]
+                        [--shared-store-path PATH]
     music-intel resolve [--data-dir ./data] [--mb-index PATH]
 
 ``import-ifttt`` merges a directory of IFTTT Spotify ``.xlsx`` exports into the
@@ -35,7 +36,12 @@ from .audio import AcousticBrainzDump, AudioFeatureSource
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
 from .scene import LastfmTagSource, TagSource
-from .shared_store import InMemorySharedStore, SharedStore, SupabaseSharedStore
+from .shared_store import (
+    InMemorySharedStore,
+    LocalSharedStore,
+    SharedStore,
+    SupabaseSharedStore,
+)
 from .store import UserStore
 
 # Canonical env-var names this CLI checks for *presence* (never value) before an
@@ -47,13 +53,20 @@ _SUPABASE_URL_ENV = "SUPABASE_URL"
 _SUPABASE_KEY_ENV = "SUPABASE_KEY"
 
 
-def _build_shared_store(kind: str) -> SharedStore:
-    """Construct the requested :class:`SharedStore`. ``memory`` is an ephemeral
-    single-run store (no persistence, no creds); ``supabase`` is the production
-    shared cache (lazy client — no network until first read/write)."""
+def _build_shared_store(kind: str, path: str | None = None) -> SharedStore:
+    """Construct the requested :class:`SharedStore`.
+
+    - ``local`` (V0 default) — file-backed persistent cache at ``path`` (default
+      ``<data root>/shared_cache.jsonl``); no creds, cross-run caching.
+    - ``memory`` — ephemeral single-run store (no persistence, no creds).
+    - ``supabase`` — the multi-user cloud cache (lazy client; no network until
+      first read/write). Deferred to V2+ (decision 813de040).
+    """
     if kind == "memory":
         return InMemorySharedStore()
-    return SupabaseSharedStore()
+    if kind == "supabase":
+        return SupabaseSharedStore()
+    return LocalSharedStore(path)
 
 
 def plan_enrichment(
@@ -86,7 +99,7 @@ def plan_enrichment(
     if errors:
         return None, None, None, errors
 
-    shared_store = _build_shared_store(args.shared_store)
+    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
     audio_source = AcousticBrainzDump(path=args.ab_index) if args.with_audio else None
     tag_source = LastfmTagSource() if args.with_scene else None
     return shared_store, audio_source, tag_source, errors
@@ -212,10 +225,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_analyze.add_argument(
         "--shared-store",
-        choices=["supabase", "memory"],
-        default="supabase",
-        help="metadata store for enrichment: 'supabase' (shared cache) or "
-        "'memory' (ephemeral, single-run). Default: supabase.",
+        choices=["local", "supabase", "memory"],
+        default="local",
+        help="metadata store for enrichment: 'local' (persistent file cache, no "
+        "creds), 'supabase' (multi-user cloud cache, V2+), or 'memory' "
+        "(ephemeral, single-run). Default: local.",
+    )
+    p_analyze.add_argument(
+        "--shared-store-path",
+        default=None,
+        help="path to the local shared-store JSONL "
+        "(only with --shared-store local; default: <data root>/shared_cache.jsonl)",
     )
     p_analyze.set_defaults(func=_cmd_analyze)
 

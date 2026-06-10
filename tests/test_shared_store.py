@@ -16,6 +16,7 @@ from music_intel_mcp.shared_store import (
     _WRITE_CHUNK,
     AudioFeatures,
     InMemorySharedStore,
+    LocalSharedStore,
     MetadataCache,
     SupabaseSharedStore,
     TrackMetadataRecord,
@@ -92,6 +93,63 @@ def test_in_memory_store_roundtrip_and_spy():
     # returned copies are isolated from the store's internal rows
     got["spotify:A"].name = "mutated"
     assert store.get_tracks(["spotify:A"])["spotify:A"].name == "Song"
+
+
+# --- LocalSharedStore (file-backed, V0 default) ---------------------------- #
+
+
+def test_local_store_persists_across_instances(tmp_path):
+    """The defining behavior: facts written by one instance are read back by a
+    fresh instance over the same file — the cross-run cache that lets a re-run
+    skip the network."""
+    path = tmp_path / "shared_cache.jsonl"
+    LocalSharedStore(path).upsert_tracks([_record("spotify:A"), _record("spotify:B")])
+
+    got = LocalSharedStore(path).get_tracks(["spotify:A", "spotify:B", "spotify:MISSING"])
+    assert set(got) == {"spotify:A", "spotify:B"}
+    assert got["spotify:A"].tags[0].tag == "dream pop"
+
+
+def test_local_store_upsert_is_last_wins_and_incremental(tmp_path):
+    """A second sweep adds new ids and overwrites existing ones in place — prior
+    rows survive (incremental), the newer copy wins (idempotent re-enrichment)."""
+    path = tmp_path / "shared_cache.jsonl"
+    LocalSharedStore(path).upsert_tracks([_record("spotify:A", name="Old")])
+    LocalSharedStore(path).upsert_tracks([_record("spotify:A", name="New"), _record("spotify:B")])
+
+    got = LocalSharedStore(path).get_tracks(["spotify:A", "spotify:B"])
+    assert got["spotify:A"].name == "New"
+    assert got["spotify:B"].name == "Song"
+
+
+def test_local_store_missing_file_is_empty(tmp_path):
+    assert LocalSharedStore(tmp_path / "nope.jsonl").get_tracks(["spotify:A"]) == {}
+
+
+def test_local_store_empty_upsert_writes_nothing(tmp_path):
+    path = tmp_path / "shared_cache.jsonl"
+    LocalSharedStore(path).upsert_tracks([])
+    assert not path.exists()
+
+
+def test_local_store_returns_isolated_copies(tmp_path):
+    path = tmp_path / "shared_cache.jsonl"
+    store = LocalSharedStore(path)
+    store.upsert_tracks([_record("spotify:A")])
+    store.get_tracks(["spotify:A"])["spotify:A"].name = "mutated"
+    assert store.get_tracks(["spotify:A"])["spotify:A"].name == "Song"
+
+
+def test_local_store_roundtrips_audio_and_fallback_id(tmp_path):
+    """A name/artist fallback id (contains '\\x1f' + spaces) and audio_features
+    survive the JSONL round-trip intact."""
+    path = tmp_path / "shared_cache.jsonl"
+    tid = "name:some song\x1fsome artist"
+    LocalSharedStore(path).upsert_tracks([_record(tid)])
+
+    got = LocalSharedStore(path).get_tracks([tid])
+    assert got[tid].track_id == tid
+    assert got[tid].audio_features.bpm == 120.0
 
 
 # --- MetadataCache --------------------------------------------------------- #

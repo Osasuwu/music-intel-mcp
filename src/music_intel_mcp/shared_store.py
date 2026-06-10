@@ -198,6 +198,59 @@ class InMemorySharedStore:
             self._rows[record.track_id] = record.model_copy(deep=True)
 
 
+class LocalSharedStore:
+    """File-backed :class:`SharedStore` — the persistent local analogue of
+    :class:`InMemorySharedStore` and the **V0 default** (decision 813de040).
+
+    Records live as one compact JSON object per line in a JSONL file (default
+    ``<data root>/shared_cache.jsonl``, gitignored). The whole file is loaded
+    into memory on construction (last line wins per ``track_id``) and rewritten
+    *atomically* (temp-file + ``os.replace``) on every :meth:`upsert_tracks`. So
+    a long enrichment sweep that writes per-chunk is fully resumable: a re-run
+    sees prior facts as cache hits and skips the network — the same cross-run
+    caching the cloud store gives, minus the cloud.
+
+    Why local at V0: the shared store's only edge over a local file is
+    *cross-user* cache sharing, and V0/V1 are single-user — so a local file is
+    the YAGNI-correct choice. Swapping in :class:`SupabaseSharedStore` is a
+    flag-flip (``--shared-store supabase``) when a second user/device lands (V2+).
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = (
+            Path(path) if path is not None else resolve_data_root(None) / "shared_cache.jsonl"
+        )
+        self._rows: dict[str, TrackMetadataRecord] = self._load()
+
+    def _load(self) -> dict[str, TrackMetadataRecord]:
+        rows: dict[str, TrackMetadataRecord] = {}
+        if not self.path.exists():
+            return rows
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                record = TrackMetadataRecord.model_validate_json(line)
+                rows[record.track_id] = record  # later line wins on duplicate id
+        return rows
+
+    def get_tracks(self, track_ids: Sequence[str]) -> dict[str, TrackMetadataRecord]:
+        return {
+            tid: self._rows[tid].model_copy(deep=True) for tid in track_ids if tid in self._rows
+        }
+
+    def upsert_tracks(self, records: Sequence[TrackMetadataRecord]) -> None:
+        if not records:
+            return
+        for record in records:
+            self._rows[record.track_id] = record.model_copy(deep=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(
+            "".join(r.model_dump_json() + "\n" for r in self._rows.values()),
+            encoding="utf-8",
+        )
+        os.replace(tmp, self.path)  # atomic on same volume — a crash never corrupts the cache
+
+
 class SupabaseSharedStore:  # pragma: no cover - network-only, never run in CI
     """Production :class:`SharedStore` over Supabase Postgres.
 

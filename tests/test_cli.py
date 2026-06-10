@@ -11,7 +11,12 @@ from music_intel_mcp.audio import AcousticBrainzDump
 from music_intel_mcp.cli import build_parser, main, plan_enrichment
 from music_intel_mcp.models import ListenEvent, TrackRef
 from music_intel_mcp.scene import InMemoryTagSource, LastfmTagSource
-from music_intel_mcp.shared_store import InMemorySharedStore, SupabaseSharedStore, TrackTag
+from music_intel_mcp.shared_store import (
+    InMemorySharedStore,
+    LocalSharedStore,
+    SupabaseSharedStore,
+    TrackTag,
+)
 from music_intel_mcp.store import UserStore
 
 FIXTURE_INDEX = Path(__file__).parent / "fixtures" / "isrc_mbid_index.tsv"
@@ -110,15 +115,26 @@ def test_plan_enrichment_audio_constructs_dump_with_ab_index(tmp_path):
     assert tag is None
 
 
+def test_plan_enrichment_default_store_is_local(tmp_path):
+    # V0 default (decision 813de040): file-backed local store, no creds required.
+    args = _analyze_args("--with-audio", "--shared-store-path", str(tmp_path / "sc.jsonl"))
+    assert args.shared_store == "local"
+    store, audio, tag, errors = plan_enrichment(args, {})  # empty env — no creds needed
+    assert errors == []
+    assert isinstance(store, LocalSharedStore)
+    assert store.path == tmp_path / "sc.jsonl"
+    assert isinstance(audio, AcousticBrainzDump)
+
+
 def test_plan_enrichment_supabase_requires_creds():
-    # default --shared-store is supabase
-    store, audio, tag, errors = plan_enrichment(_analyze_args("--with-audio"), {})
+    args = _analyze_args("--with-audio", "--shared-store", "supabase")
+    store, audio, tag, errors = plan_enrichment(args, {})
     assert store is None
     assert any("SUPABASE_URL" in e for e in errors)
 
 
 def test_plan_enrichment_supabase_with_creds_ok():
-    args = _analyze_args("--with-audio")
+    args = _analyze_args("--with-audio", "--shared-store", "supabase")
     env = {"SUPABASE_URL": "u", "SUPABASE_KEY": "k"}
     store, audio, tag, errors = plan_enrichment(args, env)
     assert errors == []
@@ -127,8 +143,9 @@ def test_plan_enrichment_supabase_with_creds_ok():
 
 
 def test_plan_enrichment_reports_every_missing_credential():
-    # scene + default supabase, empty env -> both the supabase and lastfm checks fire
-    store, audio, tag, errors = plan_enrichment(_analyze_args("--with-scene"), {})
+    # scene + supabase, empty env -> both the supabase and lastfm checks fire
+    args = _analyze_args("--with-scene", "--shared-store", "supabase")
+    store, audio, tag, errors = plan_enrichment(args, {})
     assert store is None
     assert len(errors) == 2
 
@@ -167,7 +184,18 @@ def test_cli_analyze_supabase_without_creds_fails_fast(
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_KEY", raising=False)
     shutil.copy(history_sample_path, tmp_path / "history.jsonl")
-    rc = main(["analyze", "--user-id", "petr", "--data-dir", str(tmp_path), "--with-audio"])
+    rc = main(
+        [
+            "analyze",
+            "--user-id",
+            "petr",
+            "--data-dir",
+            str(tmp_path),
+            "--with-audio",
+            "--shared-store",
+            "supabase",
+        ]
+    )
     assert rc == 2
     assert "SUPABASE_URL" in capsys.readouterr().out
     assert UserStore(root=tmp_path).latest_profile() is None
