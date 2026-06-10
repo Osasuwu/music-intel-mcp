@@ -41,6 +41,22 @@ DEFAULT_TTL_DAYS = 90
 _SUPABASE_URL_ENV = "SUPABASE_URL"
 _SUPABASE_KEY_ENV = "SUPABASE_KEY"
 
+# PostgREST inlines an ``in.()`` filter into the URL query string, so a bulk read
+# of N ids becomes one URL holding all N — past httpx's 65536-char limit on a
+# realistic library (tens of thousands of tracks). Split bulk reads into id
+# chunks below that ceiling; writes (POST body, no URL limit) chunk only to keep
+# request bodies and the per-row work bounded. Both are *internal* to the store —
+# the caller still issues one logical ``get_tracks``/``upsert_tracks``, so the
+# pull-and-cache no-round-trip invariant (caller-level, not HTTP-level) holds.
+_READ_CHUNK = 100
+_WRITE_CHUNK = 500
+
+
+def _chunked(seq: Sequence, size: int):
+    """Yield ``seq`` in contiguous chunks of at most ``size`` (size ≥ 1)."""
+    for start in range(0, len(seq), size):
+        yield seq[start : start + size]
+
 
 # --------------------------------------------------------------------------- #
 # Canonical track identity
@@ -220,9 +236,17 @@ class SupabaseSharedStore:  # pragma: no cover - network-only, never run in CI
         if not ids:
             return {}
         client = self.client
-        tracks = client.table("tracks").select("*").in_("id", ids).execute().data
-        feats = client.table("audio_features").select("*").in_("track_id", ids).execute().data
-        tags = client.table("tags").select("*").in_("track_id", ids).execute().data
+        tracks: list[dict] = []
+        feats: list[dict] = []
+        tags: list[dict] = []
+        # One ``.in_()`` per id-chunk per table (chunk keeps each URL under the
+        # httpx limit); rows accumulate across chunks before assembly.
+        for chunk in _chunked(ids, _READ_CHUNK):
+            tracks.extend(client.table("tracks").select("*").in_("id", chunk).execute().data)
+            feats.extend(
+                client.table("audio_features").select("*").in_("track_id", chunk).execute().data
+            )
+            tags.extend(client.table("tags").select("*").in_("track_id", chunk).execute().data)
 
         feat_by_id = {f["track_id"]: f for f in feats}
         tags_by_id: dict[str, list[dict]] = {}
@@ -253,34 +277,34 @@ class SupabaseSharedStore:  # pragma: no cover - network-only, never run in CI
         if not records:
             return
         client = self.client
-        client.table("tracks").upsert(
-            [
-                {
-                    "id": r.track_id,
-                    "spotify_id": r.spotify_id,
-                    "isrc": r.isrc,
-                    "mbid": r.mbid,
-                    "name": r.name,
-                    "artist": r.artist,
-                    "fetched_at": r.fetched_at.isoformat(),
-                }
-                for r in records
-            ]
-        ).execute()
+        track_rows = [
+            {
+                "id": r.track_id,
+                "spotify_id": r.spotify_id,
+                "isrc": r.isrc,
+                "mbid": r.mbid,
+                "name": r.name,
+                "artist": r.artist,
+                "fetched_at": r.fetched_at.isoformat(),
+            }
+            for r in records
+        ]
+        for chunk in _chunked(track_rows, _WRITE_CHUNK):
+            client.table("tracks").upsert(chunk).execute()
         feat_rows = [
             {"track_id": r.track_id, **_audio_cols(r.audio_features.model_dump())}
             for r in records
             if r.audio_features is not None
         ]
-        if feat_rows:
-            client.table("audio_features").upsert(feat_rows).execute()
+        for chunk in _chunked(feat_rows, _WRITE_CHUNK):
+            client.table("audio_features").upsert(chunk).execute()
         tag_rows = [
             {"track_id": r.track_id, "tag": t.tag, "weight": t.weight, "source": t.source}
             for r in records
             for t in r.tags
         ]
-        if tag_rows:
-            client.table("tags").upsert(tag_rows, on_conflict="track_id,tag,source").execute()
+        for chunk in _chunked(tag_rows, _WRITE_CHUNK):
+            client.table("tags").upsert(chunk, on_conflict="track_id,tag,source").execute()
 
 
 def _audio_cols(data: dict) -> dict:  # pragma: no cover - used only by Supabase path
