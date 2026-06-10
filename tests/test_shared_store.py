@@ -12,11 +12,15 @@ from pydantic import ValidationError
 
 from music_intel_mcp.models import TrackRef
 from music_intel_mcp.shared_store import (
+    _READ_CHUNK,
+    _WRITE_CHUNK,
     AudioFeatures,
     InMemorySharedStore,
     MetadataCache,
+    SupabaseSharedStore,
     TrackMetadataRecord,
     TrackTag,
+    _chunked,
     canonical_track_id,
     is_stale,
     pull_and_cache,
@@ -200,3 +204,97 @@ def test_pull_store_entry_past_ttl_flagged_stale(tmp_path):
     assert result.stale == ["spotify:A"]
     assert result.pulled == []
     assert "spotify:A" in result.records  # still usable for partial analysis
+
+
+# --- SupabaseSharedStore bulk chunking (#83) ------------------------------- #
+
+
+def test_chunked_helper_boundaries():
+    assert list(_chunked(list(range(5)), 2)) == [[0, 1], [2, 3], [4]]
+    assert list(_chunked([], 2)) == []
+    assert list(_chunked([1, 2], 5)) == [[1, 2]]
+
+
+class _FakeResult:
+    def __init__(self, data: list[dict]) -> None:
+        self.data = data
+
+    def execute(self) -> _FakeResult:
+        return self
+
+
+class _FakeTableQuery:
+    """Mimics the postgrest builder chain for one table, recording every
+    ``.in_()`` chunk and ``.upsert()`` chunk on the parent fake client."""
+
+    def __init__(self, name: str, client: _FakeClient) -> None:
+        self._name = name
+        self._client = client
+
+    def select(self, *_cols: str) -> _FakeTableQuery:
+        return self
+
+    def in_(self, col: str, ids: list[str]) -> _FakeResult:
+        self._client.in_calls.setdefault(self._name, []).append(list(ids))
+        match = set(ids)
+        rows = [r for r in self._client.rows.get(self._name, []) if r.get(col) in match]
+        return _FakeResult(rows)
+
+    def upsert(self, rows: list[dict], on_conflict: str | None = None) -> _FakeResult:
+        self._client.upserts.setdefault(self._name, []).append(list(rows))
+        return _FakeResult(list(rows))
+
+
+class _FakeClient:
+    def __init__(self, rows: dict[str, list[dict]] | None = None) -> None:
+        self.rows = rows or {}
+        self.in_calls: dict[str, list[list[str]]] = {}
+        self.upserts: dict[str, list[list[dict]]] = {}
+
+    def table(self, name: str) -> _FakeTableQuery:
+        return _FakeTableQuery(name, self)
+
+
+def test_supabase_get_tracks_chunks_and_merges():
+    """A bulk read past the read-chunk size splits into ≤_READ_CHUNK `.in_()`
+    calls per table (keeping each URL under the httpx limit) and merges rows +
+    audio_features + tags back into one record map."""
+    n = _READ_CHUNK * 2 + 50  # 250 with the default chunk of 100
+    track_rows = [
+        {"id": f"spotify:{i}", "name": f"S{i}", "artist": "A", "fetched_at": T0.isoformat()}
+        for i in range(n)
+    ]
+    feat_rows = [{"track_id": "spotify:7", "bpm": 120.0, "energy": 0.8, "source": "ab"}]
+    tag_rows = [{"track_id": "spotify:9", "tag": "dream pop", "weight": 0.9, "source": "lastfm"}]
+    fake = _FakeClient({"tracks": track_rows, "audio_features": feat_rows, "tags": tag_rows})
+
+    got = SupabaseSharedStore(client=fake).get_tracks([f"spotify:{i}" for i in range(n)])
+
+    assert len(got) == n
+    for table in ("tracks", "audio_features", "tags"):
+        assert [len(c) for c in fake.in_calls[table]] == [_READ_CHUNK, _READ_CHUNK, 50]
+    assert got["spotify:7"].audio_features.bpm == 120.0
+    assert got["spotify:9"].tags[0].tag == "dream pop"
+
+
+def test_supabase_upsert_chunks_large_writes():
+    """Writes past the write-chunk size split into ≤_WRITE_CHUNK-row upserts per
+    table; empty derived tables (no audio_features here) are not written."""
+    n = _WRITE_CHUNK + 100  # 600 with the default chunk of 500
+    recs = [
+        TrackMetadataRecord(
+            track_id=f"spotify:{i}",
+            name=f"S{i}",
+            artist="A",
+            tags=[TrackTag(tag="t", weight=1.0, source="lastfm")],
+            fetched_at=T0,
+        )
+        for i in range(n)
+    ]
+    fake = _FakeClient()
+
+    SupabaseSharedStore(client=fake).upsert_tracks(recs)
+
+    assert [len(c) for c in fake.upserts["tracks"]] == [_WRITE_CHUNK, 100]
+    assert [len(c) for c in fake.upserts["tags"]] == [_WRITE_CHUNK, 100]
+    assert "audio_features" not in fake.upserts
