@@ -12,7 +12,10 @@ reads and writes:
    ``tests/test_models.py`` asserts the example validates against these models.
 
 ``method_params`` defaults live here as the single source of truth for the V0
-threshold set. They are placeholders until calibrated empirically in #66.
+threshold set. They are LOCKED for V0 (decision 8186bc56): validated accept-side
+by synthetic fixtures and reject-side by the real run, but NOT empirically
+calibrated — V0 produced zero real candidates to calibrate against (see #87).
+Empirical calibration is deferred to V1 and is grill-gated.
 """
 
 from __future__ import annotations
@@ -83,7 +86,8 @@ class ValidationParams(BaseModel):
 
 def _default_band_cutoffs() -> dict[str, tuple[float, float]]:
     # (low|mid, mid|high) cut points per clustered dim. v < lo -> low,
-    # lo <= v < hi -> mid, v >= hi -> high. Placeholders; calibrated in #66.
+    # lo <= v < hi -> mid, v >= hi -> high. Placeholders; empirical calibration
+    # deferred to V1 (0 audio clusters on V0 data — 0% MBID coverage; see #87).
     return {
         "bpm": (100.0, 140.0),
         "energy": (0.4, 0.66),

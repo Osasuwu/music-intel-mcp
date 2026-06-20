@@ -33,7 +33,8 @@ The four V0 tests (decision ``bce66b6e``):
   too small to be statistically meaningful are artifacts.
 
 Every threshold is read from :class:`ValidationParams` (``method_params``),
-never hardcoded — they are placeholders until calibrated on real data in #66.
+never hardcoded — V0 locks them unchanged (decision 8186bc56); empirical
+calibration on real candidates is deferred to V1 (#87, grill-gated).
 The module is verified against synthetic candidates; the audio/scene/temporal
 pipelines (#63–#65) construct real :class:`Candidate`s and hand them here.
 """
