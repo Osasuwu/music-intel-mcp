@@ -46,12 +46,22 @@ class TrackRef(BaseModel):
 
 class PlayContext(BaseModel):
     """Per-play context. Nullable as a whole (a scrobble source may omit it)
-    and field-nullable within (a source may have ms_played but not skipped)."""
+    and field-nullable within (a source may have ms_played but not skipped).
+
+    ``incognito`` / ``conn_country`` are carried by the Spotify Extended Streaming
+    History source (#89): the private-session flag and the ISO-3166 alpha-2
+    country of the connection. Both are *carried, not yet acted on* — incognito is
+    a lossless flag (no import-time filter, decision 83bd6f76) and conn_country is
+    the raw input for local-timezone bucketize (deferred to #90, decision
+    d2c1ff60). Every field stays independently nullable so the IFTTT and thin
+    scrobble sources, which carry none of them, still validate."""
 
     model_config = ConfigDict(extra="forbid")
 
     ms_played: int | None = None
     skipped: bool | None = None
+    incognito: bool | None = None
+    conn_country: str | None = None
 
 
 class ListenEvent(BaseModel):

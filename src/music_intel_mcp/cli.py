@@ -1,6 +1,8 @@
-"""CLI surface. V0 exposes ``analyze``, ``resolve``, and ``import-ifttt``.
+"""CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``, and
+``import-spotify``.
 
     music-intel import-ifttt --from <dir> [--data-dir ./data]
+    music-intel import-spotify --from <dir> [--data-dir ./data]
     music-intel analyze --user-id petr [--data-dir ./data]
                         [--with-audio] [--with-scene]
                         [--ab-index PATH] [--shared-store local|supabase|memory]
@@ -8,7 +10,10 @@
     music-intel resolve [--data-dir ./data] [--mb-index PATH]
 
 ``import-ifttt`` merges a directory of IFTTT Spotify ``.xlsx`` exports into the
-per-user ``history.jsonl`` (dedup + idempotent re-import). ``analyze`` loads that
+per-user ``history.jsonl`` (dedup + idempotent re-import). ``import-spotify``
+merges the official Spotify Extended Streaming History JSON export (#89), a richer
+per-play source that supersedes the thin IFTTT rows (source-scoped, decision
+23fcf92c). ``analyze`` loads that
 history, runs the derivation engine, writes a RootProfile snapshot, and prints
 the path + a one-line summary. ``resolve`` walks the history through the
 spotify_id -> ISRC -> MBID identity waterfall and reports resolution coverage
@@ -41,6 +46,13 @@ from .shared_store import (
     LocalSharedStore,
     SharedStore,
     SupabaseSharedStore,
+)
+from .spotify_extended import (
+    SUPERSEDES as SPOTIFY_SUPERSEDES,
+)
+from .spotify_extended import (
+    SpotifyExtendedStats,
+    load_spotify_extended_dir,
 )
 from .store import UserStore
 
@@ -124,6 +136,39 @@ def _cmd_import_ifttt(args: argparse.Namespace) -> int:
             f"  skipped {stats.total_skipped} rows "
             f"(empty={stats.skipped_empty} no-identity={stats.skipped_no_identity} "
             f"unparseable-timestamp={stats.skipped_unparseable})"
+        )
+        if stats.unparseable_samples:
+            print(f"    unparseable e.g.: {stats.unparseable_samples}")
+    return 0
+
+
+def _cmd_import_spotify(args: argparse.Namespace) -> int:
+    store = UserStore(root=args.data_dir)
+    before = store.load_history()
+    stats = SpotifyExtendedStats()
+    imported = load_spotify_extended_dir(args.source, stats=stats)
+    # Source-scoped supersede (decision 23fcf92c): the authoritative Spotify export
+    # replaces the thin IFTTT rows and any prior run of this importer — a play
+    # logged by both is the *same* play — while events from every other source are
+    # preserved untouched. Dedup after so a re-import over the same dir is
+    # idempotent.
+    kept = [e for e in before if e.source not in SPOTIFY_SUPERSEDES]
+    merged = dedup_events([*kept, *imported])
+    store.replace_history(merged)
+
+    superseded = len(before) - len(kept)
+    print(f"imported {len(imported)} Spotify Extended plays from {args.source}")
+    print(
+        f"  history.jsonl: {len(before)} -> {len(merged)} events "
+        f"(superseded {superseded} from {sorted(SPOTIFY_SUPERSEDES)})"
+    )
+    if stats.total_skipped:
+        # Surfaced, never silent: the lossless projection drops only non-audio-track
+        # rows and no-identity rows; a large unparseable count signals export drift.
+        print(
+            f"  skipped {stats.total_skipped} non-track/unplaceable rows "
+            f"(episode={stats.skipped_episode} audiobook={stats.skipped_audiobook} "
+            f"no-identity={stats.skipped_no_identity} unparseable-ts={stats.skipped_unparseable})"
         )
         if stats.unparseable_samples:
             print(f"    unparseable e.g.: {stats.unparseable_samples}")
@@ -265,6 +310,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_import.set_defaults(func=_cmd_import_ifttt)
+
+    p_import_spotify = sub.add_parser(
+        "import-spotify", help="import a Spotify Extended Streaming History export"
+    )
+    p_import_spotify.add_argument(
+        "--from",
+        dest="source",
+        required=True,
+        help="directory of Streaming_History_Audio_*.json files from the export",
+    )
+    p_import_spotify.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_import_spotify.set_defaults(func=_cmd_import_spotify)
     return parser
 
 
