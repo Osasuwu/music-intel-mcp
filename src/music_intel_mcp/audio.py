@@ -177,6 +177,19 @@ class AudioEnrichmentReport:
             return 0.0
         return (len(self.enriched) + len(self.already_present)) / n
 
+    def counts(self) -> dict[str, int]:
+        """Bucket sizes for the persisted RootProfile (#87 AC-E). The transparent
+        primitive: MBID coverage = (total - no_mbid) / total and
+        P(features|MBID) = enriched / (enriched + missing_features) both derive
+        from these. Owns the bucket-name -> count mapping so the analyzer stays
+        thin and there is one source of truth for the surfaced names."""
+        return {
+            "enriched": len(self.enriched),
+            "already_present": len(self.already_present),
+            "missing_features": len(self.missing_features),
+            "no_mbid": len(self.no_mbid),
+        }
+
 
 def enrich_audio_features(
     track_ids: Sequence[str],

@@ -6,9 +6,18 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
+import respx
+
 import music_intel_mcp.cli as cli
 from music_intel_mcp.audio import AcousticBrainzDump
-from music_intel_mcp.cli import build_parser, main, plan_enrichment
+from music_intel_mcp.cli import (
+    audio_identity_metrics,
+    build_parser,
+    main,
+    plan_enrichment,
+    plan_spotify_source,
+)
 from music_intel_mcp.models import ListenEvent, TrackRef
 from music_intel_mcp.scene import InMemoryTagSource, LastfmTagSource
 from music_intel_mcp.shared_store import (
@@ -17,9 +26,15 @@ from music_intel_mcp.shared_store import (
     SupabaseSharedStore,
     TrackTag,
 )
+from music_intel_mcp.spotify_api import (
+    SPOTIFY_TOKEN_URL,
+    SPOTIFY_TRACKS_URL,
+    SpotifyApiIsrcSource,
+)
 from music_intel_mcp.store import UserStore
 
 FIXTURE_INDEX = Path(__file__).parent / "fixtures" / "isrc_mbid_index.tsv"
+FIXTURE_AB = Path(__file__).parent / "fixtures" / "acousticbrainz_features_sample.jsonl"
 
 
 def _analyze_args(*extra: str):
@@ -76,6 +91,92 @@ def test_cli_resolve_reports_coverage(tmp_path, history_sample_path, capsys):
 
     # identities are cached for re-runs
     assert (tmp_path / "identity").is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# plan_spotify_source — flag/env gate (pure, fully offline)
+# --------------------------------------------------------------------------- #
+
+
+def test_plan_spotify_source_no_flag_is_none():
+    source, errors = plan_spotify_source(False, {}, data_dir=None)
+    assert (source, errors) == (None, [])
+
+
+def test_plan_spotify_source_requires_both_credentials():
+    # only one of the two present -> the missing one is reported, no source built
+    source, errors = plan_spotify_source(True, {"SPOTIFY_CLIENT_ID": "x"}, data_dir=None)
+    assert source is None
+    assert any("SPOTIFY_CLIENT_SECRET" in e for e in errors)
+
+
+def test_plan_spotify_source_with_creds_builds_source(tmp_path):
+    env = {"SPOTIFY_CLIENT_ID": "x", "SPOTIFY_CLIENT_SECRET": "y"}
+    source, errors = plan_spotify_source(True, env, data_dir=str(tmp_path))
+    assert errors == []
+    assert isinstance(source, SpotifyApiIsrcSource)
+
+
+# --------------------------------------------------------------------------- #
+# resolve --with-spotify — end-to-end bridge (network mocked with respx)
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_resolve_with_spotify_without_creds_fails_fast(
+    tmp_path, history_sample_path, capsys, monkeypatch
+):
+    monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SPOTIFY_CLIENT_SECRET", raising=False)
+    shutil.copy(history_sample_path, tmp_path / "history.jsonl")
+
+    rc = main(
+        ["resolve", "--data-dir", str(tmp_path), "--mb-index", str(FIXTURE_INDEX), "--with-spotify"]
+    )
+    assert rc == 2
+    assert "SPOTIFY_CLIENT_ID" in capsys.readouterr().out
+
+
+def test_cli_resolve_with_spotify_bridges_spotify_only_track(
+    tmp_path, history_sample_path, capsys, monkeypatch
+):
+    """The spotify-only track AAA stalls at the ``spotify`` rung without the live
+    leg (2/3). With ``--with-spotify`` mocked to return an ISRC the fixture index
+    maps to an MBID, AAA reaches MBID and coverage rises to 3/3."""
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "csecret")
+    shutil.copy(history_sample_path, tmp_path / "history.jsonl")
+
+    def _tracks(request: httpx.Request) -> httpx.Response:
+        ids = request.url.params.get("ids", "").split(",")
+        # AAA -> USABC1234567, which isrc_mbid_index.tsv maps to a real MBID.
+        tracks = [
+            {"id": tid, "external_ids": {"isrc": "USABC1234567"}} if tid == "AAA" else None
+            for tid in ids
+        ]
+        return httpx.Response(200, json={"tracks": tracks})
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post(SPOTIFY_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        )
+        router.get(SPOTIFY_TRACKS_URL).mock(side_effect=_tracks)
+        rc = main(
+            [
+                "resolve",
+                "--data-dir",
+                str(tmp_path),
+                "--mb-index",
+                str(FIXTURE_INDEX),
+                "--with-spotify",
+            ]
+        )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "spotify: prefetched 1 new spotify_id->ISRC lookups" in out
+    assert "resolved 3/3 unique tracks to MBID" in out
+    # the spotify_id->ISRC lookups are cached locally for re-runs (never re-queried)
+    assert (tmp_path / "spotify_isrc_cache.jsonl").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -268,6 +369,65 @@ def test_cli_analyze_with_audio_no_dump_notes_zero_coverage(
     assert "note: audio coverage 0" in out
 
 
+def test_cli_analyze_with_audio_bridges_isrc_to_mbid_and_enriches(
+    tmp_path, history_sample_path, capsys, monkeypatch
+):
+    """End-to-end P9 bridge (#87 AC-C) through the CLI: `--with-audio --mb-index`
+    resolves the ISRC-only history track to its MBID, and the AB-features fixture
+    keyed by that MBID enriches it — so audio coverage is non-zero where the raw
+    ingest identity carried no MBID. The AB fixture holds only the *resolved*
+    MBID (not the history's raw ``mbid:1111`` track), so a passing coverage is
+    proof the resolver ran, not the passthrough."""
+    monkeypatch.delenv("MUSICBRAINZ_ISRC_INDEX", raising=False)
+    monkeypatch.delenv("MUSICBRAINZ_DUMP_DIR", raising=False)
+    shutil.copy(history_sample_path, tmp_path / "history.jsonl")
+    rc = main(
+        [
+            "analyze",
+            "--user-id",
+            "petr",
+            "--data-dir",
+            str(tmp_path),
+            "--with-audio",
+            "--shared-store",
+            "memory",
+            "--mb-index",
+            str(FIXTURE_INDEX),
+            "--ab-index",
+            str(FIXTURE_AB),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # 3 unique tracks; only the ISRC track resolves to an AB-covered MBID -> 1/3.
+    assert "audio=0.33" in out
+    assert "note: audio coverage 0" not in out
+    # #87 AC-E honest measurement, visible on the run: 2 of 3 tracks carry an MBID
+    # (the spotify-only AAA does not), and of those 2 the AB fixture covers 1.
+    assert "mbid_coverage=0.67 (2/3)" in out
+    assert "p(features|mbid)=0.50" in out
+    assert "enriched=1 already_present=0 missing_features=1 no_mbid=1" in out
+    # the resolver walked the tracks -> identities cached for re-runs
+    assert (tmp_path / "identity").is_dir()
+
+
+def test_audio_identity_metrics_derives_mbid_coverage_and_p_features():
+    """The two #87 AC-E rates fall out of the enrichment buckets: MBID coverage =
+    share carrying an MBID; P(features|MBID) = share of MBID-bearing tracks the
+    features source covered (enriched or already carried)."""
+    diag = {"enriched": 3, "already_present": 1, "missing_features": 2, "no_mbid": 4}
+    m = audio_identity_metrics(diag)
+    assert m["mbid_coverage"] == 6 / 10  # 4 of 10 have no MBID
+    assert m["features_given_mbid"] == 4 / 6  # 4 of the 6 MBID-bearing have features
+
+
+def test_audio_identity_metrics_empty_is_honest_zero():
+    """No tracks / no MBIDs -> 0.0, never a divide-by-zero."""
+    assert audio_identity_metrics({}) == {"mbid_coverage": 0.0, "features_given_mbid": 0.0}
+    only_no_mbid = {"enriched": 0, "already_present": 0, "missing_features": 0, "no_mbid": 5}
+    assert audio_identity_metrics(only_no_mbid)["features_given_mbid"] == 0.0
+
+
 def test_cli_main_loads_dotenv_credentials(tmp_path, capsys, monkeypatch):
     """``main`` loads a gitignored ``.env`` so the documented unblock mechanism
     works: a ``LASTFM_API_KEY`` present only in ``.env`` (not the host env)
@@ -298,3 +458,32 @@ def test_cli_main_loads_dotenv_credentials(tmp_path, capsys, monkeypatch):
     )
     assert rc == 0  # gate cleared: the key crossed from .env into os.environ
     assert "LASTFM_API_KEY" not in capsys.readouterr().out  # no fail-fast error
+
+
+# --- build-mb-index (#87 AC-B): raw dump -> ISRC->MBID TSV ----------------- #
+
+FIXTURE_MB_ISRC = Path(__file__).parent / "fixtures" / "mbdump" / "isrc"
+FIXTURE_MB_RECORDING = Path(__file__).parent / "fixtures" / "mbdump" / "recording"
+
+
+def test_cli_build_mb_index_writes_consumable_tsv(tmp_path, capsys):
+    from music_intel_mcp.identity import MusicBrainzIsrcIndex
+
+    out = tmp_path / "isrc_to_mbid.tsv"
+    rc = main(
+        [
+            "build-mb-index",
+            "--isrc-dump",
+            str(FIXTURE_MB_ISRC),
+            "--recording-dump",
+            str(FIXTURE_MB_RECORDING),
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    assert "wrote 3 ISRC->MBID pairs" in capsys.readouterr().out
+    # the freshly built TSV is exactly what the resolver's index reads
+    index = MusicBrainzIsrcIndex(path=out)
+    assert index.lookup("USONE00000001") == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert len(index.lookup_all("USMULTI00001")) == 2

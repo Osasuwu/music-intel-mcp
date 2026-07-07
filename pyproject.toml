@@ -36,6 +36,10 @@ dependencies = [
   # IFTTT history arrives as .xlsx workbooks (#76); openpyxl is the reader for
   # the import-ifttt adapter. Pure-Python, small tree (et-xmlfile only).
   "openpyxl>=3.1",
+  # Live Spotify Web API client for the spotify_id->ISRC waterfall leg (#87 AC-A,
+  # spotify_api.py). Imported lazily and only exercised behind `resolve
+  # --with-spotify`; tests mock it with respx so CI never touches the network.
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +47,9 @@ dev = [
   "pytest>=7.4",
   "ruff>=0.3",
   "pre-commit>=3.6",
+  # Mocks httpx at the transport layer so spotify_api.py tests never hit the live
+  # Spotify API (#87 AC-A). Test-only.
+  "respx>=0.21",
 ]
 # Production shared-metadata store. Network-only (SupabaseSharedStore); CI uses
 # the in-memory store, so this stays out of the default/dev install.
