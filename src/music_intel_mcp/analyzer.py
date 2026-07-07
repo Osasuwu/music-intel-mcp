@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from .audio import AudioFeatureSource, derive_audio_roots, enrich_audio_features
+from .identity import IdentityResolver
 from .models import (
     Epoch,
     GeneratedFrom,
@@ -64,22 +65,41 @@ def _group_and_seed(
     events: Sequence[ListenEvent],
     store: SharedStore,
     now: datetime,
+    resolver: IdentityResolver | None = None,
 ) -> tuple[dict[str, list[datetime]], list[str]]:
     """Group plays by canonical id and seed any unknown tracks into the shared
     store, returning the play map and the unique id list both stages share.
+
+    When a ``resolver`` is supplied (the P9 bridge, #87), each event's track is
+    walked up the identity waterfall and grouped by its *resolved* canonical id
+    — so a ``spotify:``/``isrc:`` event that reaches an MBID is rebuilt onto its
+    ``mbid:`` key and its plays merge with any other event resolving to the same
+    recording. This is the only path by which the enricher — which joins on the
+    record's MBID — sees anything on the real history (whose events carry
+    spotify_ids, not MBIDs). Resolution is memoised per raw id so duplicate
+    plays don't re-walk the dump. Without a resolver the raw ingest identity is
+    used unchanged (the honest-empty V0 path).
 
     Seeds carry only anonymous track facts (ids + name/artist) — never per-user
     fields — so writing them to the shared store is safe. Naive timestamps are
     coerced to UTC. Done once so audio and scene reuse the same seeded store."""
     plays: dict[str, list[datetime]] = {}
     refs: dict[str, TrackRef] = {}
+    resolved_refs: dict[str, TrackRef] = {}  # raw canonical id -> resolved ref
     for event in events:
-        cid = canonical_track_id(event.track)
+        track = event.track
+        if resolver is not None:
+            raw_cid = canonical_track_id(track)
+            track = resolved_refs.get(raw_cid)
+            if track is None:
+                track = resolver.resolve(event.track).to_track_ref()
+                resolved_refs[raw_cid] = track
+        cid = canonical_track_id(track)
         played = event.played_at
         if played.tzinfo is None:
             played = played.replace(tzinfo=UTC)
         plays.setdefault(cid, []).append(played)
-        refs.setdefault(cid, event.track)
+        refs.setdefault(cid, track)
 
     unique_ids = list(refs)
     existing = store.get_tracks(unique_ids)
@@ -117,6 +137,7 @@ def analyze(
     shared_store: SharedStore | None = None,
     audio_source: AudioFeatureSource | None = None,
     tag_source: TagSource | None = None,
+    resolver: IdentityResolver | None = None,
 ) -> RootProfile:
     """Run the derivation pipeline over ``events`` and assemble a ``RootProfile``.
 
@@ -126,6 +147,12 @@ def analyze(
     may run; unrun categories stay honest-empty (never fabricated). The temporal
     stage (#65) then conditions the surviving roots/tendencies on calendar
     buckets and detects epochs. ``generated_from`` counts are always correct.
+
+    When a ``resolver`` is supplied (the P9 bridge, #87), the seed/group step
+    walks each event up the spotify_id -> ISRC -> MBID waterfall first, so the
+    enrichers see the resolved MBID rather than the raw ingest-time identity.
+    Without it, spotify-only history resolves to no MBID and audio stays
+    honest-empty regardless of the dump.
     """
     generated_at = generated_at or datetime.now(UTC)
     generated_from = _generated_from(events)
@@ -139,11 +166,12 @@ def analyze(
     # stage to condition lift on root membership.
     members: dict[str, list[str]] = {}
     if events and shared_store is not None and (audio_source is not None or tag_source is not None):
-        plays, unique_ids = _group_and_seed(events, shared_store, generated_at)
+        plays, unique_ids = _group_and_seed(events, shared_store, generated_at, resolver)
         ctx = _dataset_ctx(generated_from)
 
         if audio_source is not None:
-            enrich_audio_features(unique_ids, shared_store, audio_source, now=generated_at)
+            report = enrich_audio_features(unique_ids, shared_store, audio_source, now=generated_at)
+            generated_from.enrichment_diagnostics["audio"] = report.counts()
             records = shared_store.get_tracks(unique_ids)
             audio = derive_audio_roots(
                 records,

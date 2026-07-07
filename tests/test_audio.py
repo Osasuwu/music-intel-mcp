@@ -169,6 +169,32 @@ def test_enricher_skips_tracks_already_carrying_features():
     assert store.get_tracks(["mbid:a"])["mbid:a"].audio_features.bpm == 120
 
 
+def test_report_counts_are_the_persisted_diagnostic_surface():
+    """`counts()` owns the bucket-name->count mapping surfaced in the persisted
+    RootProfile (#87 AC-E). One entry per bucket, summing to total_considered —
+    the primitive from which MBID coverage and P(features|MBID) derive."""
+    store = InMemorySharedStore(
+        [
+            _rec("mbid:a", mbid="a"),  # enriched
+            _rec("mbid:b", _features(120, 0.5, 0.5, 0.5), mbid="b"),  # already_present
+            _rec("mbid:c", mbid="c"),  # MBID but no dump entry -> missing_features
+            _rec("name:x\x1fy"),  # no MBID -> no_mbid
+        ]
+    )
+    source = InMemoryAudioFeatureSource({"a": _features(90, 0.3, 0.4, 0.3)})
+
+    ids = ["mbid:a", "mbid:b", "mbid:c", "name:x\x1fy"]
+    report = enrich_audio_features(ids, store, source, now=NOW)
+
+    assert report.counts() == {
+        "enriched": 1,
+        "already_present": 1,
+        "missing_features": 1,
+        "no_mbid": 1,
+    }
+    assert sum(report.counts().values()) == report.total_considered
+
+
 def test_acousticbrainz_dump_reads_jsonl_and_misses_gracefully(tmp_path: Path):
     dump = tmp_path / "ab.jsonl"
     dump.write_text(

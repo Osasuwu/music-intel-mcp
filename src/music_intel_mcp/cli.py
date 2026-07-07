@@ -1,13 +1,16 @@
-"""CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``, and
-``import-spotify``.
+"""CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``,
+``import-spotify``, ``build-mb-index``, and ``build-ab-index``.
 
     music-intel import-ifttt --from <dir> [--data-dir ./data]
     music-intel import-spotify --from <dir> [--data-dir ./data]
     music-intel analyze --user-id petr [--data-dir ./data]
                         [--with-audio] [--with-scene]
-                        [--ab-index PATH] [--shared-store local|supabase|memory]
+                        [--ab-index PATH] [--mb-index PATH]
+                        [--shared-store local|supabase|memory]
                         [--shared-store-path PATH]
-    music-intel resolve [--data-dir ./data] [--mb-index PATH]
+    music-intel resolve [--data-dir ./data] [--mb-index PATH] [--with-spotify]
+    music-intel build-mb-index --isrc-dump PATH --recording-dump PATH --out PATH
+    music-intel build-ab-index --out PATH [--data-dir ./data] [--raw-cache PATH]
 
 ``import-ifttt`` merges a directory of IFTTT Spotify ``.xlsx`` exports into the
 per-user ``history.jsonl`` (dedup + idempotent re-import). ``import-spotify``
@@ -17,7 +20,10 @@ per-play source that supersedes the thin IFTTT rows (source-scoped, decision
 history, runs the derivation engine, writes a RootProfile snapshot, and prints
 the path + a one-line summary. ``resolve`` walks the history through the
 spotify_id -> ISRC -> MBID identity waterfall and reports resolution coverage
-(caching resolved identities for re-runs).
+(caching resolved identities for re-runs). ``resolve --with-spotify`` adds the
+live ``spotify_id -> ISRC`` leg via the Spotify Web API for tracks that arrive
+without an ISRC — credential-gated on ``SPOTIFY_CLIENT_ID`` + ``SPOTIFY_CLIENT_SECRET``,
+prefetched in batches, cached to a local sidecar (#87 AC-A).
 
 Enrichment is **off by default**: with no ``--with-*`` flag ``analyze`` produces
 an honest-empty profile (the V0 baseline). ``--with-audio`` / ``--with-scene``
@@ -36,10 +42,12 @@ from collections.abc import Mapping, Sequence
 
 from dotenv import find_dotenv, load_dotenv
 
+from .acousticbrainz import AcousticBrainzApiClient, build_acousticbrainz_index
 from .analyzer import analyze
 from .audio import AcousticBrainzDump, AudioFeatureSource
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
+from .mb_dump import build_isrc_mbid_tsv
 from .scene import LastfmTagSource, TagSource
 from .shared_store import (
     InMemorySharedStore,
@@ -47,6 +55,7 @@ from .shared_store import (
     SharedStore,
     SupabaseSharedStore,
 )
+from .spotify_api import SpotifyApiIsrcSource
 from .spotify_extended import (
     SUPERSEDES as SPOTIFY_SUPERSEDES,
 )
@@ -63,6 +72,55 @@ from .store import UserStore
 _LASTFM_API_KEY_ENV = "LASTFM_API_KEY"
 _SUPABASE_URL_ENV = "SUPABASE_URL"
 _SUPABASE_KEY_ENV = "SUPABASE_KEY"
+_SPOTIFY_CLIENT_ID_ENV = "SPOTIFY_CLIENT_ID"
+_SPOTIFY_CLIENT_SECRET_ENV = "SPOTIFY_CLIENT_SECRET"
+
+
+def plan_spotify_source(
+    with_spotify: bool,
+    env: Mapping[str, str],
+    *,
+    data_dir: str | None,
+) -> tuple[SpotifyApiIsrcSource | None, list[str]]:
+    """Resolve ``--with-spotify`` against ``env`` into a live ISRC source (#87 AC-A).
+
+    Returns ``(source, errors)``. Without the flag it is ``(None, [])`` — the
+    offline default, spotify-only tracks honestly flagged at the ``spotify`` rung.
+    With the flag, ``SPOTIFY_CLIENT_ID`` and ``SPOTIFY_CLIENT_SECRET`` are checked
+    for *presence* (never read or printed here — the source reads their values
+    from the environment itself); a missing one comes back as an error so the
+    caller aborts before any network. The source's JSONL cache lands under the
+    data root (local-only, per history-never-leaves-the-machine)."""
+    if not with_spotify:
+        return None, []
+    missing = [v for v in (_SPOTIFY_CLIENT_ID_ENV, _SPOTIFY_CLIENT_SECRET_ENV) if not env.get(v)]
+    if missing:
+        return None, [f"--with-spotify needs {' and '.join(missing)} set."]
+    return SpotifyApiIsrcSource(data_root=data_dir), []
+
+
+def audio_identity_metrics(diag: Mapping[str, int]) -> dict[str, float]:
+    """Derive the #87 AC-E honest-measurement rates from the audio enrichment
+    buckets (``generated_from.enrichment_diagnostics["audio"]``).
+
+    - ``mbid_coverage`` — share of considered tracks that carry an MBID (identity
+      reach: everything except the ``no_mbid`` bucket). The ceiling the ISRC->MBID
+      chain can reach on this library.
+    - ``features_given_mbid`` — of the MBID-bearing tracks, the share the features
+      source actually covered (``enriched`` + ``already_present``). This is
+      P(features|MBID): how far a *ready-made* audio dump gets once identity is
+      solved.
+
+    Each is ``0.0`` when its denominator is empty — an honest zero, never a
+    divide-by-zero. The rates are diagnostic, not thresholds; nothing gates on
+    them (AC-F validates thresholds, it does not calibrate against these)."""
+    total = sum(diag.values())
+    with_mbid = total - diag.get("no_mbid", 0)
+    with_features = diag.get("enriched", 0) + diag.get("already_present", 0)
+    return {
+        "mbid_coverage": (with_mbid / total) if total else 0.0,
+        "features_given_mbid": (with_features / with_mbid) if with_mbid else 0.0,
+    }
 
 
 def _build_shared_store(kind: str, path: str | None = None) -> SharedStore:
@@ -175,12 +233,41 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_resolver(
+    args: argparse.Namespace,
+    audio_source: AudioFeatureSource | None = None,
+) -> IdentityResolver:
+    """Construct the identity resolver for an audio-enrichment run (the P9
+    bridge, #87). The MusicBrainz ISRC->MBID index + a local IdentityCache are
+    wired here; the live spotify_id->ISRC source (AC-A) plugs into the
+    ``spotify_source`` seam once credential-gated. Cheap to build — the index is
+    read lazily on first lookup, the cache is filesystem-backed.
+
+    When an ``audio_source`` is passed, its presence check becomes the
+    ``ab_covered`` predicate so a multi-valued ISRC disambiguates toward the
+    recording that actually has AcousticBrainz features (#87 AC-B). The *same*
+    dump instance is shared with the enrichment stage, so it is loaded once."""
+    index = MusicBrainzIsrcIndex(path=getattr(args, "mb_index", None))
+    cache = IdentityCache(root=args.data_dir)
+    ab_covered = (
+        (lambda mbid: audio_source.lookup(mbid) is not None) if audio_source is not None else None
+    )
+    return IdentityResolver(index, cache=cache, ab_covered=ab_covered)
+
+
 def _cmd_analyze(args: argparse.Namespace) -> int:
     shared_store, audio_source, tag_source, errors = plan_enrichment(args, os.environ)
     if errors:
         for err in errors:
             print(f"error: {err}")
         return 2
+
+    # The resolver bridges raw ingest ids -> MBID so the audio enricher can join
+    # (P9, #87). Only built for --with-audio: audio is the stage that needs the
+    # MBID; scene keys on name/artist and is left on its raw-identity path. The
+    # audio source is shared in so a multi-valued ISRC disambiguates toward an
+    # AB-covered recording (AC-B) and the dump loads once.
+    resolver = _build_resolver(args, audio_source) if args.with_audio else None
 
     user_store = UserStore(root=args.data_dir)
     events = user_store.load_history()
@@ -190,6 +277,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         shared_store=shared_store,
         audio_source=audio_source,
         tag_source=tag_source,
+        resolver=resolver,
     )
     path = user_store.write_profile(profile)
 
@@ -208,6 +296,26 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         f"  roots={len(profile.roots)} tendencies={len(profile.tendencies)} "
         f"epochs={len(profile.epochs)} maturity={profile.model_maturity}"
     )
+    # #87 AC-E honest measurement, surfaced on the run itself: split coverage into
+    # its two independent legs — how far identity resolution reached (mbid_coverage)
+    # and, given an MBID, how far the ready-made features dump reached
+    # (p(features|mbid)). Both derive from the persisted enrichment buckets, so the
+    # numbers a saved profile carries are exactly what prints here.
+    audio_diag = gf.enrichment_diagnostics.get("audio")
+    if audio_diag is not None:
+        m = audio_identity_metrics(audio_diag)
+        total = sum(audio_diag.values())
+        with_mbid = total - audio_diag.get("no_mbid", 0)
+        with_features = audio_diag["enriched"] + audio_diag["already_present"]
+        print(
+            f"  audio identity: mbid_coverage={m['mbid_coverage']:.2f} ({with_mbid}/{total}) "
+            f"p(features|mbid)={m['features_given_mbid']:.2f} ({with_features}/{with_mbid})"
+        )
+        print(
+            f"    buckets: enriched={audio_diag['enriched']} "
+            f"already_present={audio_diag['already_present']} "
+            f"missing_features={audio_diag['missing_features']} no_mbid={audio_diag['no_mbid']}"
+        )
     # Honest diagnostic: an enrichment flag that yielded zero coverage means the
     # source had nothing (dump not installed / no MBIDs / Last.fm misses), not a
     # bug — surface it so a real run isn't silently empty.
@@ -225,9 +333,26 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 def _cmd_resolve(args: argparse.Namespace) -> int:
     store = UserStore(root=args.data_dir)
     events = store.load_history()
+
+    spotify_source, errors = plan_spotify_source(
+        getattr(args, "with_spotify", False), os.environ, data_dir=args.data_dir
+    )
+    if errors:
+        for err in errors:
+            print(f"error: {err}")
+        return 2
+
     index = MusicBrainzIsrcIndex(path=args.mb_index)
     cache = IdentityCache(root=args.data_dir)
-    resolver = IdentityResolver(index, cache=cache)
+    resolver = IdentityResolver(index, cache=cache, spotify_source=spotify_source)
+
+    if spotify_source is not None:
+        # Batch the spotify_id -> ISRC prefetch (<=50/call) before the per-track
+        # waterfall, so resolution reads the local cache instead of firing one API
+        # call per unresolved track. Already-cached ids (incl. a resumed run) skip.
+        prefetched = spotify_source.warm(e.track.spotify_id for e in events if e.track.spotify_id)
+        print(f"spotify: prefetched {prefetched} new spotify_id->ISRC lookups")
+
     report = resolver.resolve_all([e.track for e in events])
 
     c = report.counts
@@ -238,6 +363,51 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
     print(f"  levels: mbid={c['mbid']} isrc={c['isrc']} spotify={c['spotify']} name={c['name']}")
     if report.unresolved:
         print(f"  unresolved (flagged, not dropped): {len(report.unresolved)}")
+    return 0
+
+
+def _cmd_build_mb_index(args: argparse.Namespace) -> int:
+    """Distil the raw MusicBrainz ``isrc`` + ``recording`` dump tables into the
+    compact ISRC->MBID TSV the resolver reads (#87 AC-B). Offline, one-off; the
+    raw dump lives outside the repo (env-pointed, never committed)."""
+    n = build_isrc_mbid_tsv(args.isrc_dump, args.recording_dump, args.out)
+    print(f"wrote {n} ISRC->MBID pairs to {args.out}")
+    if n == 0:
+        print(
+            "  note: 0 pairs — check the dump paths (raw MusicBrainz `isrc` and "
+            "`recording` tables); a missing table yields an empty index."
+        )
+    return 0
+
+
+def _cmd_build_ab_index(args: argparse.Namespace) -> int:
+    """Fetch AcousticBrainz features for the MBIDs the identity chain already
+    resolved and build the features JSONL the audio pipeline reads (#87 AC-E).
+
+    The MBID source is the local IdentityCache (no re-run of the waterfall); the
+    fetch is resumable through a raw-scalar sidecar, so a run cut short by the
+    harness resumes cheaply. Point ``analyze --ab-index`` at ``--out`` afterwards."""
+    cache = IdentityCache(root=args.data_dir)
+    mbids = cache.resolved_mbids()
+    if not mbids:
+        print(
+            f"no resolved MBIDs in {cache.cache_dir} — run `resolve` first "
+            "(the identity cache is the MBID source for this build)."
+        )
+        return 0
+
+    raw_cache = args.raw_cache or str(cache.root / "acousticbrainz_raw.jsonl")
+    print(f"building AcousticBrainz features for {len(mbids)} resolved MBIDs -> {args.out}")
+    client = AcousticBrainzApiClient()
+    report = build_acousticbrainz_index(mbids, client, out_path=args.out, raw_cache_path=raw_cache)
+    print(
+        f"  fetched={report.fetched} hits={report.hits} misses={report.misses} "
+        f"(cached total={report.total_cached})"
+    )
+    print(f"  wrote {report.written} feature rows to {args.out}")
+    if report.total_cached:
+        hit_rate = report.cached_hits / report.total_cached
+        print(f"  p(features|mbid) so far = {hit_rate:.2f}")
     return 0
 
 
@@ -269,6 +439,13 @@ def build_parser() -> argparse.ArgumentParser:
         "or $ACOUSTICBRAINZ_DUMP_DIR/acousticbrainz_features.jsonl)",
     )
     p_analyze.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV for the identity bridge under "
+        "--with-audio (default: $MUSICBRAINZ_ISRC_INDEX or "
+        "$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
+    )
+    p_analyze.add_argument(
         "--shared-store",
         choices=["local", "supabase", "memory"],
         default="local",
@@ -294,6 +471,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--mb-index",
         default=None,
         help="MusicBrainz ISRC->MBID index TSV (default: $MUSICBRAINZ_ISRC_INDEX)",
+    )
+    p_resolve.add_argument(
+        "--with-spotify",
+        action="store_true",
+        help=(
+            "bridge spotify_id->ISRC via the live Spotify API for tracks lacking an "
+            "ISRC (needs SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET; caches locally)"
+        ),
     )
     p_resolve.set_defaults(func=_cmd_resolve)
 
@@ -326,6 +511,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_import_spotify.set_defaults(func=_cmd_import_spotify)
+
+    p_build_mb = sub.add_parser(
+        "build-mb-index",
+        help="build the ISRC->MBID TSV from raw MusicBrainz dump tables (offline)",
+    )
+    p_build_mb.add_argument(
+        "--isrc-dump",
+        dest="isrc_dump",
+        required=True,
+        help="raw MusicBrainz `isrc` table file (columns id, recording, isrc, ...)",
+    )
+    p_build_mb.add_argument(
+        "--recording-dump",
+        dest="recording_dump",
+        required=True,
+        help="raw MusicBrainz `recording` table file (columns id, gid, ...)",
+    )
+    p_build_mb.add_argument(
+        "--out",
+        required=True,
+        help="output ISRC->MBID TSV (point --mb-index / MUSICBRAINZ_ISRC_INDEX here)",
+    )
+    p_build_mb.set_defaults(func=_cmd_build_mb_index)
+
+    p_build_ab = sub.add_parser(
+        "build-ab-index",
+        help="fetch AcousticBrainz features for resolved MBIDs into the features JSONL",
+    )
+    p_build_ab.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root holding the identity cache (MBID source) and raw sidecar "
+        "(default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_build_ab.add_argument(
+        "--out",
+        required=True,
+        help="output AcousticBrainz features JSONL "
+        "(point --ab-index / ACOUSTICBRAINZ_FEATURES_INDEX here)",
+    )
+    p_build_ab.add_argument(
+        "--raw-cache",
+        dest="raw_cache",
+        default=None,
+        help="resumable raw-scalar sidecar (default: <data root>/acousticbrainz_raw.jsonl)",
+    )
+    p_build_ab.set_defaults(func=_cmd_build_ab_index)
     return parser
 
 

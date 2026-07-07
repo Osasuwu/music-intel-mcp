@@ -1,0 +1,6 @@
+# ISRC -> recording MBID extract with a multi-valued ISRC (#87 AC-B fixture).
+# One ISRC can map to several MusicBrainz recordings (re-releases / masters);
+# repeated rows accumulate into a candidate list, disambiguated at lookup time.
+USMULTI00001	22223333-4444-5555-6666-777788889999
+USMULTI00001	11112222-3333-4444-5555-666677778888
+USONE00000001	aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee

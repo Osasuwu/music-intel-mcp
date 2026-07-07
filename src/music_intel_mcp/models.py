@@ -210,6 +210,14 @@ class GeneratedFrom(BaseModel):
     history_span_days: int = 0
     data_sources: list[str] = Field(default_factory=list)
     coverage_per_category: dict[str, float] = Field(default_factory=dict)
+    # Per-category enrichment bucket counts — the honest-measurement surface
+    # (#87 AC-E). For "audio": how many considered tracks were enriched from the
+    # source, already carried features, had an MBID the source lacked
+    # (missing_features), or had no MBID to look up (no_mbid). Full-library MBID
+    # coverage = (total - no_mbid) / total and P(features|MBID) both derive from
+    # these — see CONTEXT.md. Empty when no enricher ran (honest-empty), so a
+    # missing category key means "not measured", never "measured zero".
+    enrichment_diagnostics: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
 class CategoryWeights(BaseModel):

@@ -30,13 +30,13 @@ tracks are honestly flagged at the ``spotify`` level rather than dropped.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .models import TrackRef
 from .shared_store import (
@@ -53,6 +53,12 @@ _MB_DUMP_DIR_ENV = "MUSICBRAINZ_DUMP_DIR"
 _DEFAULT_INDEX_FILENAME = "isrc_to_mbid.tsv"
 
 ResolutionLevel = Literal["mbid", "isrc", "spotify", "name"]
+
+# Bump whenever ``ResolvedIdentity``'s schema or the resolution semantics change,
+# so on-disk caches written by an older schema are ignored rather than trusted.
+# The version namespaces the cache directory (``identity/v<N>/``); old versions
+# are simply never consulted (regenerable, gitignored — no migration needed).
+IDENTITY_CACHE_SCHEMA_VERSION = 1
 
 
 # --------------------------------------------------------------------------- #
@@ -95,12 +101,47 @@ class ResolvedIdentity(BaseModel):
 # Lookup sources — protocols + implementations
 # --------------------------------------------------------------------------- #
 
+# A predicate answering "does this MBID have AcousticBrainz features?" — the
+# disambiguation signal for a multi-valued ISRC. In production this wraps the
+# AcousticBrainz dump (``lambda m: ab_source.lookup(m) is not None``); ``None``
+# means no AB information, so disambiguation falls back to the smallest MBID.
+AbCoverage = Callable[[str], bool]
+
+
+def disambiguate_mbids(
+    mbids: Iterable[str],
+    *,
+    ab_covered: AbCoverage | None = None,
+) -> str | None:
+    """Pick one recording MBID for an ISRC that maps to several (#87 AC-B).
+
+    One ISRC legitimately maps to many MusicBrainz recordings (re-releases,
+    per-region masters, remaster duplicates). The join we actually need is to
+    AcousticBrainz features, so **prefer an AB-covered recording**; among equally
+    covered (or, absent AB info, among all) candidates, **tie-break by the
+    smallest MBID** so the choice is deterministic across runs. Returns ``None``
+    only for an empty candidate list."""
+    ordered = sorted(set(mbids))
+    if not ordered:
+        return None
+    if ab_covered is not None:
+        covered = [m for m in ordered if ab_covered(m)]
+        if covered:
+            return covered[0]
+    return ordered[0]
+
 
 @runtime_checkable
 class IsrcMbidIndex(Protocol):
-    """ISRC -> recording MBID lookup (the MusicBrainz dump leg)."""
+    """ISRC -> recording MBID lookup (the MusicBrainz dump leg).
+
+    ``lookup`` returns the single best MBID (disambiguated when the ISRC maps to
+    several, per :func:`disambiguate_mbids`); ``lookup_all`` exposes every
+    candidate MBID for that ISRC (empty when unknown)."""
 
     def lookup(self, isrc: str) -> str | None: ...
+
+    def lookup_all(self, isrc: str) -> list[str]: ...
 
 
 @runtime_checkable
@@ -110,18 +151,32 @@ class SpotifyIsrcSource(Protocol):
     def lookup(self, spotify_id: str) -> str | None: ...
 
 
+def _as_mbid_list(value: str | Iterable[str]) -> list[str]:
+    """Normalise a mapping value to an MBID list. A bare string (older single-
+    valued fixtures) becomes a one-element list; an iterable is materialised."""
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
 class InMemoryIsrcMbidIndex:
     """Dict-backed :class:`IsrcMbidIndex` for tests and small extracts.
-    ``lookups`` records each query so tests can assert the dump was not
-    re-walked on a cache hit."""
 
-    def __init__(self, mapping: dict[str, str] | None = None) -> None:
-        self._map = dict(mapping or {})
+    Values may be a single MBID (``{isrc: mbid}``, older fixtures) or a list
+    (``{isrc: [mbid, ...]}``, a multi-valued ISRC) — both normalise to a list.
+    ``lookups`` records each query so tests can assert the dump was not re-walked
+    on a cache hit."""
+
+    def __init__(self, mapping: dict[str, str | list[str]] | None = None) -> None:
+        self._map = {isrc: _as_mbid_list(v) for isrc, v in (mapping or {}).items()}
         self.lookups: list[str] = []
 
-    def lookup(self, isrc: str) -> str | None:
+    def lookup_all(self, isrc: str) -> list[str]:
         self.lookups.append(isrc)
-        return self._map.get(isrc)
+        return list(self._map.get(isrc, []))
+
+    def lookup(self, isrc: str) -> str | None:
+        return disambiguate_mbids(self.lookup_all(isrc))
 
 
 class InMemorySpotifyIsrcSource:
@@ -141,7 +196,10 @@ class MusicBrainzIsrcIndex:
 
     The TSV is a prebuilt ``<isrc>\\t<mbid>`` extract (one pair per line, ``#``
     comments allowed); the raw MusicBrainz dump is far too large to scan per
-    analysis. Path resolution: explicit arg > ``MUSICBRAINZ_ISRC_INDEX`` >
+    analysis. One ISRC legitimately maps to several recordings, so repeated rows
+    for an ISRC **accumulate into a candidate list** (dup MBIDs collapsed, first-
+    seen order kept); :func:`disambiguate_mbids` picks one at lookup time. Path
+    resolution: explicit arg > ``MUSICBRAINZ_ISRC_INDEX`` >
     ``$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv``. A missing file yields an empty
     index (every lookup misses) rather than an error — honest low coverage beats
     a crash when the dump isn't installed. Loaded once, lazily, on first lookup.
@@ -149,7 +207,7 @@ class MusicBrainzIsrcIndex:
 
     def __init__(self, path: str | Path | None = None) -> None:
         self._explicit = Path(path) if path is not None else None
-        self._map: dict[str, str] | None = None
+        self._map: dict[str, list[str]] | None = None
 
     def _resolve_path(self) -> Path | None:
         if self._explicit is not None:
@@ -162,10 +220,10 @@ class MusicBrainzIsrcIndex:
             return Path(dump_dir) / _DEFAULT_INDEX_FILENAME
         return None
 
-    def _load(self) -> dict[str, str]:
+    def _load(self) -> dict[str, list[str]]:
         if self._map is not None:
             return self._map
-        mapping: dict[str, str] = {}
+        mapping: dict[str, list[str]] = {}
         path = self._resolve_path()
         if path is not None and path.exists():
             with path.open(encoding="utf-8") as fh:
@@ -178,12 +236,17 @@ class MusicBrainzIsrcIndex:
                         continue
                     isrc, mbid = parts[0].strip(), parts[1].strip()
                     if isrc and mbid:
-                        mapping[isrc] = mbid
+                        bucket = mapping.setdefault(isrc, [])
+                        if mbid not in bucket:
+                            bucket.append(mbid)
         self._map = mapping
         return mapping
 
+    def lookup_all(self, isrc: str) -> list[str]:
+        return list(self._load().get(isrc, []))
+
     def lookup(self, isrc: str) -> str | None:
-        return self._load().get(isrc)
+        return disambiguate_mbids(self.lookup_all(isrc))
 
 
 # --------------------------------------------------------------------------- #
@@ -192,18 +255,31 @@ class MusicBrainzIsrcIndex:
 
 
 class IdentityCache:
-    """Local cache of resolved identities (``<data root>/identity/<key>.json``).
+    """Local cache of resolved identities (``<data root>/identity/v<N>/<key>.json``).
 
     Keyed by the *input* canonical id (what history knew) so a re-run with the
     same history skips the waterfall entirely. Regenerable and gitignored, like
-    the metadata cache; filenames are percent-encoded for any canonical id."""
+    the metadata cache; filenames are percent-encoded for any canonical id.
 
-    def __init__(self, root: str | Path | None = None) -> None:
+    The ``v<N>`` segment (``schema_version``, #87 AC-D) namespaces the cache by
+    the identity-record schema: bumping :data:`IDENTITY_CACHE_SCHEMA_VERSION`
+    when ``ResolvedIdentity`` changes lands new writes in a fresh directory, so
+    entries written by an older schema are never read. As a second guard, a file
+    that no longer validates (partial write, or a drift the version bump missed)
+    is treated as a cache miss — the resolver re-walks rather than crashing."""
+
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        schema_version: int = IDENTITY_CACHE_SCHEMA_VERSION,
+    ) -> None:
         self.root = resolve_data_root(root)
+        self.schema_version = schema_version
 
     @property
     def cache_dir(self) -> Path:
-        return self.root / "identity"
+        return self.root / "identity" / f"v{self.schema_version}"
 
     def _path(self, input_key: str) -> Path:
         return self.cache_dir / f"{encode_cache_key(input_key)}.json"
@@ -212,13 +288,38 @@ class IdentityCache:
         path = self._path(input_key)
         if not path.exists():
             return None
-        return ResolvedIdentity.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return ResolvedIdentity.model_validate_json(path.read_text(encoding="utf-8"))
+        except ValidationError:
+            # Stale/corrupt entry (schema drift within a version, or a truncated
+            # write). Treat as a miss so the pipeline re-resolves instead of dying.
+            return None
 
     def put(self, identity: ResolvedIdentity) -> Path:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         path = self._path(identity.input_key)
         path.write_text(identity.model_dump_json(indent=2), encoding="utf-8")
         return path
+
+    def resolved_mbids(self) -> list[str]:
+        """Every distinct MBID this cache has resolved, in sorted order.
+
+        The cache only ever ``put``s terminal MBID resolutions (the terminal-MBID-
+        only invariant), so each stored file carries a resolved MBID; a file that
+        no longer validates is skipped like any other stale entry. This is the
+        MBID source for the AcousticBrainz feature build (#87 AC-E) — no re-run of
+        the identity waterfall needed. Empty when the cache dir does not exist."""
+        if not self.cache_dir.exists():
+            return []
+        mbids: set[str] = set()
+        for path in self.cache_dir.glob("*.json"):
+            try:
+                ident = ResolvedIdentity.model_validate_json(path.read_text(encoding="utf-8"))
+            except (ValidationError, OSError):
+                continue
+            if ident.mbid:
+                mbids.add(ident.mbid)
+        return sorted(mbids)
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +371,9 @@ class IdentityResolver:
 
     ``isrc_index`` is required; ``spotify_source`` is optional (the spotify->ISRC
     leg is skipped when absent); ``cache`` is optional (memoises resolution
-    across runs)."""
+    across runs). ``ab_covered`` is an optional predicate marking MBIDs that have
+    AcousticBrainz features — it steers :func:`disambiguate_mbids` toward the
+    join we actually need when an ISRC maps to several recordings (#87 AC-B)."""
 
     def __init__(
         self,
@@ -278,19 +381,30 @@ class IdentityResolver:
         *,
         spotify_source: SpotifyIsrcSource | None = None,
         cache: IdentityCache | None = None,
+        ab_covered: AbCoverage | None = None,
     ) -> None:
         self.isrc_index = isrc_index
         self.spotify_source = spotify_source
         self.cache = cache
+        self.ab_covered = ab_covered
 
     def resolve(self, track: TrackRef) -> ResolvedIdentity:
         key = canonical_track_id(track)
         if self.cache is not None:
             hit = self.cache.get(key)
-            if hit is not None:
+            # Only a terminal (MBID-level) hit is trustworthy across runs. A cached
+            # sub-MBID result records "the index/source I had couldn't resolve this"
+            # — a negative that a since-grown index may now satisfy. Serving it would
+            # freeze the miss (#87: an isrc-level cache written before the MB index
+            # existed masked the whole 6M-pair join and pinned coverage at 0). Re-walk
+            # partials; the expensive spotify->ISRC leg has its own durable cache, so
+            # the retry is cheap in-memory lookups.
+            if hit is not None and hit.resolved:
                 return hit
         identity = self._waterfall(track, key)
-        if self.cache is not None:
+        # Persist only terminal resolutions. A partial is provisional and must be
+        # retried next run against whatever data is then available.
+        if self.cache is not None and identity.resolved:
             self.cache.put(identity)
         return identity
 
@@ -300,7 +414,8 @@ class IdentityResolver:
             if isrc is None and spotify_id is not None and self.spotify_source is not None:
                 isrc = self.spotify_source.lookup(spotify_id) or None
             if isrc is not None:
-                mbid = self.isrc_index.lookup(isrc) or None
+                candidates = self.isrc_index.lookup_all(isrc)
+                mbid = disambiguate_mbids(candidates, ab_covered=self.ab_covered)
 
         if mbid is not None:
             level: ResolutionLevel = "mbid"
