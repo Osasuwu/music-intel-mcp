@@ -42,6 +42,10 @@ class TrackRef(BaseModel):
     mbid: str | None = None
     name: str
     artist: str
+    # Optional album title. Added for the Account Data explicit-signal layer
+    # (#97) where the source carries it; back-compatible with pre-#97
+    # history.jsonl lines and RootProfile sample tracks that omit it.
+    album: str | None = None
 
 
 class PlayContext(BaseModel):
@@ -335,3 +339,106 @@ class RootProfile(BaseModel):
     epochs: list[Epoch] = Field(default_factory=list)
     quality_log: list[QualityLogEntry] = Field(default_factory=list)
     analytics: Analytics = Field(default_factory=Analytics)
+
+
+# --------------------------------------------------------------------------- #
+# Library — the Spotify Account Data explicit-preference layer (#97)
+# --------------------------------------------------------------------------- #
+#
+# Distinct from ``history.jsonl`` (implicit listening events): this is the
+# explicit-signal layer — what the user *told* Spotify they like/ban/follow, plus
+# playlists and the Marquee segment strings. Persisted as a single current-state
+# document ``data/library.json``; re-import replaces the file (idempotent). Grill
+# decision 7e564052-f8e4-469e-a3d6-2182c26d11bb locked this schema.
+#
+# Identity discipline: track signals reuse ``TrackRef`` and store spotify_id +
+# name/artist/album only — mbid/isrc stay None. Resolution is report-only and
+# NEVER persisted here (decision dddc4d90: the identity cache is the single home
+# for resolved MBIDs; a frozen library.json must not mask a grown index).
+# Artist/album MBID resolution is explicitly out of scope (#102).
+
+
+class ArtistRef(BaseModel):
+    """An artist the source names. ``uri`` is the Spotify artist URI when the
+    source carries one (YourLibrary follows/bans do); Marquee does not, so that
+    layer uses ``MarqueeEntry`` with a bare name instead."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    uri: str | None = None
+
+
+class AlbumRef(BaseModel):
+    """A saved album. ``artist`` and ``uri`` are carried when present; never
+    resolved to an MBID (#102)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    artist: str | None = None
+    uri: str | None = None
+
+
+class PlaylistItem(BaseModel):
+    """One track in a playlist with its per-item add timestamp. ``added_at`` is
+    the source ``addedDate`` verbatim (date-only string in the export)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    track: TrackRef
+    added_at: str | None = None
+
+
+class Playlist(BaseModel):
+    """A user playlist, stored losslessly. The Discover Weekly Archive is
+    distinguished by ``name`` at query time — no schema flag (decision
+    7e564052). Only ``spotify:track:`` items are kept; episodes/local tracks are
+    drop-accounted at import, never silently dropped."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    items: list[PlaylistItem] = Field(default_factory=list)
+    last_modified_date: str | None = None
+    description: str | None = None
+    number_of_followers: int | None = None
+
+
+class MarqueeEntry(BaseModel):
+    """A per-artist Marquee listener segment. The segment string is stored
+    verbatim (e.g. "Super Listeners", "Previously Active") — not normalized to an
+    enum, because the source vocabulary is Spotify-controlled and may drift. The
+    source carries no artist URI, only a name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artist_name: str
+    segment: str
+
+
+class LibraryHeader(BaseModel):
+    """Provenance for a library import: which export produced it, when Spotify
+    generated it (if the export states it), and when we imported it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    exported_at: datetime | None = None
+    imported_at: datetime | None = None
+
+
+class Library(BaseModel):
+    """The explicit-preference document (``data/library.json``). Liked tracks and
+    banned artists are distinct fields — never merged into one signed list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["v1"] = "v1"
+    header: LibraryHeader
+    liked_tracks: list[TrackRef] = Field(default_factory=list)
+    banned_artists: list[ArtistRef] = Field(default_factory=list)
+    followed_artists: list[ArtistRef] = Field(default_factory=list)
+    saved_albums: list[AlbumRef] = Field(default_factory=list)
+    playlists: list[Playlist] = Field(default_factory=list)
+    marquee: list[MarqueeEntry] = Field(default_factory=list)

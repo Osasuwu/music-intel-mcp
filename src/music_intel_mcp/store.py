@@ -16,7 +16,7 @@ import os
 import re
 from pathlib import Path
 
-from .models import ListenEvent, RootProfile
+from .models import Library, ListenEvent, RootProfile
 
 DEFAULT_DATA_DIR = "data"
 _DATA_DIR_ENV = "MUSIC_INTEL_DATA_DIR"
@@ -45,6 +45,10 @@ class UserStore:
     @property
     def profiles_dir(self) -> Path:
         return self.root / "profiles"
+
+    @property
+    def library_path(self) -> Path:
+        return self.root / "library.json"
 
     # --- history --------------------------------------------------------- #
 
@@ -76,6 +80,27 @@ class UserStore:
         with self.history_path.open("w", encoding="utf-8") as fh:
             for event in events:
                 fh.write(event.model_dump_json() + "\n")
+
+    # --- library (explicit-preference layer, #97) ------------------------ #
+
+    def load_library(self) -> Library | None:
+        """Parse ``library.json`` into a typed ``Library``. Missing file ->
+        ``None`` (honest-empty: no explicit-preference import has run yet),
+        mirroring ``latest_profile``'s None-on-absent idiom."""
+        if not self.library_path.exists():
+            return None
+        return Library.model_validate_json(self.library_path.read_text(encoding="utf-8"))
+
+    def write_library(self, library: Library) -> Path:
+        """Write the current-state ``library.json`` (overwrite, not append).
+        Re-importing the same export yields byte-identical output — the file is
+        the single current-state document, so a re-import replaces it."""
+        self.library_path.parent.mkdir(parents=True, exist_ok=True)
+        self.library_path.write_text(
+            library.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        return self.library_path
 
     # --- profiles -------------------------------------------------------- #
 
