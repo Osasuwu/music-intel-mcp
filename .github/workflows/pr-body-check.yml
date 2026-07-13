@@ -32,11 +32,23 @@ jobs:
               return;
             }
 
+            // Drive-by lane: explicit [no-issue] marker for artifact/fix-inline PRs (jarvis#428).
+            if (/\[no-issue\]/i.test(body)) {
+              console.log('[no-issue] marker — skipping linked-issue requirement (drive-by).');
+              return;
+            }
+
+            // Refactor lane: refactor: / refactor(scope): title prefix.
+            if (/^refactor(\([^)]*\))?:/i.test(pr.title || '')) {
+              console.log('refactor: title prefix — skipping linked-issue requirement.');
+              return;
+            }
+
             const issueMatches = [...body.matchAll(/(?:closes|fixes|resolves)\s+#(\d+)/gi)];
             const issueNumbers = [...new Set(issueMatches.map(m => parseInt(m[1], 10)))];
 
             if (issueNumbers.length === 0) {
-              core.setFailed('PR body must include a linked issue reference (e.g. "Closes #123"). For hotfixes, apply the priority:critical label instead.');
+              core.setFailed('PR body must include a linked issue reference (e.g. "Closes #123"). Alternatives: priority:critical label (hotfix), a [no-issue] body marker (drive-by/artifact PR), or a refactor: title prefix.');
               return;
             }
 
