@@ -39,9 +39,16 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 
 from dotenv import find_dotenv, load_dotenv
 
+from .account_data import (
+    AccountDataStats,
+    diff_libraries,
+    load_account_data,
+    preserve_import_timestamp,
+)
 from .acousticbrainz import AcousticBrainzApiClient, build_acousticbrainz_index
 from .analyzer import analyze
 from .audio import AcousticBrainzDump, AudioFeatureSource
@@ -230,6 +237,62 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
         )
         if stats.unparseable_samples:
             print(f"    unparseable e.g.: {stats.unparseable_samples}")
+    return 0
+
+
+def _cmd_import_account(args: argparse.Namespace) -> int:
+    """Import the Spotify **Account Data** export (#97) into the explicit-signal
+    ``library.json``. Re-import replaces the file (idempotent). The report
+    surfaces signal counts, the prior-vs-new diff, the drop ledger (nothing
+    silent), and a **report-only** measured MBID coverage over liked + playlist
+    tracks (computed via the existing resolve() chain, never persisted —
+    decision dddc4d90)."""
+    store = UserStore(root=args.data_dir)
+    prior = store.load_library()
+
+    stats = AccountDataStats()
+    library = load_account_data(args.source, now=datetime.now(UTC), stats=stats)
+    diff = diff_libraries(prior, library)
+    # Idempotency: an unchanged export must re-write byte-identically, so carry the
+    # prior imported_at forward when nothing else changed (the wall-clock now would
+    # otherwise make every re-import differ).
+    library = preserve_import_timestamp(prior, library)
+    store.write_library(library)
+
+    n_playlist_tracks = sum(len(pl.items) for pl in library.playlists)
+    print(f"imported Spotify Account Data from {args.source} -> {store.library_path}")
+    print(
+        f"  signals: likes={len(library.liked_tracks)} "
+        f"banned_artists={len(library.banned_artists)} "
+        f"followed_artists={len(library.followed_artists)} "
+        f"saved_albums={len(library.saved_albums)} "
+        f"playlists={len(library.playlists)} ({n_playlist_tracks} tracks) "
+        f"marquee={len(library.marquee)}"
+    )
+    print(
+        f"  diff vs prior: likes +{diff.likes_added}/-{diff.likes_removed} "
+        f"bans +{diff.bans_added}/-{diff.bans_removed} "
+        f"follows +{diff.follows_added}/-{diff.follows_removed}"
+    )
+    # Drop-accounting, never silent: unmapped YourLibrary keys (bannedTracks/shows/
+    # episodes/podcastChapters/other) and non-spotify:track: playlist URIs.
+    key_ledger = " ".join(f"{k}={v}" for k, v in sorted(stats.dropped_keys.items())) or "none"
+    print(
+        f"  dropped (accounted, not imported): {stats.total_dropped} total — "
+        f"unmapped-library-keys[{key_ledger}] "
+        f"non-track-playlist-uris={stats.dropped_non_track_playlist_uris}"
+    )
+
+    # Report-only MBID coverage over liked + playlist tracks through the existing
+    # waterfall. Measured and printed, then discarded — the identity cache is the
+    # single home for resolved ids (decision dddc4d90); library.json stores none.
+    resolver = _build_resolver(args)
+    tracks = [*library.liked_tracks, *(it.track for pl in library.playlists for it in pl.items)]
+    report = resolver.resolve_all(tracks)
+    print(
+        f"  MBID coverage (report-only, over {report.n_unique} unique liked+playlist "
+        f"tracks): {report.mbid_coverage:.2f} ({report.counts['mbid']}/{report.n_unique})"
+    )
     return 0
 
 
@@ -511,6 +574,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_import_spotify.set_defaults(func=_cmd_import_spotify)
+
+    p_import_account = sub.add_parser(
+        "import-account",
+        help="import a Spotify Account Data export (likes/bans/follows/playlists/Marquee)",
+    )
+    p_import_account.add_argument(
+        "--from",
+        dest="source",
+        required=True,
+        help="directory of the Account Data export "
+        "(YourLibrary.json, Playlist*.json, Marquee.json)",
+    )
+    p_import_account.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_import_account.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV for the report-only coverage measure "
+        "(default: $MUSICBRAINZ_ISRC_INDEX)",
+    )
+    p_import_account.set_defaults(func=_cmd_import_account)
 
     p_build_mb = sub.add_parser(
         "build-mb-index",
