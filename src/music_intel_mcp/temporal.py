@@ -44,7 +44,7 @@ from typing import Any
 from scipy.stats import ks_2samp
 
 from .audio import _history_midpoint
-from .models import Epoch, EpochParams, TemporalParams, ValidationParams
+from .models import Epoch, EpochParams, PlayContext, TemporalParams, ValidationParams
 from .validation import (
     Candidate,
     DatasetContext,
@@ -56,6 +56,32 @@ from .validation import (
 # A KS window narrower than this carries too little signal to trust a p-value;
 # the boundary is skipped rather than fed a degenerate two-sample test.
 _MIN_WINDOW_EVENTS = 5
+
+# A play shorter than this many ms reads as a skip-grade impression, not a
+# deliberate listen. A *module-level* constant, deliberately NOT a TemporalParams
+# field: the V0 param set is LOCKED (decision 8186bc56) and this filter is a
+# fixed data-quality gate on the temporal-seed path, not a tunable of the method.
+# Threshold-sensitivity is deferred to #95 (decision c69c6f17).
+MIN_VALID_MS = 30_000
+
+
+def _is_valid(context: PlayContext | None) -> bool:
+    """Play-validity predicate for the temporal-seed path (decision ``c69c6f17``).
+
+    Returns ``False`` **iff** the play is an explicit non-listen: a duration
+    known to be under :data:`MIN_VALID_MS`, or an explicit ``skipped`` flag.
+    Everything unknown is kept (``True``): no context at all, an absent
+    ``ms_played``, and ``skipped in {None, False}``. Null-safe by construction so
+    the IFTTT / thin-scrobble sources — which carry no context — always pass.
+
+    Applies ONLY in the temporal seed path; the import and audio/scene seed maps
+    are unaffected.
+    """
+    if context is None:
+        return True
+    if context.ms_played is not None and context.ms_played < MIN_VALID_MS:
+        return False
+    return context.skipped is not True
 
 
 # --------------------------------------------------------------------------- #
@@ -231,16 +257,31 @@ def derive_temporal_roots(
     epoch_params: EpochParams,
     validation_params: ValidationParams,
     dataset_ctx: DatasetContext,
+    epoch_plays: Mapping[str, list[datetime]] | None = None,
 ) -> TemporalDerivation:
     """Qualify upstream roots by calendar bucket (lift) and detect epochs.
 
     ``members`` maps each surviving upstream root/tendency id to its member
-    canonical track ids; ``track_plays`` is the full per-track timestamp map
-    (its bucket totals form the lift denominators). With no members the ordering
-    guard trips and the stage is skipped.
+    canonical track ids. Two play maps drive the two halves (AC3, decision
+    ``77111ce0``):
+
+    - ``track_plays`` — the **validity-filtered** stream. Feeds the bucket totals
+      (lift denominators), per-root lift, and the ``_balance`` stability score:
+      short/skipped impressions must not inflate a root's apparent affinity for a
+      time-of-day.
+    - ``epoch_plays`` — the **unfiltered** stream, fed to epoch detection and
+      ``epoch_presence`` ONLY. Change-point detection is a claim about *listening
+      behaviour over time*; dropping skips would confound a change in taste with a
+      change in skip rate. Defaults to ``track_plays`` (single-map behaviour) so
+      existing callers are unaffected.
+
+    With no members the ordering guard trips and the stage is skipped.
     """
     if not members:
         return TemporalDerivation(ValidationOutcome(), [], {}, skipped=True)
+
+    if epoch_plays is None:
+        epoch_plays = track_plays
 
     calendar = params.temporal_calendar
     n_total = sum(len(v) for v in track_plays.values())
@@ -359,8 +400,11 @@ def derive_temporal_roots(
         for tid in members[rid]:
             code_of_track.setdefault(tid, code_of_root[rid])
 
+    # Epochs and epoch_presence read the UNFILTERED stream (epoch_plays): a
+    # change point is a claim about listening over time, and validity-filtering
+    # here would confound a taste shift with a skip-rate shift (decision 77111ce0).
     events: list[tuple[datetime, int]] = []
-    for tid, times in track_plays.items():
+    for tid, times in epoch_plays.items():
         code = code_of_track.get(tid, 0)
         for t in times:
             events.append((t, code))
@@ -372,7 +416,7 @@ def derive_temporal_roots(
 
     epoch_presence: dict[str, dict[str, float]] = {}
     for rid in root_ids_sorted:
-        member_times = [t for tid in dict.fromkeys(members[rid]) for t in track_plays.get(tid, [])]
+        member_times = [t for tid in dict.fromkeys(members[rid]) for t in epoch_plays.get(tid, [])]
         pres: dict[str, float] = {}
         for epoch, (lo, hi, is_last) in zip(epochs, ranges, strict=True):
             total = epoch.n_events

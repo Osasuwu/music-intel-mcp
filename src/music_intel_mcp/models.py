@@ -52,9 +52,10 @@ class PlayContext(BaseModel):
     History source (#89): the private-session flag and the ISO-3166 alpha-2
     country of the connection. Both are *carried, not yet acted on* — incognito is
     a lossless flag (no import-time filter, decision 83bd6f76) and conn_country is
-    the raw input for local-timezone bucketize (deferred to #90, decision
-    d2c1ff60). Every field stays independently nullable so the IFTTT and thin
-    scrobble sources, which carry none of them, still validate."""
+    the raw input for local-timezone bucketize (wired in #90 via
+    ``analyzer._temporal_plays`` + ``timezones.zone_for``, decision d2c1ff60).
+    Every field stays independently nullable so the IFTTT and thin scrobble
+    sources, which carry none of them, still validate."""
 
     model_config = ConfigDict(extra="forbid")
 

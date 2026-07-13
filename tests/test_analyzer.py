@@ -3,9 +3,10 @@ audio stage (#63) wired through `analyze`."""
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
-from music_intel_mcp.analyzer import _group_and_seed, analyze
+from music_intel_mcp.analyzer import _group_and_seed, _temporal_plays, analyze
 from music_intel_mcp.audio import InMemoryAudioFeatureSource
 from music_intel_mcp.identity import (
     IdentityResolver,
@@ -16,6 +17,7 @@ from music_intel_mcp.models import (
     AudioParams,
     ListenEvent,
     MethodParams,
+    PlayContext,
     RootProfile,
     SceneParams,
     TrackRef,
@@ -406,3 +408,157 @@ def test_analyze_runs_audio_and_scene_together():
     # 24 tracks total; each enricher covers only its own 12 → honest 0.5 each
     assert profile.generated_from.coverage_per_category["audio"] == 0.5
     assert profile.generated_from.coverage_per_category["scene"] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# Local-timezone temporal-seed builder (#90 AC2/AC4, decision 498eb9d1).
+# `_temporal_plays` reads played_at/context/source straight off the events (NOT
+# the audio/scene `plays` map, already UTC-coerced) and returns two play maps,
+# both keyed by resolved canonical id and holding naive *local wall-clock*
+# datetimes: a validity-filtered map (feeds lift/buckets) and an unfiltered map
+# (feeds epoch detection only).
+# --------------------------------------------------------------------------- #
+
+_KZ_TRACK = TrackRef(spotify_id="S", name="n", artist="a")
+
+
+def test_spotify_extended_localized_by_conn_country_honors_dst_transition():
+    """A KZ play straddling the 2024-03-01 UTC+6→+5 change bucketizes to a
+    *different* local hour on each side — the whole point of a real IANA region
+    (Asia/Almaty) over a frozen offset. 23:30 UTC → 05:30 (Feb, +6) vs 04:30
+    (Apr, +5)."""
+    feb = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 2, 15, 23, 30, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(conn_country="KZ"),
+    )
+    apr = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 15, 23, 30, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(conn_country="KZ"),
+    )
+    _filtered, unfiltered = _temporal_plays([feb, apr], None, {})
+    times = sorted(unfiltered["spotify:S"])
+    assert [t.hour for t in times] == [5, 4]
+    # naive local wall-clock — the shift already applied, no tz left to re-apply
+    assert all(t.tzinfo is None for t in times)
+
+
+def test_ifttt_plays_are_left_unshifted():
+    """IFTTT timestamps are already local wall-clock (source-scoped, #76) — the
+    builder must NOT shift them, only strip any tz for cross-source comparability."""
+    ev = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 2, 15, 23, 30),
+        source="ifttt",
+        context=None,
+    )
+    _filtered, unfiltered = _temporal_plays([ev], None, {})
+    t = unfiltered["spotify:S"][0]
+    assert (t.hour, t.minute) == (23, 30)
+    assert t.tzinfo is None
+
+
+def test_unmapped_conn_country_falls_back_to_user_modal_zone():
+    """A spotify_extended play whose conn_country is null/unmapped is shifted by
+    the user's *own* modal mapped zone (here KZ → Asia/Almaty), never raw UTC and
+    never a hardcoded default."""
+    kz = [
+        ListenEvent(
+            track=_KZ_TRACK,
+            played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+            source="spotify_extended",
+            context=PlayContext(conn_country="KZ"),
+        )
+        for _ in range(3)
+    ]
+    unknown = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 15, 23, 30, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(conn_country=None),
+    )
+    _filtered, unfiltered = _temporal_plays([*kz, unknown], None, {})
+    # the unmapped play at Apr-15 23:30 UTC → Almaty (+5) → Apr-16 04:30, hour 4
+    unknown_local = [t for t in unfiltered["spotify:S"] if (t.month, t.day) == (4, 16)]
+    assert len(unknown_local) == 1
+    assert unknown_local[0].hour == 4
+
+
+def test_no_mapped_rows_leaves_spotify_plays_in_raw_utc():
+    """When the user has ZERO mapped rows there is no modal zone to borrow, so a
+    spotify_extended play is left in raw UTC wall-clock rather than guessing."""
+    ev = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 2, 15, 23, 30, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(conn_country="ZZ"),  # unmapped, and the only row
+    )
+    _filtered, unfiltered = _temporal_plays([ev], None, {})
+    assert unfiltered["spotify:S"][0].hour == 23  # unshifted
+
+
+def test_validity_filter_applies_to_filtered_map_only():
+    """The dual maps diverge exactly on validity: the unfiltered map keeps every
+    play (epoch detection), the filtered map drops <30s and skipped plays (lift)."""
+    good = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(ms_played=200_000, conn_country="KZ"),
+    )
+    short = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 11, 12, 0, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(ms_played=1_000, conn_country="KZ"),
+    )
+    skipped = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 12, 12, 0, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(skipped=True, conn_country="KZ"),
+    )
+    filtered, unfiltered = _temporal_plays([good, short, skipped], None, {})
+    assert len(unfiltered["spotify:S"]) == 3
+    assert len(filtered["spotify:S"]) == 1
+
+
+def test_temporal_plays_keys_by_resolved_mbid():
+    """Grouping is by *resolved* canonical id, sharing the resolve cache with
+    `_group_and_seed` so the dump is not re-walked."""
+    resolver = IdentityResolver(
+        InMemoryIsrcMbidIndex({"I-1": "M-1"}),
+        spotify_source=InMemorySpotifyIsrcSource({"S-1": "I-1"}),
+    )
+    ev = ListenEvent(
+        track=TrackRef(spotify_id="S-1", name="n", artist="a"),
+        played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+        source="spotify_extended",
+        context=PlayContext(conn_country="KZ"),
+    )
+    cache: dict = {}
+    _filtered, unfiltered = _temporal_plays([ev], resolver, cache)
+    assert list(unfiltered) == ["mbid:M-1"]
+    assert cache  # populated for reuse by _group_and_seed
+
+
+def test_temporal_plays_logs_unshifted_count_split_by_source(caplog):
+    """AC4 observability: the count of unshifted plays is logged per source, so
+    the IFTTT traveler-smear residual is visible."""
+    events = [
+        ListenEvent(
+            track=_KZ_TRACK,
+            played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+            source="spotify_extended",
+            context=PlayContext(conn_country="KZ"),
+        ),  # shifted
+        ListenEvent(track=_KZ_TRACK, played_at=datetime(2024, 4, 10, 12, 0), source="ifttt"),
+        ListenEvent(track=_KZ_TRACK, played_at=datetime(2024, 4, 11, 12, 0), source="ifttt"),
+    ]
+    with caplog.at_level(logging.INFO, logger="music_intel_mcp.analyzer"):
+        _temporal_plays(events, None, {})
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "ifttt" in msg and "2" in msg

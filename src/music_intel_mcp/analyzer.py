@@ -14,8 +14,11 @@ invariant, not a failure.
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from .audio import AudioFeatureSource, derive_audio_roots, enrich_audio_features
 from .identity import IdentityResolver
@@ -29,8 +32,12 @@ from .models import (
 )
 from .scene import TagSource, derive_scene_roots, enrich_tags
 from .shared_store import SharedStore, TrackMetadataRecord, canonical_track_id
-from .temporal import derive_temporal_roots
+from .spotify_extended import SOURCE as SPOTIFY_EXTENDED_SOURCE
+from .temporal import _is_valid, derive_temporal_roots
+from .timezones import zone_for
 from .validation import DatasetContext, ValidationOutcome
+
+logger = logging.getLogger(__name__)
 
 
 def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
@@ -61,11 +68,32 @@ def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
     )
 
 
+def _resolve_ref(
+    track: TrackRef,
+    resolver: IdentityResolver | None,
+    cache: dict[str, TrackRef],
+) -> TrackRef:
+    """Walk ``track`` up the identity waterfall, memoised per raw canonical id so
+    duplicate plays never re-walk the dump. Returns the raw ref unchanged when no
+    resolver is wired (the honest-empty V0 path). The ``cache`` is shared between
+    :func:`_group_and_seed` and :func:`_temporal_plays` so the two seed maps agree
+    on the resolved key-space and the resolver runs once per distinct raw id."""
+    if resolver is None:
+        return track
+    raw_cid = canonical_track_id(track)
+    ref = cache.get(raw_cid)
+    if ref is None:
+        ref = resolver.resolve(track).to_track_ref()
+        cache[raw_cid] = ref
+    return ref
+
+
 def _group_and_seed(
     events: Sequence[ListenEvent],
     store: SharedStore,
     now: datetime,
     resolver: IdentityResolver | None = None,
+    resolved_cache: dict[str, TrackRef] | None = None,
 ) -> tuple[dict[str, list[datetime]], list[str]]:
     """Group plays by canonical id and seed any unknown tracks into the shared
     store, returning the play map and the unique id list both stages share.
@@ -83,17 +111,12 @@ def _group_and_seed(
     Seeds carry only anonymous track facts (ids + name/artist) — never per-user
     fields — so writing them to the shared store is safe. Naive timestamps are
     coerced to UTC. Done once so audio and scene reuse the same seeded store."""
+    if resolved_cache is None:
+        resolved_cache = {}
     plays: dict[str, list[datetime]] = {}
     refs: dict[str, TrackRef] = {}
-    resolved_refs: dict[str, TrackRef] = {}  # raw canonical id -> resolved ref
     for event in events:
-        track = event.track
-        if resolver is not None:
-            raw_cid = canonical_track_id(track)
-            track = resolved_refs.get(raw_cid)
-            if track is None:
-                track = resolver.resolve(event.track).to_track_ref()
-                resolved_refs[raw_cid] = track
+        track = _resolve_ref(event.track, resolver, resolved_cache)
         cid = canonical_track_id(track)
         played = event.played_at
         if played.tzinfo is None:
@@ -119,6 +142,95 @@ def _group_and_seed(
     if seeds:
         store.upsert_tracks(seeds)
     return plays, unique_ids
+
+
+def _local_naive(played: datetime, zone: str) -> datetime:
+    """Shift a (UTC-coerced) timestamp into ``zone`` and drop the tzinfo, yielding
+    a naive *local wall-clock* datetime. zoneinfo picks the offset in force on the
+    play's own date, so a DST/historical transition (e.g. KZ 2024-03-01 UTC+6→+5)
+    lands the play in the hour the listener actually experienced."""
+    if played.tzinfo is None:
+        played = played.replace(tzinfo=UTC)
+    return played.astimezone(ZoneInfo(zone)).replace(tzinfo=None)
+
+
+def _modal_zone(events: Sequence[ListenEvent]) -> str | None:
+    """The user's most common *mapped* zone across their own spotify_extended
+    plays — the fallback for a play whose conn_country is null/unmapped. Computed
+    per user from their own data; never a hardcoded owner default. ``None`` when
+    the user has zero mapped rows (then the caller leaves such plays in raw UTC).
+    Ties break by zone name so the choice is deterministic across runs."""
+    counts: Counter[str] = Counter()
+    for event in events:
+        if event.source != SPOTIFY_EXTENDED_SOURCE:
+            continue
+        ctx = event.context
+        zone = zone_for(ctx.conn_country) if ctx else None
+        if zone is not None:
+            counts[zone] += 1
+    if not counts:
+        return None
+    return min(counts, key=lambda z: (-counts[z], z))
+
+
+def _localize(event: ListenEvent, modal_zone: str | None) -> tuple[datetime, bool]:
+    """Map one event to its naive local wall-clock datetime and a ``shifted`` flag.
+
+    - ``spotify_extended`` (UTC-stamped): shift by ``conn_country``'s zone, falling
+      back to the user's ``modal_zone``; ``shifted=True``. With no zone at all
+      (unmapped country AND no modal) leave it in raw UTC, ``shifted=False``.
+    - Any other source (``ifttt`` etc.): the timestamp is already local wall-clock
+      (#76), so only strip tzinfo — never shift; ``shifted=False``.
+    """
+    played = event.played_at
+    if event.source != SPOTIFY_EXTENDED_SOURCE:
+        return (played.replace(tzinfo=None) if played.tzinfo else played), False
+    ctx = event.context
+    zone = zone_for(ctx.conn_country) if ctx else None
+    if zone is None:
+        zone = modal_zone
+    if zone is None:
+        return (played.replace(tzinfo=None) if played.tzinfo else played), False
+    return _local_naive(played, zone), True
+
+
+def _temporal_plays(
+    events: Sequence[ListenEvent],
+    resolver: IdentityResolver | None,
+    resolved_cache: dict[str, TrackRef],
+) -> tuple[dict[str, list[datetime]], dict[str, list[datetime]]]:
+    """Build the temporal-seed play maps straight off the events (#90, AC2/AC4).
+
+    Reads ``played_at``/``context``/``source`` from each :class:`ListenEvent` —
+    NOT the audio/scene ``plays`` map, which is already UTC-coerced (double-shift
+    risk). Localizes each play to naive local wall-clock (:func:`_localize`) and
+    groups by *resolved* canonical id (shared ``resolved_cache``). Returns two
+    maps: a validity-**filtered** one (feeds lift/buckets/_balance) and an
+    **unfiltered** one (feeds epoch detection only), so the filter never moves an
+    epoch boundary (decision ``77111ce0``).
+
+    AC4: logs the count of *unshifted* plays split by source — the IFTTT
+    traveler-smear residual that local-tz bucketize cannot correct.
+    """
+    modal_zone = _modal_zone(events)
+    filtered: dict[str, list[datetime]] = {}
+    unfiltered: dict[str, list[datetime]] = {}
+    unshifted: Counter[str] = Counter()
+    for event in events:
+        cid = canonical_track_id(_resolve_ref(event.track, resolver, resolved_cache))
+        local, shifted = _localize(event, modal_zone)
+        if not shifted:
+            unshifted[event.source] += 1
+        unfiltered.setdefault(cid, []).append(local)
+        if _is_valid(event.context):
+            filtered.setdefault(cid, []).append(local)
+    if unshifted:
+        logger.info(
+            "temporal: %d plays left unshifted (local wall-clock as-is) by source: %s",
+            sum(unshifted.values()),
+            dict(unshifted),
+        )
+    return filtered, unfiltered
 
 
 def _dataset_ctx(generated_from: GeneratedFrom) -> DatasetContext:
@@ -166,7 +278,10 @@ def analyze(
     # stage to condition lift on root membership.
     members: dict[str, list[str]] = {}
     if events and shared_store is not None and (audio_source is not None or tag_source is not None):
-        plays, unique_ids = _group_and_seed(events, shared_store, generated_at, resolver)
+        resolved_cache: dict[str, TrackRef] = {}
+        plays, unique_ids = _group_and_seed(
+            events, shared_store, generated_at, resolver, resolved_cache
+        )
         ctx = _dataset_ctx(generated_from)
 
         if audio_source is not None:
@@ -203,13 +318,18 @@ def analyze(
         # validation — artifact_suspects are not real patterns to condition on.
         surviving = {item.id for item in (*outcome.roots, *outcome.tendencies)}
         members = {rid: ids for rid, ids in members.items() if rid in surviving}
+        # Temporal seeds off the events directly, localized to the listener's wall
+        # clock (#90): the filtered map drives lift/buckets, the unfiltered map
+        # drives epoch detection only. Shares the resolve cache with the seed step.
+        temporal_filtered, temporal_unfiltered = _temporal_plays(events, resolver, resolved_cache)
         temporal = derive_temporal_roots(
             members,
-            plays,
+            temporal_filtered,
             params=params.temporal,
             epoch_params=params.epochs,
             validation_params=params.validation,
             dataset_ctx=ctx,
+            epoch_plays=temporal_unfiltered,
         )
         if not temporal.skipped:
             _merge(outcome, temporal.outcome)

@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from music_intel_mcp.models import EpochParams, TemporalParams, ValidationParams
+from music_intel_mcp.models import EpochParams, PlayContext, TemporalParams, ValidationParams
 from music_intel_mcp.temporal import (
+    MIN_VALID_MS,
     TemporalDerivation,
+    _is_valid,
     bucketize,
     derive_temporal_roots,
 )
@@ -44,6 +46,29 @@ _WN_2026 = [datetime(2026, 1, d, 2, tzinfo=UTC) for d in (5, 6, 7, 8, 9)]  # Mon
 # Mon–Fri summer (July) 14:00 days, across two summers.
 _SD_2024 = [datetime(2024, 7, d, 14, tzinfo=UTC) for d in (15, 16, 17, 18, 19)]  # Mon–Fri
 _SD_2025 = [datetime(2025, 7, d, 14, tzinfo=UTC) for d in (14, 15, 16, 17, 18)]  # Mon–Fri
+
+
+# --------------------------------------------------------------------------- #
+# Play-validity filter (#90, decision c69c6f17)
+# --------------------------------------------------------------------------- #
+
+
+def test_min_valid_ms_is_module_constant():
+    # The 30s threshold is a module-level constant, NOT a TemporalParams field —
+    # the LOCKED param set (decision 8186bc56) stays untouched.
+    assert MIN_VALID_MS == 30_000
+    assert not hasattr(TemporalParams(), "min_valid_ms")
+
+
+def test_is_valid_boundary_cases():
+    # invalid iff (ms_played is not None and ms_played < 30_000) or skipped is True
+    assert _is_valid(PlayContext(ms_played=29_999)) is False  # just under → skip-grade
+    assert _is_valid(PlayContext(ms_played=30_000)) is True  # exactly the floor → valid
+    assert _is_valid(PlayContext(ms_played=None)) is True  # unknown duration → valid
+    assert _is_valid(PlayContext(skipped=True)) is False  # skipped → invalid
+    assert _is_valid(PlayContext(skipped=None)) is True  # unknown skip → valid
+    assert _is_valid(PlayContext(skipped=False)) is True  # not skipped → valid
+    assert _is_valid(None) is True  # no context at all → valid
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +227,58 @@ def test_epochs_detected_via_ks_and_live_in_epochs_not_roots():
     # regime 1 dominated by r-audio-1, regime 2 by r-audio-2
     assert d.epochs[0].dominant_roots[:1] == ["r-audio-1"]
     assert d.epochs[-1].dominant_roots[:1] == ["r-audio-2"]
+
+
+def test_epochs_come_from_unfiltered_epoch_map_not_the_lift_map():
+    # AC3 (decision 77111ce0): derive_temporal_roots takes TWO play maps — a
+    # validity-filtered map (lift/buckets/_balance) and an unfiltered map fed to
+    # epoch detection ONLY. On a dataset whose skip rate is non-stationary over
+    # time, epoch boundaries are identical whether or not the filter touched the
+    # lift map — because epochs read the unfiltered stream.
+    members, unfiltered = _two_regime_fixture()
+    # A heavily-filtered lift map: regime 2 all but wiped out (skip-heavy period).
+    # If epoch detection wrongly read this map, regime 2 would fall below the KS
+    # window floor and the second epoch would vanish.
+    filtered = {"tA": unfiltered["tA"], "tB": unfiltered["tB"][:3]}
+    no_roots = TemporalParams(event_count_floor=10_000)
+
+    def _epochs(lift_map):
+        return derive_temporal_roots(
+            members,
+            lift_map,
+            params=no_roots,
+            epoch_params=EP_TIGHT,
+            validation_params=VP_OPEN,
+            dataset_ctx=CTX,
+            epoch_plays=unfiltered,
+        )
+
+    d_split = _epochs(filtered)  # lift map filtered, epoch map full
+    d_full = _epochs(unfiltered)  # lift map == epoch map
+
+    def _bounds(d):
+        return [(e.range, e.change_point_in_significance) for e in d.epochs]
+
+    assert len(d_split.epochs) >= 2, "epochs must survive on the unfiltered stream"
+    assert _bounds(d_split) == _bounds(d_full), "epochs invariant to the lift-map filter"
+    # epoch_presence is also computed off the unfiltered stream, so it matches too.
+    assert d_split.epoch_presence == d_full.epoch_presence
+
+
+def test_epoch_plays_defaults_to_track_plays_for_backward_compat():
+    # Omitting epoch_plays keeps the single-map behavior every existing caller and
+    # test relies on: the lift map doubles as the epoch map.
+    members, plays = _two_regime_fixture()
+    no_roots = TemporalParams(event_count_floor=10_000)
+    d = derive_temporal_roots(
+        members,
+        plays,
+        params=no_roots,
+        epoch_params=EP_TIGHT,
+        validation_params=VP_OPEN,
+        dataset_ctx=CTX,
+    )
+    assert len(d.epochs) >= 2
 
 
 def test_epoch_presence_populated_per_root():
