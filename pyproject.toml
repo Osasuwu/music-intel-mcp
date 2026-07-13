@@ -40,6 +40,10 @@ dependencies = [
   # spotify_api.py). Imported lazily and only exercised behind `resolve
   # --with-spotify`; tests mock it with respx so CI never touches the network.
   "httpx>=0.27",
+  # IANA timezone database for local-wall-clock temporal bucketize (#90, AC2).
+  # Windows ships no system zoneinfo DB, so zoneinfo cannot load "Asia/Almaty"
+  # (and every other conn_country region) without this — decision 498eb9d1.
+  "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
