@@ -181,6 +181,8 @@ Candidates are handed to the #62 `Validator` — the temporal pipeline never cla
 
 This layer stays enrichment-gated + member-conditioned like the rest of temporal: it only runs when ≥1 upstream audio/scene root survives validation.
 
+- **Validity-floor calibration is measurement-designed, not eyeballed (#95 → #98, decision `c6dcf6af`).** Three confounds make a naive floor sweep unreadable, and the #95 harness instruments all three: (1) the `skipped` predicate independently removes short plays at every floor (25% skip rate in the real export), so a per-floor cross-tab (`ms<floor` × `skipped`) + one skip-ignored run attributes movement between the two predicates; (2) `event_count_floor=30` drops candidates *silently* (no quality_log), so most verdict flips are count-cliff artifacts unless the drop is attributed harness-side; (3) `_history_midpoint` is recomputed from the *filtered* map, so stability deltas mix midpoint drift with signal — reported per floor. The read is against **pre-registered criteria** (16–19h peak survival + split-half test-retest agreement), never raw candidate counts. The decision to move `MIN_VALID_MS` lives in #98, `/grill`-gated.
+
 ## History ingestion (V0)
 
 The owner's listening history arrives as a directory of **IFTTT "Spotify → spreadsheet" `.xlsx` exports**. `src/music_intel_mcp/ingest.py` is the adapter; `music-intel import-ifttt --from <dir> [--data-dir ...]` merges it into the per-user `history.jsonl`. Issue #76. This is the only source-format-specific code — everything downstream sees source-agnostic `ListenEvent`s (`source="ifttt"`).
