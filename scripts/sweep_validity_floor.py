@@ -60,6 +60,10 @@ FLOOR_CONFIGS: list[tuple[str, int, bool]] = [
 FLOOR_CONFIGS.append(("30000ms_ignore_skip", 30_000, True))
 
 _EVENING_WINDOW_START = 16  # pre-registered 16-19h local evening peak (AC6.i)
+_EVENING_WINDOW_TOLERANCE_H = 1  # #98 CRITIC loopback: exact-window match was too
+# strict to survive a real 0.3%-margin near-tie (17h peak vs 16h window) and failed
+# identically at every floor including floor=0 — carrying no discriminating signal.
+# A cyclic ±1h tolerance keeps the check meaningful without loosening it into a no-op.
 
 
 # --------------------------------------------------------------------------- #
@@ -232,16 +236,20 @@ def _hour_histogram(times: Sequence[datetime]) -> dict[str, int]:
 
 
 def _evening_peak_survives(hour_hist: Mapping[str, int]) -> bool:
-    """Pre-registered check (AC6.i): does the 16-19h local window hold the
-    largest 3-hour rolling total across the (cyclic) 24h day? Checked against
-    the filtered histogram at every floor — a floor that erases the known
-    evening peak is over-aggressive."""
+    """Pre-registered check (AC6.i), amended by #98 CRITIC loopback: does the
+    largest 3-hour rolling total across the (cyclic) 24h day start within
+    ``_EVENING_WINDOW_TOLERANCE_H`` hours of the 16-19h local evening window?
+    Checked against the filtered histogram at every floor — a floor that
+    erases the known evening peak is over-aggressive."""
     counts = [hour_hist[str(h)] for h in range(24)]
     if sum(counts) == 0:
         return False
     windows = [(sum(counts[(start + i) % 24] for i in range(3)), start) for start in range(24)]
     best_start = max(windows)[1]
-    return best_start == _EVENING_WINDOW_START
+    cyclic_distance = min(
+        (best_start - _EVENING_WINDOW_START) % 24, (_EVENING_WINDOW_START - best_start) % 24
+    )
+    return cyclic_distance <= _EVENING_WINDOW_TOLERANCE_H
 
 
 # --------------------------------------------------------------------------- #
