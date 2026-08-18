@@ -64,6 +64,9 @@ from .shared_store import (
 )
 from .spotify_api import SpotifyApiIsrcSource
 from .spotify_extended import (
+    SOURCE as SPOTIFY_SOURCE,
+)
+from .spotify_extended import (
     SUPERSEDES as SPOTIFY_SUPERSEDES,
 )
 from .spotify_extended import (
@@ -219,6 +222,29 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
     # idempotent.
     kept = [e for e in before if e.source not in SPOTIFY_SUPERSEDES]
     merged = dedup_events([*kept, *imported])
+
+    # #93 guardrail: supersede assumes the new export is a full-history superset
+    # of whatever spotify_extended history it is about to replace (true for a
+    # normal Spotify re-export, which always re-ships the full history) — but
+    # nothing enforces that at import time. A partial, older, or wrong export
+    # file would silently drop real history via replace_history's overwrite.
+    # Warn (never block) when a play about to be dropped predates the new
+    # import's earliest play — that's the signature of history the new import
+    # doesn't actually cover.
+    if imported:
+        new_earliest = min(e.played_at for e in imported)
+        stale_spotify = [
+            e for e in before if e.source == SPOTIFY_SOURCE and e.played_at < new_earliest
+        ]
+        if stale_spotify:
+            print(
+                f"  WARNING: {len(stale_spotify)} prior Spotify Extended plays predate "
+                f"this import's earliest play ({new_earliest.isoformat()}) and are about "
+                "to be dropped. This export may not be a full-history superset of what "
+                "was previously imported — double-check the export file before trusting "
+                "the result."
+            )
+
     store.replace_history(merged)
 
     superseded = len(before) - len(kept)
