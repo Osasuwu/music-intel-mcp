@@ -487,6 +487,37 @@ def test_unmapped_conn_country_falls_back_to_user_modal_zone():
     assert unknown_local[0].hour == 4
 
 
+def test_account_history_plays_are_utc_shifted_like_spotify_extended():
+    """``spotify_account_history`` (#103) is honestly UTC-stamped like
+    ``spotify_extended`` (its own docstring: verified against 8,197 real plays
+    with zero drift) — it must be shifted, not treated as already-local
+    wall-clock like ifttt. It carries no ``conn_country`` of its own, so it
+    falls back to the user's modal mapped zone from their spotify_extended
+    plays (here KZ -> Asia/Almaty)."""
+    modal_seed = [
+        ListenEvent(
+            track=_KZ_TRACK,
+            played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+            source="spotify_extended",
+            context=PlayContext(conn_country="KZ"),
+        )
+        for _ in range(3)
+    ]
+    account_history_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 15, 23, 30, tzinfo=UTC),
+        source="spotify_account_history",
+        context=PlayContext(ms_played=1000),
+    )
+    _filtered, unfiltered = _temporal_plays([*modal_seed, account_history_play], None, {})
+    # Apr-15 23:30 UTC -> Almaty (+5) -> Apr-16 04:30, hour 4 — same shift as a
+    # spotify_extended play at the same instant would get.
+    shifted = [t for t in unfiltered["spotify:S"] if (t.month, t.day) == (4, 16)]
+    assert len(shifted) == 1
+    assert shifted[0].hour == 4
+    assert shifted[0].tzinfo is None
+
+
 def test_no_mapped_rows_leaves_spotify_plays_in_raw_utc():
     """When the user has ZERO mapped rows there is no modal zone to borrow, so a
     spotify_extended play is left in raw UTC wall-clock rather than guessing."""

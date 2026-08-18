@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from .account_history import SOURCE as ACCOUNT_HISTORY_SOURCE
 from .audio import AudioFeatureSource, derive_audio_roots, enrich_audio_features
 from .identity import IdentityResolver
 from .models import (
@@ -38,6 +39,12 @@ from .timezones import zone_for
 from .validation import DatasetContext, ValidationOutcome
 
 logger = logging.getLogger(__name__)
+
+# Sources whose ``played_at`` is honestly UTC-stamped and therefore needs
+# shifting to local wall-clock before bucketizing. Any source not in this set
+# is assumed already-local wall-clock (e.g. ifttt, #76) and is only stripped
+# of tzinfo, never shifted.
+_UTC_STAMPED_SOURCES = frozenset({SPOTIFY_EXTENDED_SOURCE, ACCOUNT_HISTORY_SOURCE})
 
 
 def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
@@ -176,14 +183,15 @@ def _modal_zone(events: Sequence[ListenEvent]) -> str | None:
 def _localize(event: ListenEvent, modal_zone: str | None) -> tuple[datetime, bool]:
     """Map one event to its naive local wall-clock datetime and a ``shifted`` flag.
 
-    - ``spotify_extended`` (UTC-stamped): shift by ``conn_country``'s zone, falling
+    - UTC-stamped sources (``_UTC_STAMPED_SOURCES``: ``spotify_extended``,
+      ``spotify_account_history``): shift by ``conn_country``'s zone, falling
       back to the user's ``modal_zone``; ``shifted=True``. With no zone at all
       (unmapped country AND no modal) leave it in raw UTC, ``shifted=False``.
     - Any other source (``ifttt`` etc.): the timestamp is already local wall-clock
       (#76), so only strip tzinfo — never shift; ``shifted=False``.
     """
     played = event.played_at
-    if event.source != SPOTIFY_EXTENDED_SOURCE:
+    if event.source not in _UTC_STAMPED_SOURCES:
         return (played.replace(tzinfo=None) if played.tzinfo else played), False
     ctx = event.context
     zone = zone_for(ctx.conn_country) if ctx else None
