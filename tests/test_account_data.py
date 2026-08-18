@@ -329,6 +329,9 @@ def test_cli_import_account_writes_library_and_reports(tmp_path, capsys):
     assert "dropped" in out
     # measured MBID coverage over liked + playlist tracks (report-only)
     assert "mbid coverage" in out.lower()
+    # artist-level MBID coverage (#102), same report-only discipline
+    assert "artist mbid coverage" in out.lower()
+    assert "no measured baseline yet" in out.lower()
 
 
 def test_cli_import_account_is_idempotent(tmp_path):
