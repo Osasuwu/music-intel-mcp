@@ -23,6 +23,7 @@ from sweep_validity_floor import (
     _all_bucket_counts,
     _cross_tab,
     _epoch_signature,
+    _evening_peak_survives,
     _filtered_map,
     _floor_candidate_table,
     _is_valid_at,
@@ -222,3 +223,34 @@ def test_run_floors_aborts_when_epoch_mask_is_perturbed(monkeypatch):
 
     with pytest.raises(EpochInvarianceViolation):
         sweep._run_floors(members, rows, unfiltered, CTX, params)
+
+
+# --------------------------------------------------------------------------- #
+# 5. evening-peak criterion tolerance (#98 CRITIC loopback)
+# --------------------------------------------------------------------------- #
+
+
+def _hist_with_peak_start(start: int) -> dict[str, int]:
+    hist = {str(h): 1 for h in range(24)}
+    for i in range(3):
+        hist[str((start + i) % 24)] = 100
+    return hist
+
+
+def test_evening_peak_survives_exact_window():
+    assert _evening_peak_survives(_hist_with_peak_start(16)) is True
+
+
+def test_evening_peak_survives_within_one_hour_tolerance():
+    # Real-data case that motivated the fix: true argmax at 17h, pre-registered
+    # window at 16h — a 0.3% margin that the exact-match check couldn't survive.
+    assert _evening_peak_survives(_hist_with_peak_start(17)) is True
+    assert _evening_peak_survives(_hist_with_peak_start(15)) is True
+
+
+def test_evening_peak_fails_outside_tolerance():
+    assert _evening_peak_survives(_hist_with_peak_start(20)) is False
+
+
+def test_evening_peak_fails_on_empty_histogram():
+    assert _evening_peak_survives({str(h): 0 for h in range(24)}) is False

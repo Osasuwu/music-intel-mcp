@@ -487,3 +487,34 @@ def test_cli_build_mb_index_writes_consumable_tsv(tmp_path, capsys):
     index = MusicBrainzIsrcIndex(path=out)
     assert index.lookup("USONE00000001") == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     assert len(index.lookup_all("USMULTI00001")) == 2
+
+
+# --- build-artist-index (#102): raw dump -> artist-URI->MBID TSV ----------- #
+
+FIXTURE_MB_URL = Path(__file__).parent / "fixtures" / "mbdump" / "url"
+FIXTURE_MB_L_ARTIST_URL = Path(__file__).parent / "fixtures" / "mbdump" / "l_artist_url"
+FIXTURE_MB_ARTIST = Path(__file__).parent / "fixtures" / "mbdump" / "artist"
+
+
+def test_cli_build_artist_index_writes_consumable_tsv(tmp_path, capsys):
+    from music_intel_mcp.artist_identity import MusicBrainzArtistUrlIndex
+
+    out = tmp_path / "artist_uri_to_mbid.tsv"
+    rc = main(
+        [
+            "build-artist-index",
+            "--url-dump",
+            str(FIXTURE_MB_URL),
+            "--l-artist-url-dump",
+            str(FIXTURE_MB_L_ARTIST_URL),
+            "--artist-dump",
+            str(FIXTURE_MB_ARTIST),
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    assert "wrote 2 artist URI->MBID pairs" in capsys.readouterr().out
+    # the freshly built TSV is exactly what the artist resolver's index reads
+    index = MusicBrainzArtistUrlIndex(path=out)
+    assert index.lookup("spotify:artist:spotArtist1") == "bbbbbbbb-1111-1111-1111-111111111111"
