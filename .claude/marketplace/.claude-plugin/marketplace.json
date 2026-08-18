@@ -1,0 +1,24 @@
+{
+  "name": "jarvis-fork-plugins",
+  "owner": {
+    "name": "Osasuwu",
+    "email": "petrkudr2@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "code-review",
+      "description": "Code-review plugin (forked from anthropics/claude-plugins-official, adapted: SOUL.md/AGENTS.md/SKILL.md awareness + diff-coherence reviewer for subagent-fabrication detection).",
+      "author": {
+        "name": "Osasuwu (fork of Anthropic plugin)"
+      },
+      "category": "productivity",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/Osasuwu/claude-plugins-official.git",
+        "path": "plugins/code-review",
+        "ref": "jarvis-pin-code-review-1"
+      },
+      "homepage": "https://github.com/Osasuwu/claude-plugins-official/tree/main/plugins/code-review"
+    }
+  ]
+}

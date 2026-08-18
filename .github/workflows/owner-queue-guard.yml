@@ -1,0 +1,24 @@
+# repo-baseline canon — owner-queue-guard.yml
+# Fails when a PR carries the `status:owner-queue` label.
+name: Owner Queue Guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+
+jobs:
+  guard:
+    name: owner-queue-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for status:owner-queue label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if echo "$LABELS" | grep -q '"status:owner-queue"'; then
+            echo "::error::PR is labelled status:owner-queue — owner review required before merge."
+            echo "Remove the label to clear the guard once the PR is ready to ship."
+            exit 1
+          fi
+          echo "::notice::No status:owner-queue label present."

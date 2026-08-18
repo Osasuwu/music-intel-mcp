@@ -1,0 +1,665 @@
+# repo-baseline canon — code-review.yml (retry-wrapper)
+# attempt-1 → (on failure) attempt-2 → verify-verdict
+# NOT using continue-on-error — retry the cause, not the symptom.
+#
+# This 3-job shape is INTENTIONALLY different from the live reference
+# workflow (.github/workflows/code-review.yml), which is a single `review`
+# job. It is not drift: canon adds the retry wrapper so repos synced from
+# this template get an automatic re-run on a failed attempt (jarvis itself
+# has since converged its own live workflow onto a single job, but that is a
+# jarvis-specific simplification, not a canon regression — #1300). The
+# verdict-decision and cleanliness-gate LOGIC inside these jobs is pinned to
+# match live by tests/ci/test_canon_code_review_verdict_parity.py and
+# tests/ci/test_canon_code_review_ran_cleanly_parity.py; only the job
+# topology around that logic differs.
+name: Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+        type: string
+
+jobs:
+  attempt-1:
+    name: attempt-1
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    outputs:
+      # Surfaces "did the review step actually produce an execution log" to
+      # verify-verdict, which runs in a SEPARATE job and so cannot read
+      # EXEC_FILE itself (it's a path on this job's own runner — see the
+      # cleanliness-gate policy note below). This is the job-boundary
+      # workaround for the #1239/#1182 "ran-but-silent" fail-closed check.
+      execution_ran: ${{ steps.review.outputs.execution_file != '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run code review (attempt 1)
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "*"
+          plugin_marketplaces: ./.claude/marketplace
+          plugins: code-review@jarvis-fork-plugins
+          prompt: |
+            Run /code-review for PR #${{ steps.pr.outputs.number }} in repo ${{ github.repository }}.
+
+            The /code-review slash command is provided by the code-review plugin
+            (loaded via the action's plugins input). Follow its instructions
+            verbatim — eligibility check, guideline-file gather, 12 parallel
+            reviewers, confidence scoring, post comment.
+
+            Do NOT load Jarvis SOUL.md, do NOT call memory_recall/memory_store
+            (not available in this runner). This is plugin invocation only.
+          claude_args: |
+            --allowed-tools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(gh label list:*),Bash(git show:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*),Bash(git ls-tree:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(cat:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(nl:*),Bash(tr:*),Bash(echo:*),Bash(python -m py_compile:*),Bash(python3 -m py_compile:*),Bash(bash -n:*),Bash(node --check:*),Write,Skill(code-review:code-review)"
+
+      # Diagnostic escape hatch for silent no-review runs (#1239). The action
+      # runs with `show_full_output` unset, so the orchestrator's turns are
+      # hidden "for security" and the ONLY copy of what the reviewers actually
+      # did is the runner-local execution log. When the run reports
+      # is_error=false / 0 denials and still posts nothing (observed 3/3 on PR
+      # #1237), both diagnostic steps below say "nothing to verify" and the
+      # evidence dies with the runner. Uploading the log makes that case
+      # diagnosable after the fact instead of only reproducible live.
+      #
+      # Content is agent tool-calls and review prose over a PUBLIC repo, so the
+      # artifact carries nothing the diff doesn't already expose; secrets are
+      # not in scope because the allowed-tools set is read-only and the agents
+      # never read .env. Retention is short on purpose — this is a tripwire
+      # payload, not an archive.
+      #
+      # `name:` includes `${{ github.job }}` (live has no equivalent — it has
+      # only one job) because `github.run_id`/`run_attempt` are constants for
+      # the WHOLE workflow run, not per-job: when attempt-2 retries after
+      # attempt-1 fails, both jobs execute in the same run and would upload an
+      # identically-named artifact without the job discriminator, which
+      # `actions/upload-artifact@v7` rejects as a duplicate (#1300 rework).
+      - name: Upload review execution log
+        if: always() && steps.review.outputs.execution_file != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-execution-output-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: ${{ steps.review.outputs.execution_file }}
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ---------------------------------------------------------------------
+      # REVIEW-CLEANLINESS GATE — canon policy note (#1229)
+      # ---------------------------------------------------------------------
+      # This step exists because a `review` check that is SUCCESS whenever the
+      # bot *ran* cannot tell "reviewed cleanly" from "the reviewer was blocked
+      # from the tools it needed and reviewed half the diff". Until #1229 the
+      # canon carried NO cleanliness gate at all, so every repo synced from
+      # this template got zero denial detection — the weakest of all owned
+      # repos, and the actual drift #1229 set out to find.
+      #
+      # It lives INSIDE each attempt job, not in verify-verdict, because
+      # EXEC_FILE is a path on the attempt runner and does not cross the job
+      # boundary. Placing it here also composes correctly with the retry
+      # wrapper: attempt-1 failing on denials retries the CAUSE in attempt-2
+      # (per `fe795a8e` — retry the cause, never continue-on-error).
+      #
+      # DETECTION is uniform across all owned repos and is the strictest known:
+      # aggregate denials across the WHOLE execution log rather than selecting
+      # the last `result` object. Do not "simplify" this back to `| last` — see
+      # the inline comment below for the field evidence.
+      #
+      # BLOCKING POLICY — blinded-only is the canon default for ALL owned
+      # repos (#1242, decision bf771ebd):
+      #
+      #   blinded-only
+      #     denials > 0 fails ONLY when the run also posted no fresh verdict
+      #     for the head SHA (the reviewer was blinded and never completed);
+      #     denials are logged loudly either way.
+      #
+      # History: until #1242 jarvis ran a STRICT tripwire (denials > 0 ⇒ fail
+      # unconditionally, #1229, mandate `faaf6671` "widen the allowlist, never
+      # soften") while redrobot was a declared blinded-only exception
+      # (decision `f96089ee`, redrobot#1408). The strict premise — 0 denials
+      # reachable via allowlist widening — was falsified in jarvis itself:
+      # observed denial classes are sandbox write-boundary redirects
+      # (PR #1241: `git show > /tmp/...` blocked by the workspace-only write
+      # sandbox, not a prefix miss) and never-allowlistable exec shapes
+      # (PR #1243: `python3 - <<EOF` heredoc, `find -exec`). Both runs
+      # completed and posted verdicts; strict false-failed healthy reviews.
+      # So the repos converged on redrobot's model and the per-repo policy
+      # asymmetry is gone.
+      #
+      # The FAIL-CLOSED FLOOR is non-negotiable: denials with NO fresh verdict
+      # must exit 1, and is_error=true must exit 1. Weakening either (e.g.
+      # "always pass, just warn") IS drift — the parity tests pin this floor.
+      # Accepted residual risk: a fresh verdict does not prove the reviewer
+      # recovered from every denial; mitigants — the denied op was BLOCKED by
+      # the sandbox (never executed), and the verdict guard still classifies
+      # the posted comment, fail-closing on blocking/unparseable verdicts.
+      # ---------------------------------------------------------------------
+      - name: Verify review ran cleanly
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          # Needed for the verdict-presence query below: a denial only fails
+          # the gate when it left NO fresh verdict for the head SHA (#1242).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "::notice::No execution log (review skipped or produced no output); nothing to verify."
+            exit 0
+          fi
+          # EXEC_FILE holds the RAW SDKMessage[] written by claude-code-action's
+          # writeExecutionFile(). The real field is the array
+          # `permission_denials`; `permission_denials_count` is a display-only
+          # field synthesized by the action's console-log sanitizer and is
+          # normally absent, so reading it ALONE silently resolves to 0
+          # regardless of actual denials (#1210).
+          #
+          # AGGREGATE ACROSS THE WHOLE LOG, not `[.[] | select(.type=="result")]
+          # | last` (#1229). /code-review spawns subagents and the stream can
+          # carry more than one `result`; a trailing result reporting 0 SHADOWS
+          # the real aggregate under `last`. Field evidence on this exact shared
+          # plugin: redrobot#1371 / PR #1362 run 28666054188 — the action's own
+          # summary reported 11 denials while a `last`-selecting guard read 0
+          # and passed green. Take the max of the recursive count-field scan and
+          # the size of the unioned permission_denials[] arrays, so neither a
+          # zeroed trailing result nor a relocated field can mask a denial.
+          is_error=$(jq -r 'any(.[] | select(.type == "result"); .is_error == true)' "$EXEC_FILE")
+          count_field=$(jq -r '[.. | .permission_denials_count? // empty] | max // 0' "$EXEC_FILE")
+          count_array=$(jq -r '[.. | .permission_denials? // empty] | add // [] | length' "$EXEC_FILE")
+          denials=$(( count_field > count_array ? count_field : count_array ))
+          echo "Review result: is_error=$is_error permission_denials_count=$denials"
+          if [ "$is_error" = "true" ]; then
+            echo "::error::Code review run reported is_error=true — the model call failed. Failing loudly (not masking as a verdict-guard fail-closed)."
+            exit 1
+          fi
+          if [ "$denials" -eq 0 ]; then
+            echo "::notice::Code review ran cleanly (0 permission denials)."
+            exit 0
+          fi
+          # BLINDED-ONLY — canon default (#1242, decision bf771ebd; see the
+          # policy note above). Denials fail ONLY when the run posted no fresh
+          # verdict for the head SHA. The fail-closed floor below (denials +
+          # no fresh verdict ⇒ exit 1) is pinned by the parity tests — do not
+          # weaken it to warn-and-pass.
+          echo "::warning::Code review hit $denials permission denial(s). Checking whether a fresh verdict was still posted before deciding to fail."
+          echo "Denied tool calls:"
+          jq -r '[.. | .permission_denials? // empty] | add // [] | .[]
+                 | "  - \(.tool_name): \(.tool_input | tostring | .[0:160])"' \
+            "$EXEC_FILE" 2>/dev/null | sort -u || true
+
+          # Freshness-anchored verdict-presence check — same comment selector
+          # and head-time anchor as the verify-verdict job. If the query
+          # fails, `set -e` aborts the step ⇒ fail closed, never pass on an
+          # unverifiable claim.
+          HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          HEAD_TIME=$(gh api "repos/$REPO/commits/$HEAD_SHA" -q .commit.committer.date)
+          fresh=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -rs --arg head "$HEAD_TIME" 'add
+                | map(select(.body | test("(^|\\n)#{1,6}[ \\t]*(Claude[ \\t]+)?Code[ \\t]+Review"; "i")))
+                | map(select(.created_at >= $head)) | length')
+
+          if [ "${fresh:-0}" -gt 0 ]; then
+            echo "::warning::A fresh /code-review verdict was posted for $HEAD_SHA despite $denials denial(s); treating denials as non-fatal (#1242). The verify-verdict job classifies the posted comment."
+            exit 0
+          fi
+
+          echo "::error::Code review hit $denials permission denial(s) AND posted no fresh verdict for $HEAD_SHA — the reviewer was blinded and never completed. Failing closed; re-run code-review."
+          exit 1
+
+  attempt-2:
+    name: attempt-2
+    needs: [attempt-1]
+    if: |
+      always() && needs.attempt-1.result == 'failure' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    outputs:
+      # Same job-boundary workaround as attempt-1's `execution_ran` output —
+      # see the comment there.
+      execution_ran: ${{ steps.review.outputs.execution_file != '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run code review (attempt 2 — retry of cause)
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "*"
+          plugin_marketplaces: ./.claude/marketplace
+          plugins: code-review@jarvis-fork-plugins
+          prompt: |
+            Run /code-review for PR #${{ steps.pr.outputs.number }} in repo ${{ github.repository }}.
+
+            The /code-review slash command is provided by the code-review plugin
+            (loaded via the action's plugins input). Follow its instructions
+            verbatim — eligibility check, guideline-file gather, 12 parallel
+            reviewers, confidence scoring, post comment.
+
+            Do NOT load Jarvis SOUL.md, do NOT call memory_recall/memory_store
+            (not available in this runner). This is plugin invocation only.
+          claude_args: |
+            --allowed-tools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(gh label list:*),Bash(git show:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*),Bash(git ls-tree:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(cat:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(nl:*),Bash(tr:*),Bash(echo:*),Bash(python -m py_compile:*),Bash(python3 -m py_compile:*),Bash(bash -n:*),Bash(node --check:*),Write,Skill(code-review:code-review)"
+
+      # Diagnostic escape hatch for silent no-review runs (#1239) — same
+      # rationale as attempt-1; see the full comment there. Kept
+      # byte-identical between the two attempt jobs.
+      - name: Upload review execution log
+        if: always() && steps.review.outputs.execution_file != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-execution-output-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: ${{ steps.review.outputs.execution_file }}
+          retention-days: 7
+          if-no-files-found: warn
+
+      # Same cleanliness gate as attempt-1 — see the full policy note there
+      # (#1229). Kept byte-identical between the two attempt jobs; the parity
+      # guard tests/ci/test_canon_code_review_ran_cleanly_parity.py pins that.
+      - name: Verify review ran cleanly
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          # Needed for the verdict-presence query below: a denial only fails
+          # the gate when it left NO fresh verdict for the head SHA (#1242).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "::notice::No execution log (review skipped or produced no output); nothing to verify."
+            exit 0
+          fi
+          # EXEC_FILE holds the RAW SDKMessage[] written by claude-code-action's
+          # writeExecutionFile(). The real field is the array
+          # `permission_denials`; `permission_denials_count` is a display-only
+          # field synthesized by the action's console-log sanitizer and is
+          # normally absent, so reading it ALONE silently resolves to 0
+          # regardless of actual denials (#1210).
+          #
+          # AGGREGATE ACROSS THE WHOLE LOG, not `[.[] | select(.type=="result")]
+          # | last` (#1229). /code-review spawns subagents and the stream can
+          # carry more than one `result`; a trailing result reporting 0 SHADOWS
+          # the real aggregate under `last`. Field evidence on this exact shared
+          # plugin: redrobot#1371 / PR #1362 run 28666054188 — the action's own
+          # summary reported 11 denials while a `last`-selecting guard read 0
+          # and passed green. Take the max of the recursive count-field scan and
+          # the size of the unioned permission_denials[] arrays, so neither a
+          # zeroed trailing result nor a relocated field can mask a denial.
+          is_error=$(jq -r 'any(.[] | select(.type == "result"); .is_error == true)' "$EXEC_FILE")
+          count_field=$(jq -r '[.. | .permission_denials_count? // empty] | max // 0' "$EXEC_FILE")
+          count_array=$(jq -r '[.. | .permission_denials? // empty] | add // [] | length' "$EXEC_FILE")
+          denials=$(( count_field > count_array ? count_field : count_array ))
+          echo "Review result: is_error=$is_error permission_denials_count=$denials"
+          if [ "$is_error" = "true" ]; then
+            echo "::error::Code review run reported is_error=true — the model call failed. Failing loudly (not masking as a verdict-guard fail-closed)."
+            exit 1
+          fi
+          if [ "$denials" -eq 0 ]; then
+            echo "::notice::Code review ran cleanly (0 permission denials)."
+            exit 0
+          fi
+          # BLINDED-ONLY — canon default (#1242, decision bf771ebd; see the
+          # policy note above). Denials fail ONLY when the run posted no fresh
+          # verdict for the head SHA. The fail-closed floor below (denials +
+          # no fresh verdict ⇒ exit 1) is pinned by the parity tests — do not
+          # weaken it to warn-and-pass.
+          echo "::warning::Code review hit $denials permission denial(s). Checking whether a fresh verdict was still posted before deciding to fail."
+          echo "Denied tool calls:"
+          jq -r '[.. | .permission_denials? // empty] | add // [] | .[]
+                 | "  - \(.tool_name): \(.tool_input | tostring | .[0:160])"' \
+            "$EXEC_FILE" 2>/dev/null | sort -u || true
+
+          # Freshness-anchored verdict-presence check — same comment selector
+          # and head-time anchor as the verify-verdict job. If the query
+          # fails, `set -e` aborts the step ⇒ fail closed, never pass on an
+          # unverifiable claim.
+          HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          HEAD_TIME=$(gh api "repos/$REPO/commits/$HEAD_SHA" -q .commit.committer.date)
+          fresh=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -rs --arg head "$HEAD_TIME" 'add
+                | map(select(.body | test("(^|\\n)#{1,6}[ \\t]*(Claude[ \\t]+)?Code[ \\t]+Review"; "i")))
+                | map(select(.created_at >= $head)) | length')
+
+          if [ "${fresh:-0}" -gt 0 ]; then
+            echo "::warning::A fresh /code-review verdict was posted for $HEAD_SHA despite $denials denial(s); treating denials as non-fatal (#1242). The verify-verdict job classifies the posted comment."
+            exit 0
+          fi
+
+          echo "::error::Code review hit $denials permission denial(s) AND posted no fresh verdict for $HEAD_SHA — the reviewer was blinded and never completed. Failing closed; re-run code-review."
+          exit 1
+
+  verify-verdict:
+    name: verify-verdict
+    needs: [attempt-1, attempt-2]
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      # #1228: the head-lineage probe lists this workflow's own runs via the
+      # Actions API. Without `actions: read` the query 404s and, under
+      # `set -euo pipefail`, the step dies — every PR would block on an
+      # infrastructure gap rather than on a review verdict.
+      actions: read
+    steps:
+      # Auto-merge MERGE gate (Gate 1 of the two-gate model, #988). This step
+      # turns the `review` check into a real verdict — without it the check is
+      # SUCCESS as long as the bot ran, so auto-merge can't tell "ran cleanly"
+      # from "found CRITICAL bugs".
+      #
+      # TWO-GATE MODEL: the MERGE gate blocks on a merge-blocking finding — an
+      # all-caps CRITICAL/MAJOR/BLOCKING/MEDIUM severity heading. MEDIUM was
+      # promoted into the blocking set (#1385 follow-up) — a MEDIUM finding can
+      # genuinely corrupt state in the moment, unlike the MINOR/LOW/INFO/NITPICK
+      # advisories that stay non-blocking. MINOR/NITPICK/LOW/INFO and a bare
+      # "Found N issues:" line do NOT block, matching the REWORK-done gate
+      # (n_critical==0 AND n_major==0) so a clean-but-minor PR no longer
+      # ping-pongs between rework and the merge gate (#976).
+      #
+      # Hardened verdict contract (mirrors the jarvis reference workflow and
+      # tests/ci/test_code_review_verdict_guard.py):
+      #   - SELECT the latest comment whose body carries a code-review title
+      #     heading (1-6 #'s, optional "Claude", any case, anywhere in body).
+      #   - FRESHNESS (#993): a comment is a verdict only for the CURRENT head
+      #     commit. Anchor on the head commit's committer time; a comment older
+      #     than the head is not this head's verdict (the latest review may have
+      #     errored and posted nothing for this SHA). Fail closed on stale-only.
+      #   - BLOCK signal checked FIRST: all-caps CRITICAL/MAJOR/BLOCKING/MEDIUM
+      #     heading (case-SENSITIVE grep -qE, NOT -qiE — title-case prose like
+      #     "Blocking issues — None" or a title-case "Medium" advisory must not
+      #     false-block, #976). MINOR is NOT in the alternation (two-gate, #988).
+      #   - PASS signals (all exit 0; reached only when no block heading):
+      #     "No issues found." (clean), "Blocking issues — None" (#962 APPROVE),
+      #     "Found N issues:" (advisory, #956), and MINOR/NITPICK/LOW/INFO/
+      #     MEDIUM-only severity sections (#963) — MEDIUM stays in this
+      #     case-INsensitive alternation because a real all-caps "### MEDIUM"
+      #     finding is already caught by the block check above and never
+      #     reaches here; only a title-case "Medium" heading falls through, and
+      #     it must still pass (#1385 follow-up).
+      #   - Selected-but-unrecognized comment → exit 1, fail-closed (#957).
+      #   - No selected comment at all → NOT an automatic pass (#1228). Probe
+      #     the PR's head lineage: if any code-review run over this PR's own
+      #     commits ended in failure, every review attempt died before it could
+      #     post and the PR was never reviewed → fail closed. A non-OPEN PR
+      #     (post-factum workflow_dispatch) passes — nothing left to gate.
+      - name: Verify review verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # #1239/#1182/#1195/#1300: "ran but silent" fail-closed check below
+          # needs to know whether the review step actually executed. EXEC_FILE
+          # itself is a path on the attempt job's own runner and does not cross
+          # the job boundary (see the `execution_ran` output declared on
+          # attempt-1/attempt-2 above), so it's surfaced here as a job output
+          # instead of a raw file check.
+          EXEC_RAN_1: ${{ needs.attempt-1.outputs.execution_ran }}
+          EXEC_RAN_2: ${{ needs.attempt-2.outputs.execution_ran }}
+        run: |
+          set -euo pipefail
+          # Freshness anchor (#993): resolve the head commit's committer time and
+          # treat any comment older than it as not-a-verdict-for-this-head — else
+          # a stale prior-SHA comment wrongly BLOCKS a clean head or wrongly
+          # PASSES a dirty head when the latest review errored and posted nothing.
+          # ISO-8601 UTC timestamps (…Z) compare correctly as plain strings.
+          pr_json=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,state)
+          HEAD_SHA=$(jq -r '.headRefOid' <<<"$pr_json")
+          # PR_STATE (#1228) gates the post-factum carve-out below: OPEN |
+          # MERGED | CLOSED.
+          PR_STATE=$(jq -r '.state' <<<"$pr_json")
+          HEAD_TIME=$(gh api "repos/$REPO/commits/$HEAD_SHA" -q .commit.committer.date)
+
+          # Selection happens in standalone jq, not gh's --jq: gh rejects --slurp
+          # combined with --jq, and without slurping --jq runs per page so .[-1]
+          # is per-page latest, not global. `gh api --paginate` emits one array
+          # per page; `jq -s` slurps them and `add` flattens to one comment list.
+          # gh's --jq is gojq where ^ matches string start only; the (^|\n) anchor
+          # is line-anchored in every engine — keep it under either jq.
+          # `total` = all code-review-titled comments (any age); `freshBody` =
+          # body of the latest one created at/after the head commit ($head).
+          sel=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -rs --arg head "$HEAD_TIME" 'add
+                | map(select(.body | test("(^|\\n)#{1,6}[ \\t]*(Claude[ \\t]+)?Code[ \\t]+Review"; "i")))
+                | { total: length,
+                    freshBody: ( map(select(.created_at >= $head)) | (.[-1].body // "") ) }
+                | @json')
+          total=$(jq -r '.total' <<<"$sel")
+          body=$(jq -r '.freshBody' <<<"$sel")
+
+          if [ "$total" -eq 0 ]; then
+            # No /code-review comment at all. Comment-absence alone does NOT
+            # mean "the plugin skipped" — it is ambiguous, and must be
+            # disambiguated in this order (#1228):
+            #
+            #   1. Non-OPEN PR. A workflow_dispatch re-run against a merged/
+            #      closed PR: the plugin correctly declines and posts nothing.
+            #      No merge left to gate — failing closed is pure noise. PASS.
+            #   2. Never reviewed. Every code-review run over this PR's own
+            #      commits CONCLUDED IN FAILURE, so no attempt ever got far
+            #      enough to post a verdict. jarvis PR #1226 auto-merged
+            #      completely un-reviewed through exactly this hole: three runs
+            #      died on permission denials, a later auto-rebase push skipped
+            #      review as designed, and the gate read the missing comment as
+            #      "plugin skipped". FAIL CLOSED.
+            #   3. Still being reviewed. A code-review run over this PR's own
+            #      commits has NOT completed, so nothing has verified this head
+            #      yet — state 2 only sees runs that already CONCLUDED in
+            #      failure; a review mid-flight is invisible to it. jarvis
+            #      #1429/#1435 both auto-merged unreviewed through exactly this
+            #      hole on 2026-08-07 (#1434). FAIL CLOSED — the gate
+            #      re-evaluates once that run posts its verdict.
+            #   4. Otherwise — a genuine skip (draft / not-eligible / no
+            #      substantive code) over a clean lineage. PASS.
+            if [ "$PR_STATE" != "OPEN" ]; then
+              echo "::notice::PR is $PR_STATE and has no /code-review comment; nothing left to gate on a post-factum run. Treating as pass."
+              exit 0
+            fi
+
+            # Head-lineage probe. Intersect this workflow's runs with the PR's
+            # own commit SHAs once, so another PR's broken or running review can
+            # never block this one, then read two independent signals off that
+            # slice. The currently-executing run is excluded by id — it is in
+            # flight by definition and would otherwise self-block every run.
+            lineage_shas=$(gh api "repos/$REPO/pulls/$PR/commits" --paginate \
+              | jq -rs 'add | map(.sha)')
+            lineage_runs=$(gh api "repos/$REPO/actions/workflows/code-review.yml/runs?per_page=100" --paginate \
+              | jq -s --argjson shas "$lineage_shas" --arg cur "${GITHUB_RUN_ID:-}" '
+                  [ .[].workflow_runs[]
+                    | select((.id | tostring) != $cur)
+                    | select(.head_sha as $s | $shas | index($s) != null) ]')
+
+            # (2) Dead attempts: only `conclusion == "failure"` counts — success,
+            # cancelled and skipped are not evidence of a run that died before it
+            # could post.
+            LINEAGE_FAILED=$(jq -r '[ .[] | select(.conclusion == "failure") ] | length' <<<"$lineage_runs")
+            if [ "$LINEAGE_FAILED" -gt 0 ]; then
+              echo "::error::No /code-review verdict comment exists and $LINEAGE_FAILED code-review run(s) over this PR's commits ended in failure. Every review attempt died before it could post — this PR has never been reviewed. Failing closed (#1228); fix the failing run and re-review."
+              exit 1
+            fi
+
+            # (3) Reviews still in flight (#1434). Keyed on `status != "completed"`
+            # rather than an enumeration of queued/waiting/in_progress/pending, so
+            # a status GitHub adds later fails closed instead of silently reading
+            # as done.
+            LINEAGE_INFLIGHT=$(jq -r '[ .[] | select(.status != "completed") ] | length' <<<"$lineage_runs")
+            if [ "$LINEAGE_INFLIGHT" -gt 0 ]; then
+              inflight_ids=$(jq -r '[ .[] | select(.status != "completed") | .id | tostring ] | join(", ")' <<<"$lineage_runs")
+              echo "::error::No /code-review verdict comment exists yet and $LINEAGE_INFLIGHT code-review run(s) over this PR's commits are still running (run id(s): $inflight_ids). Nothing has verified this head, so there is no prior review for this push to carry forward. Failing closed (#1434); the gate re-evaluates once that run posts its verdict."
+              exit 1
+            fi
+
+            # Ran-but-silent fail-closed check (#1239/#1182/#1195, canon parity
+            # #1300). Neither attempt job failed outright, but if EITHER one
+            # actually ran the review step (execution log produced) and still
+            # posted zero /code-review comments, that's a silent no-review, not
+            # a legitimate skip — the exact #1179 incident where PR #1226
+            # auto-merged fully unreviewed. OR-aggregate across both attempts
+            # (matching the #1229 lesson above, not a "prefer-the-latest" `:-`
+            # fallback): a job output is always defined once its job runs, so
+            # if attempt-2 fails before its own review step executes,
+            # EXEC_RAN_2 resolves to the literal "false" — a `:-` fallback
+            # would never reach attempt-1's real "true" in that case (#1309).
+            if [ "$EXEC_RAN_1" = "true" ] || [ "$EXEC_RAN_2" = "true" ]; then
+              echo "::error::Code review ran cleanly (execution log present, 0 errors/denials per the prior step) but posted zero /code-review comments. This is a silent no-review, not a legitimate skip. Failing closed; re-run code-review."
+              exit 1
+            fi
+
+            echo "::notice::No /code-review comment present and no code-review run over this PR's commits failed; plugin legitimately skipped. Treating as pass."
+            exit 0
+          fi
+
+          if [ -z "$body" ]; then
+            # The plugin reviewed this PR before, but no comment is newer than the
+            # current head commit — the latest review errored or never posted for
+            # $HEAD_SHA. A stale prior-SHA comment is not a verdict for this head
+            # (#993). Fail closed; re-run code-review.
+            echo "::error::/code-review has prior comments on this PR but none newer than head commit $HEAD_SHA ($HEAD_TIME) — the latest review likely errored. Failing closed; re-run code-review."
+            exit 1
+          fi
+
+          # Structured findings block (#1456) — the AUTHORITATIVE severity
+          # source, checked BEFORE the prose ladder below. The reviewer emits a
+          # machine-readable JSON payload inside a `<!-- code-review-findings -->`
+          # comment; prose headings are a lossy rendering of it (PR #1452
+          # auto-merged MEDIUM findings whose prose took the bare "Found N
+          # issues:" pass path). When the block is present it decides; when its
+          # payload is malformed, fail closed rather than fall back to the very
+          # prose parsing the block exists to supersede. Runs before
+          # `export LC_ALL=C` so jq reads the body UTF-8 aware.
+          findings_block=$(sed -n '/<!-- *code-review-findings/,/-->/p' <<<"$body" | sed '1d;$d')
+          if grep -q '<!-- *code-review-findings' <<<"$body"; then
+            if ! jq -e . >/dev/null 2>&1 <<<"$findings_block"; then
+              echo "::error::code-review-findings block present but its payload is not valid JSON. Failing closed (#1456)."
+              exit 1
+            fi
+            blocking=$(jq -r '
+              [ .findings[]? | (.severity // "" | ascii_upcase)
+                | select(. == "CRITICAL" or . == "MAJOR" or . == "BLOCKING" or . == "MEDIUM") ]
+              | length' <<<"$findings_block")
+            if [ "$blocking" -gt 0 ]; then
+              sevs=$(jq -r '[ .findings[]? | (.severity // "" | ascii_upcase)
+                              | select(. == "CRITICAL" or . == "MAJOR" or . == "BLOCKING" or . == "MEDIUM") ]
+                            | unique | join(", ")' <<<"$findings_block")
+              echo "::error::Code review reported $blocking blocking finding(s) ($sevs) in its structured findings block; blocking auto-merge until addressed."
+              exit 1
+            fi
+          fi
+
+          # Severity greps below classify heading decoration via the POSIX class
+          # [^[:alnum:]]. Under the runner's default LANG=C.UTF-8 a multibyte
+          # decoration (emoji "### 🔴 BLOCKING", #954) is read as ONE alnum-
+          # ambiguous rune that [^[:alnum:]] does NOT consume, so the block check
+          # silently misses and a coexisting "### MINOR" can flip the gate to
+          # PASS. Forcing the C locale makes grep treat every decoration byte
+          # individually (non-alnum), restoring the emoji-heading match (#996).
+          # Set AFTER the jq body extraction so JSON decoding stays UTF-8 aware.
+          export LC_ALL=C
+
+          # Two-gate model (#988): block on an all-caps CRITICAL/MAJOR/BLOCKING/
+          # MEDIUM severity heading. MEDIUM promoted into the blocking set
+          # (#1385 follow-up) — a MEDIUM finding can genuinely corrupt state in
+          # the moment. Block check runs FIRST so no pass signal below can
+          # shadow it. grep -qE (NOT -qiE): case-SENSITIVE all-caps (#976) —
+          # title-case "Medium" prose still does not block. MINOR is DROPPED —
+          # minors never block merge.
+          if grep -qE '^#{1,6}[^[:alnum:]]*(CRITICAL|MAJOR|BLOCKING|MEDIUM)\b' <<<"$body"; then
+            echo "::error::Code review posted blocking severity sections (CRITICAL/MAJOR/BLOCKING/MEDIUM); blocking auto-merge until addressed."
+            exit 1
+          fi
+
+          # No blocking severity heading. Any recognized non-blocking shape is a
+          # positive pass (order among the pass checks is immaterial).
+          if grep -qE '^No issues found\.' <<<"$body"; then
+            echo "::notice::Code review clean."
+            exit 0
+          fi
+
+          # APPROVE summary "Blocking issues — None" (#962). Case-insensitive
+          # (title-case prose); only reached after the block check.
+          if grep -qiE 'blocking issues\b[^[:alnum:]]*none\b' <<<"$body"; then
+            echo "::notice::Code review reports no blocking issues."
+            exit 0
+          fi
+
+          # Findings present but none blocking: canonical "Found N issues:". A
+          # PASS under the two-gate model (#956); residual risk accepted per #988.
+          if grep -qE 'Found [0-9]+ issues?:' <<<"$body"; then
+            count=$(grep -oE 'Found [0-9]+ issues?:' <<<"$body" | head -1 | grep -oE '[0-9]+')
+            echo "::notice::Code review found $count non-blocking issue(s); not blocking auto-merge (two-gate model)."
+            exit 0
+          fi
+
+          # Non-blocking severity sections only: MINOR-only (#963) or MEDIUM/LOW/
+          # INFO/NITPICK advisories with no Found-N line. MEDIUM stays in this
+          # alternation (#1385 follow-up) — a real all-caps "### MEDIUM" finding
+          # is already caught by the case-sensitive block check above and never
+          # reaches here; only a title-case "Medium" heading (decorative prose)
+          # falls through, so this check must be case-INsensitive (-qiE, NOT
+          # -qE) to still pass it, mirroring the live reference workflow.
+          if grep -qiE '^#{1,6}[^[:alnum:]]*(MINOR|NITPICK|LOW|INFO|MEDIUM)\b' <<<"$body"; then
+            echo "::notice::Code review posted only non-blocking severity sections; not blocking auto-merge."
+            exit 0
+          fi
+
+          # Explicit LGTM / APPROVE verdict with no severity sections or Found-N
+          # line (#1050). Only reached after the block check, so a coexisting
+          # blocking heading still wins.
+          if grep -qiE '\bLGTM\b|Verdict:[^\n]*\bAPPROVED?\b' <<<"$body"; then
+            echo "::notice::Code review posted a positive LGTM/APPROVE verdict; not blocking auto-merge."
+            exit 0
+          fi
+
+          # Unrecognized format — fail closed so a malformed or deviant comment
+          # can't slip past auto-merge (cf. PR #957 false-pass).
+          echo "::error::Could not parse /code-review verdict from latest review comment. Failing closed."
+          exit 1
