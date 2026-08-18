@@ -49,6 +49,10 @@ from .account_data import (
     load_account_data,
     preserve_import_timestamp,
 )
+from .account_history import (
+    AccountHistoryStats,
+    load_account_history_dir,
+)
 from .acousticbrainz import AcousticBrainzApiClient, build_acousticbrainz_index
 from .analyzer import analyze
 from .audio import AcousticBrainzDump, AudioFeatureSource
@@ -293,6 +297,39 @@ def _cmd_import_account(args: argparse.Namespace) -> int:
         f"  MBID coverage (report-only, over {report.n_unique} unique liked+playlist "
         f"tracks): {report.mbid_coverage:.2f} ({report.counts['mbid']}/{report.n_unique})"
     )
+    return 0
+
+
+def _cmd_import_account_history(args: argparse.Namespace) -> int:
+    """Import the Spotify **Account Data** ``StreamingHistory_music_*.json``
+    play log (#103) into ``history.jsonl``, extending past the newest existing
+    ``spotify_extended`` play (time-cutoff dedup — Account Data carries no
+    per-play context, so it must never shadow the richer ESH rows it overlaps
+    with). Rows are resolved onto an existing ``spotify:<id>`` canonical id via
+    a name/artist lookup built from the current ``spotify_extended`` history
+    where unambiguous; unresolved rows fall back to the ``name:`` rung."""
+    store = UserStore(root=args.data_dir)
+    before = store.load_history()
+    stats = AccountHistoryStats()
+    imported = load_account_history_dir(args.source, existing_events=before, stats=stats)
+    merged = dedup_events([*before, *imported])
+    store.replace_history(merged)
+
+    print(f"imported {len(imported)} Spotify Account Data plays from {args.source}")
+    print(f"  history.jsonl: {len(before)} -> {len(merged)} events")
+    print(
+        f"  resolved-to-spotify-id={stats.resolved_via_spotify_lookup} "
+        f"ambiguous-lookup-keys={stats.ambiguous_lookup_keys}"
+    )
+    if stats.total_skipped:
+        print(
+            f"  dropped {stats.total_skipped} rows (accounted, not imported): "
+            f"before-cutoff={stats.dropped_before_cutoff} "
+            f"no-identity={stats.skipped_no_identity} "
+            f"unparseable-timestamp={stats.skipped_unparseable}"
+        )
+        if stats.unparseable_samples:
+            print(f"    unparseable e.g.: {stats.unparseable_samples}")
     return 0
 
 
@@ -598,6 +635,24 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: $MUSICBRAINZ_ISRC_INDEX)",
     )
     p_import_account.set_defaults(func=_cmd_import_account)
+
+    p_import_account_history = sub.add_parser(
+        "import-account-history",
+        help="import Spotify Account Data StreamingHistory_music_*.json plays "
+        "(extends past the newest existing spotify_extended play)",
+    )
+    p_import_account_history.add_argument(
+        "--from",
+        dest="source",
+        required=True,
+        help="directory of the Account Data export (StreamingHistory_music_*.json)",
+    )
+    p_import_account_history.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_import_account_history.set_defaults(func=_cmd_import_account_history)
 
     p_build_mb = sub.add_parser(
         "build-mb-index",
