@@ -1,8 +1,11 @@
 """CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``,
-``import-spotify``, ``build-mb-index``, and ``build-ab-index``.
+``import-spotify``, ``import-account``, ``build-mb-index``,
+``build-artist-index``, and ``build-ab-index``.
 
     music-intel import-ifttt --from <dir> [--data-dir ./data]
     music-intel import-spotify --from <dir> [--data-dir ./data]
+    music-intel import-account --from <dir> [--data-dir ./data]
+                        [--mb-index PATH] [--artist-index PATH]
     music-intel analyze --user-id petr [--data-dir ./data]
                         [--with-audio] [--with-scene]
                         [--ab-index PATH] [--mb-index PATH]
@@ -10,6 +13,8 @@
                         [--shared-store-path PATH]
     music-intel resolve [--data-dir ./data] [--mb-index PATH] [--with-spotify]
     music-intel build-mb-index --isrc-dump PATH --recording-dump PATH --out PATH
+    music-intel build-artist-index --url-dump PATH --l-artist-url-dump PATH
+                        --artist-dump PATH --out PATH
     music-intel build-ab-index --out PATH [--data-dir ./data] [--raw-cache PATH]
 
 ``import-ifttt`` merges a directory of IFTTT Spotify ``.xlsx`` exports into the
@@ -51,10 +56,15 @@ from .account_data import (
 )
 from .acousticbrainz import AcousticBrainzApiClient, build_acousticbrainz_index
 from .analyzer import analyze
+from .artist_identity import (
+    ArtistIdentityCache,
+    ArtistIdentityResolver,
+    MusicBrainzArtistUrlIndex,
+)
 from .audio import AcousticBrainzDump, AudioFeatureSource
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
-from .mb_dump import build_isrc_mbid_tsv
+from .mb_dump import build_artist_mbid_tsv, build_isrc_mbid_tsv
 from .scene import LastfmTagSource, TagSource
 from .shared_store import (
     InMemorySharedStore,
@@ -293,6 +303,19 @@ def _cmd_import_account(args: argparse.Namespace) -> int:
         f"  MBID coverage (report-only, over {report.n_unique} unique liked+playlist "
         f"tracks): {report.mbid_coverage:.2f} ({report.counts['mbid']}/{report.n_unique})"
     )
+
+    # Artist-level MBID coverage (#102), same report-only/never-persisted discipline.
+    # No measured baseline exists for this number yet (unlike the track-level
+    # figure) — see CONTEXT.md and the artist_identity module docstring.
+    artist_resolver = _build_artist_resolver(args)
+    artists = [*library.followed_artists, *library.banned_artists]
+    artist_report = artist_resolver.resolve_all(artists, library.marquee)
+    ac = artist_report.counts
+    print(
+        f"  artist MBID coverage (report-only, over {artist_report.n_unique} unique "
+        f"followed+banned+Marquee artists): {artist_report.mbid_coverage:.2f} "
+        f"({ac['mbid']}/{artist_report.n_unique}) — no measured baseline yet, see CONTEXT.md"
+    )
     return 0
 
 
@@ -316,6 +339,15 @@ def _build_resolver(
         (lambda mbid: audio_source.lookup(mbid) is not None) if audio_source is not None else None
     )
     return IdentityResolver(index, cache=cache, ab_covered=ab_covered)
+
+
+def _build_artist_resolver(args: argparse.Namespace) -> ArtistIdentityResolver:
+    """Construct the artist-identity resolver (#102), mirroring
+    :func:`_build_resolver`. No live name-match source is wired at V0 — see
+    the artist_identity module docstring for why."""
+    index = MusicBrainzArtistUrlIndex(path=getattr(args, "artist_index", None))
+    cache = ArtistIdentityCache(root=args.data_dir)
+    return ArtistIdentityResolver(index, cache=cache)
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -439,6 +471,21 @@ def _cmd_build_mb_index(args: argparse.Namespace) -> int:
         print(
             "  note: 0 pairs — check the dump paths (raw MusicBrainz `isrc` and "
             "`recording` tables); a missing table yields an empty index."
+        )
+    return 0
+
+
+def _cmd_build_artist_index(args: argparse.Namespace) -> int:
+    """Distil the raw MusicBrainz ``url`` + ``l_artist_url`` + ``artist`` dump
+    tables into the compact spotify-artist-URI->MBID TSV the artist resolver
+    reads (#102). Offline, one-off; the raw dump lives outside the repo
+    (env-pointed, never committed)."""
+    n = build_artist_mbid_tsv(args.url_dump, args.l_artist_url_dump, args.artist_dump, args.out)
+    print(f"wrote {n} artist URI->MBID pairs to {args.out}")
+    if n == 0:
+        print(
+            "  note: 0 pairs — check the dump paths (raw MusicBrainz `url`, "
+            "`l_artist_url`, and `artist` tables); a missing table yields an empty index."
         )
     return 0
 
@@ -597,6 +644,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="MusicBrainz ISRC->MBID index TSV for the report-only coverage measure "
         "(default: $MUSICBRAINZ_ISRC_INDEX)",
     )
+    p_import_account.add_argument(
+        "--artist-index",
+        dest="artist_index",
+        default=None,
+        help="MusicBrainz artist-URI->MBID index TSV for the report-only artist "
+        "coverage measure (#102; default: $MUSICBRAINZ_ARTIST_INDEX)",
+    )
     p_import_account.set_defaults(func=_cmd_import_account)
 
     p_build_mb = sub.add_parser(
@@ -621,6 +675,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="output ISRC->MBID TSV (point --mb-index / MUSICBRAINZ_ISRC_INDEX here)",
     )
     p_build_mb.set_defaults(func=_cmd_build_mb_index)
+
+    p_build_artist = sub.add_parser(
+        "build-artist-index",
+        help="build the artist-URI->MBID TSV from raw MusicBrainz dump tables (#102, offline)",
+    )
+    p_build_artist.add_argument(
+        "--url-dump",
+        dest="url_dump",
+        required=True,
+        help="raw MusicBrainz `url` table file (columns id, gid, url, ...)",
+    )
+    p_build_artist.add_argument(
+        "--l-artist-url-dump",
+        dest="l_artist_url_dump",
+        required=True,
+        help="raw MusicBrainz `l_artist_url` table file (columns id, link, entity0, entity1, ...)",
+    )
+    p_build_artist.add_argument(
+        "--artist-dump",
+        dest="artist_dump",
+        required=True,
+        help="raw MusicBrainz `artist` table file (columns id, gid, ...)",
+    )
+    p_build_artist.add_argument(
+        "--out",
+        required=True,
+        help="output artist-URI->MBID TSV (point --artist-index / MUSICBRAINZ_ARTIST_INDEX here)",
+    )
+    p_build_artist.set_defaults(func=_cmd_build_artist_index)
 
     p_build_ab = sub.add_parser(
         "build-ab-index",

@@ -354,8 +354,11 @@ class RootProfile(BaseModel):
 # Identity discipline: track signals reuse ``TrackRef`` and store spotify_id +
 # name/artist/album only — mbid/isrc stay None. Resolution is report-only and
 # NEVER persisted here (decision dddc4d90: the identity cache is the single home
-# for resolved MBIDs; a frozen library.json must not mask a grown index).
-# Artist/album MBID resolution is explicitly out of scope (#102).
+# for resolved MBIDs; a frozen library.json must not mask a grown index). Artist
+# MBID resolution (spotify URI -> MBID, or explicitly unresolved for name-only
+# Marquee entries) is implemented in ``artist_identity.py`` on the same
+# report-only/never-persisted discipline (#102). Album MBID resolution remains
+# out of scope — no issue filed for it yet.
 
 
 class ArtistRef(BaseModel):
@@ -371,7 +374,7 @@ class ArtistRef(BaseModel):
 
 class AlbumRef(BaseModel):
     """A saved album. ``artist`` and ``uri`` are carried when present; never
-    resolved to an MBID (#102)."""
+    resolved to an MBID — out of scope, no issue filed."""
 
     model_config = ConfigDict(extra="forbid")
 
