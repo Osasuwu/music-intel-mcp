@@ -65,21 +65,28 @@ _MIN_WINDOW_EVENTS = 5
 MIN_VALID_MS = 30_000
 
 
-def _is_valid(context: PlayContext | None) -> bool:
+def _is_valid(context: PlayContext | None, *, min_valid_ms: int = MIN_VALID_MS) -> bool:
     """Play-validity predicate for the temporal-seed path (decision ``c69c6f17``).
 
     Returns ``False`` **iff** the play is an explicit non-listen: a duration
-    known to be under :data:`MIN_VALID_MS`, or an explicit ``skipped`` flag.
+    known to be under ``min_valid_ms``, or an explicit ``skipped`` flag.
     Everything unknown is kept (``True``): no context at all, an absent
     ``ms_played``, and ``skipped in {None, False}``. Null-safe by construction so
     the IFTTT / thin-scrobble sources — which carry no context — always pass.
 
     Applies ONLY in the temporal seed path; the import and audio/scene seed maps
     are unaffected.
+
+    ``min_valid_ms`` is keyword-only and defaults to :data:`MIN_VALID_MS` — the
+    production call site (:func:`music_intel_mcp.analyzer._temporal_plays`) never
+    passes it, so production behavior is unchanged. It exists solely as the
+    measurement seam for the #95 offline validity-floor sweep; the floor itself
+    stays a fixed module constant, not a :class:`TemporalParams` field (decision
+    ``c69c6f17``, ``8186bc56``).
     """
     if context is None:
         return True
-    if context.ms_played is not None and context.ms_played < MIN_VALID_MS:
+    if context.ms_played is not None and context.ms_played < min_valid_ms:
         return False
     return context.skipped is not True
 
