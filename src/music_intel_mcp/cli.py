@@ -8,6 +8,7 @@
                         [--mb-index PATH] [--artist-index PATH]
     music-intel analyze --user-id petr [--data-dir ./data]
                         [--with-audio] [--with-scene]
+                        [--with-musicbrainz-genre] [--with-discogs]
                         [--ab-index PATH] [--mb-index PATH]
                         [--shared-store local|supabase|memory]
                         [--shared-store-path PATH]
@@ -35,7 +36,13 @@ an honest-empty profile (the V0 baseline). ``--with-audio`` / ``--with-scene``
 opt the run into the audio / scene derivation stages by constructing the
 production source adapters (the env-pointed :class:`AcousticBrainzDump` and the
 ``LASTFM_API_KEY``-backed :class:`LastfmTagSource`) plus a shared metadata store,
-then handing them to :func:`analyze`. The pipelines themselves are locked
+then handing them to :func:`analyze`. ``--with-musicbrainz-genre``
+(``MUSICBRAINZ_APP_CONTACT``-gated :class:`MusicBrainzGenreSource`, MBID-only)
+and ``--with-discogs`` (``DISCOGS_TOKEN``-gated :class:`DiscogsStyleSource`) fill
+the residual tag gap Last.fm leaves (#122): when more than one tag source flag
+is set they combine via :class:`CompositeTagSource`, which tries each source in
+order and keeps the first non-empty result per track — one ``enrich_tags`` pass,
+no change to its single-source signature. The pipelines themselves are locked
 (#63/#64); this module only wires the already-built adapters to the CLI.
 """
 
@@ -69,7 +76,13 @@ from .audio import AcousticBrainzDump, AudioFeatureSource
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
 from .mb_dump import build_artist_mbid_tsv, build_isrc_mbid_tsv
-from .scene import LastfmTagSource, TagSource
+from .scene import (
+    CompositeTagSource,
+    DiscogsStyleSource,
+    LastfmTagSource,
+    MusicBrainzGenreSource,
+    TagSource,
+)
 from .shared_store import (
     InMemorySharedStore,
     LocalSharedStore,
@@ -94,6 +107,8 @@ from .store import UserStore
 # than mid-pipeline. They mirror the constants owned by ``scene``/``shared_store``
 # (kept as literals here because they are the CLI's documented env contract).
 _LASTFM_API_KEY_ENV = "LASTFM_API_KEY"
+_MUSICBRAINZ_APP_CONTACT_ENV = "MUSICBRAINZ_APP_CONTACT"
+_DISCOGS_TOKEN_ENV = "DISCOGS_TOKEN"
 _SUPABASE_URL_ENV = "SUPABASE_URL"
 _SUPABASE_KEY_ENV = "SUPABASE_KEY"
 _SPOTIFY_CLIENT_ID_ENV = "SPOTIFY_CLIENT_ID"
@@ -178,7 +193,9 @@ def plan_enrichment(
     here — adapters are constructed lazily and only read when ``analyze`` runs.
     """
     errors: list[str] = []
-    if not (args.with_audio or args.with_scene):
+    with_musicbrainz_genre = getattr(args, "with_musicbrainz_genre", False)
+    with_discogs = getattr(args, "with_discogs", False)
+    if not (args.with_audio or args.with_scene or with_musicbrainz_genre or with_discogs):
         return None, None, None, errors
 
     if args.shared_store == "supabase" and not (
@@ -190,12 +207,30 @@ def plan_enrichment(
         )
     if args.with_scene and not env.get(_LASTFM_API_KEY_ENV):
         errors.append(f"--with-scene needs {_LASTFM_API_KEY_ENV} set.")
+    if with_musicbrainz_genre and not env.get(_MUSICBRAINZ_APP_CONTACT_ENV):
+        errors.append(f"--with-musicbrainz-genre needs {_MUSICBRAINZ_APP_CONTACT_ENV} set.")
+    if with_discogs and not env.get(_DISCOGS_TOKEN_ENV):
+        errors.append(f"--with-discogs needs {_DISCOGS_TOKEN_ENV} set.")
     if errors:
         return None, None, None, errors
 
     shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
     audio_source = AcousticBrainzDump(path=args.ab_index) if args.with_audio else None
-    tag_source = LastfmTagSource() if args.with_scene else None
+
+    tag_sources: list[TagSource] = []
+    if args.with_scene:
+        tag_sources.append(LastfmTagSource())
+    if with_musicbrainz_genre:
+        tag_sources.append(MusicBrainzGenreSource())
+    if with_discogs:
+        tag_sources.append(DiscogsStyleSource())
+    tag_source: TagSource | None
+    if len(tag_sources) > 1:
+        tag_source = CompositeTagSource(tag_sources)
+    elif tag_sources:
+        tag_source = tag_sources[0]
+    else:
+        tag_source = None
     return shared_store, audio_source, tag_source, errors
 
 
@@ -604,6 +639,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--with-scene",
         action="store_true",
         help="run the scene derivation stage (needs LASTFM_API_KEY)",
+    )
+    p_analyze.add_argument(
+        "--with-musicbrainz-genre",
+        action="store_true",
+        help="fill scene tag gaps from MusicBrainz recording genres/tags "
+        "(needs MUSICBRAINZ_APP_CONTACT; MBID-only, no name-search fallback)",
+    )
+    p_analyze.add_argument(
+        "--with-discogs",
+        action="store_true",
+        help="fill scene tag gaps from Discogs release styles (needs DISCOGS_TOKEN)",
     )
     p_analyze.add_argument(
         "--ab-index",

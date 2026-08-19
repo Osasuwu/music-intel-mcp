@@ -8,9 +8,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
+import pytest
+import respx
+
 from music_intel_mcp.models import SceneParams, ValidationParams
 from music_intel_mcp.scene import (
+    CompositeTagSource,
+    DiscogsStyleSource,
     InMemoryTagSource,
+    MusicBrainzGenreSource,
     SceneDerivation,
     TagEnrichmentReport,
     derive_scene_roots,
@@ -96,6 +103,110 @@ def test_enrich_tags_skips_already_tagged_no_lookup():
     report = enrich_tags(["a"], store, source, now=NOW)
     assert report.already_present == ["a"]
     assert source.lookups == []
+
+
+# --------------------------------------------------------------------------- #
+# CompositeTagSource (#122)
+# --------------------------------------------------------------------------- #
+
+
+def test_composite_returns_first_non_empty_source():
+    key = ("artist x", "track a")
+    first = InMemoryTagSource({key: [TrackTag(tag="metal", weight=1.0, source="lastfm")]})
+    second = InMemoryTagSource({key: [TrackTag(tag="thrash", weight=1.0, source="musicbrainz")]})
+    composite = CompositeTagSource([first, second])
+
+    tags = composite.lookup("Artist X", "Track A", None)
+
+    assert [t.tag for t in tags] == ["metal"]
+    # second source is never queried once the first hits
+    assert second.lookups == []
+
+
+def test_composite_falls_through_to_next_source_on_miss():
+    key = ("artist x", "track a")
+    first = InMemoryTagSource()  # empty -> always None
+    second = InMemoryTagSource({key: [TrackTag(tag="thrash", weight=1.0, source="musicbrainz")]})
+    composite = CompositeTagSource([first, second])
+
+    tags = composite.lookup("Artist X", "Track A", None)
+
+    assert [t.tag for t in tags] == ["thrash"]
+    assert first.lookups == [("Artist X", "Track A")]
+
+
+def test_composite_returns_none_when_all_sources_miss():
+    composite = CompositeTagSource([InMemoryTagSource(), InMemoryTagSource()])
+    assert composite.lookup("Artist X", "Track A", None) is None
+
+
+# --------------------------------------------------------------------------- #
+# MusicBrainzGenreSource (#122)
+# --------------------------------------------------------------------------- #
+
+_MB_MBID = "1fc545d3-94b6-4a3d-bff3-bb8b861943d6"
+_MB_URL = f"https://musicbrainz.org/ws/2/recording/{_MB_MBID}"
+
+
+def test_musicbrainz_genre_source_merges_genres_and_tags_deduped():
+    source = MusicBrainzGenreSource(app_contact="me@example.com")
+    body = {
+        "genres": [{"name": "Metal", "count": 5}],
+        "tags": [{"name": "metal", "count": 2}, {"name": "thrash", "count": 1}],
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(_MB_URL).mock(return_value=httpx.Response(200, json=body))
+        tags = source.lookup("Artist X", "Track A", _MB_MBID)
+
+    # 'Metal' (genre) wins over the casefold-duplicate 'metal' (tag); 'thrash' survives.
+    assert [t.tag for t in tags] == ["Metal", "thrash"]
+    assert all(t.source == "musicbrainz" for t in tags)
+
+
+def test_musicbrainz_genre_source_no_mbid_short_circuits_without_network():
+    source = MusicBrainzGenreSource(app_contact="me@example.com")
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get(_MB_URL).mock(return_value=httpx.Response(200, json={}))
+        result = source.lookup("Artist X", "Track A", None)
+    assert result is None
+    assert route.call_count == 0
+
+
+def test_musicbrainz_genre_source_requires_app_contact():
+    source = MusicBrainzGenreSource(app_contact=None)
+    with pytest.raises(RuntimeError, match="MUSICBRAINZ_APP_CONTACT"):
+        source.lookup("Artist X", "Track A", _MB_MBID)
+
+
+# --------------------------------------------------------------------------- #
+# DiscogsStyleSource (#122)
+# --------------------------------------------------------------------------- #
+
+_DISCOGS_URL = "https://api.discogs.com/database/search"
+
+
+def test_discogs_style_source_returns_first_result_styles():
+    source = DiscogsStyleSource(token="tok")
+    body = {"results": [{"style": ["Thrash", "Speed Metal"]}]}
+    with respx.mock(assert_all_called=False) as router:
+        router.get(_DISCOGS_URL).mock(return_value=httpx.Response(200, json=body))
+        tags = source.lookup("Artist X", "Track A", None)
+    assert [t.tag for t in tags] == ["Thrash", "Speed Metal"]
+    assert all(t.source == "discogs" for t in tags)
+
+
+def test_discogs_style_source_empty_results_returns_none():
+    source = DiscogsStyleSource(token="tok")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(_DISCOGS_URL).mock(return_value=httpx.Response(200, json={"results": []}))
+        result = source.lookup("Artist X", "Track A", None)
+    assert result is None
+
+
+def test_discogs_style_source_requires_token():
+    source = DiscogsStyleSource(token=None)
+    with pytest.raises(RuntimeError, match="DISCOGS_TOKEN"):
+        source.lookup("Artist X", "Track A", None)
 
 
 # --------------------------------------------------------------------------- #
