@@ -74,10 +74,12 @@ onnx-bench = [
 # dependent — kept out of the default install so CI (Linux runners) never needs
 # them. Engine choice locked by decision 16d7f570 (onnxruntime + librosa, not
 # Essentia — no Windows wheels); sourcing locked by decision 1c0f37f0
-# (per-process WASAPI loopback via comtypes COM interop).
+# (per-process WASAPI loopback). Activation itself runs in a native C++ helper
+# (native/wasapi_loopback_helper/) spawned as a subprocess -- comtypes never
+# receives the ActivateCompleted callback for AUDIOCLIENT_ACTIVATION_TYPE_
+# PROCESS_LOOPBACK (out-of-process RPC from audiosrv, decision b36dfd4b), so
+# no COM-interop Python dependency is needed here.
 live-capture = [
-  # COM interop for ActivateAudioInterfaceAsync / IAudioClient (_wasapi_loopback.py).
-  "comtypes>=1.2; sys_platform == 'win32'",
   # Windows System Media Transport Controls, for now-playing detection (nowplaying.py).
   "winsdk>=1.0.0b10; sys_platform == 'win32'",
   # PID lookup to scope per-process loopback capture to the target streaming app.
