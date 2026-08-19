@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -53,6 +54,8 @@ from .shared_store import SharedStore, TrackMetadataRecord, TrackTag
 from .validation import Candidate, DatasetContext, QualityLogEntry, ValidationOutcome, Validator
 
 _LASTFM_API_KEY_ENV = "LASTFM_API_KEY"
+_MUSICBRAINZ_APP_CONTACT_ENV = "MUSICBRAINZ_APP_CONTACT"
+_DISCOGS_TOKEN_ENV = "DISCOGS_TOKEN"
 
 # Stop tags (v1): library-management, sentiment, and structural noise that are
 # never a *scene*. Kept deliberately small — genre/mood/era tags (incl.
@@ -171,6 +174,118 @@ class LastfmTagSource:  # pragma: no cover - network-only, never run in CI
             if t.get("name")
         ]
         return tags or None
+
+
+class MusicBrainzGenreSource:
+    """Production :class:`TagSource` over the MusicBrainz recording lookup
+    (``inc=genres+tags``). MBID-only: a search-by-name fallback would need a
+    second network round-trip per miss and MusicBrainz's guidelines cap
+    unauthenticated search at the same 1 req/s as lookup, so a track with no
+    resolved MBID is left for the identity-resolution stage (#87) to fill
+    rather than guessed at here — mirrors audio's honest ``no_mbid`` bucket.
+
+    A descriptive ``User-Agent`` (name/version/contact) is mandatory under
+    MusicBrainz's API usage policy; ``MUSICBRAINZ_APP_CONTACT`` supplies the
+    contact segment. Genres and folksonomy tags are merged (genres first,
+    de-duplicated by name) since both surface as ``source="musicbrainz"``.
+    """
+
+    _ENDPOINT = "https://musicbrainz.org/ws/2/recording/{mbid}"
+    _RATE_LIMIT_SECONDS = 1.0
+
+    def __init__(self, app_contact: str | None = None) -> None:
+        self._app_contact = app_contact or os.environ.get(_MUSICBRAINZ_APP_CONTACT_ENV)
+
+    def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
+        if not self._app_contact:
+            raise RuntimeError(
+                f"{_MUSICBRAINZ_APP_CONTACT_ENV} must be set to use MusicBrainzGenreSource."
+            )
+        if not mbid:
+            return None
+        try:
+            import httpx
+        except ImportError as exc:
+            raise RuntimeError("MusicBrainzGenreSource needs httpx: pip install httpx") from exc
+        headers = {"User-Agent": f"music-intel-mcp/0.1 ({self._app_contact})"}
+        resp = httpx.get(
+            self._ENDPOINT.format(mbid=mbid),
+            params={"inc": "genres+tags", "fmt": "json"},
+            headers=headers,
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        seen: set[str] = set()
+        tags: list[TrackTag] = []
+        for entry in (*body.get("genres", []), *body.get("tags", [])):
+            name = entry.get("name")
+            if not name or name.casefold() in seen:
+                continue
+            seen.add(name.casefold())
+            tags.append(
+                TrackTag(tag=name, weight=float(entry.get("count", 0)), source="musicbrainz")
+            )
+        time.sleep(self._RATE_LIMIT_SECONDS)
+        return tags or None
+
+
+class DiscogsStyleSource:
+    """Production :class:`TagSource` over the Discogs ``database/search`` API,
+    surfacing each hit's ``style`` list (Discogs' finer-grained sibling of
+    ``genre``) as tags. Searches by artist+track title (no MBID bridge exists
+    on the Discogs side); the first result is taken as-is — no
+    disambiguation beyond what Discogs' own relevance ranking provides,
+    matching the best-effort scope of this pass (#122).
+    """
+
+    _ENDPOINT = "https://api.discogs.com/database/search"
+
+    def __init__(self, token: str | None = None) -> None:
+        self._token = token or os.environ.get(_DISCOGS_TOKEN_ENV)
+
+    def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
+        if not self._token:
+            raise RuntimeError(f"{_DISCOGS_TOKEN_ENV} must be set to use DiscogsStyleSource.")
+        try:
+            import httpx
+        except ImportError as exc:
+            raise RuntimeError("DiscogsStyleSource needs httpx: pip install httpx") from exc
+        headers = {
+            "User-Agent": "music-intel-mcp/0.1",
+            "Authorization": f"Discogs token={self._token}",
+        }
+        resp = httpx.get(
+            self._ENDPOINT,
+            params={"artist": artist, "track": track, "type": "release"},
+            headers=headers,
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return None
+        styles = results[0].get("style") or []
+        tags = [TrackTag(tag=s, weight=None, source="discogs") for s in styles]
+        return tags or None
+
+
+class CompositeTagSource:
+    """Chains :class:`TagSource` implementations, returning the first
+    non-empty result. Lets multiple sources fill each other's residual gaps
+    *within one* :func:`enrich_tags` pass — Last.fm, then MusicBrainz
+    genres, then Discogs styles (#122) — without changing ``enrich_tags``'
+    single-source signature or its skip-if-already-tagged semantics."""
+
+    def __init__(self, sources: Sequence[TagSource]) -> None:
+        self._sources = list(sources)
+
+    def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
+        for source in self._sources:
+            tags = source.lookup(artist, track, mbid)
+            if tags:
+                return tags
+        return None
 
 
 # --------------------------------------------------------------------------- #

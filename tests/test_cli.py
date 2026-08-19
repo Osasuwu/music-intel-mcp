@@ -19,7 +19,13 @@ from music_intel_mcp.cli import (
     plan_spotify_source,
 )
 from music_intel_mcp.models import ListenEvent, TrackRef
-from music_intel_mcp.scene import InMemoryTagSource, LastfmTagSource
+from music_intel_mcp.scene import (
+    CompositeTagSource,
+    DiscogsStyleSource,
+    InMemoryTagSource,
+    LastfmTagSource,
+    MusicBrainzGenreSource,
+)
 from music_intel_mcp.shared_store import (
     InMemorySharedStore,
     LocalSharedStore,
@@ -249,6 +255,58 @@ def test_plan_enrichment_reports_every_missing_credential():
     store, audio, tag, errors = plan_enrichment(args, {})
     assert store is None
     assert len(errors) == 2
+
+
+def test_plan_enrichment_musicbrainz_genre_requires_app_contact():
+    args = _analyze_args("--with-musicbrainz-genre", "--shared-store", "memory")
+    store, audio, tag, errors = plan_enrichment(args, {})
+    assert store is None and audio is None and tag is None
+    assert any("MUSICBRAINZ_APP_CONTACT" in e for e in errors)
+
+
+def test_plan_enrichment_musicbrainz_genre_memory_store_ok():
+    args = _analyze_args("--with-musicbrainz-genre", "--shared-store", "memory")
+    store, audio, tag, errors = plan_enrichment(args, {"MUSICBRAINZ_APP_CONTACT": "me@example.com"})
+    assert errors == []
+    assert isinstance(store, InMemorySharedStore)
+    assert isinstance(tag, MusicBrainzGenreSource)
+
+
+def test_plan_enrichment_discogs_requires_token():
+    args = _analyze_args("--with-discogs", "--shared-store", "memory")
+    store, audio, tag, errors = plan_enrichment(args, {})
+    assert store is None and audio is None and tag is None
+    assert any("DISCOGS_TOKEN" in e for e in errors)
+
+
+def test_plan_enrichment_discogs_memory_store_ok():
+    args = _analyze_args("--with-discogs", "--shared-store", "memory")
+    store, audio, tag, errors = plan_enrichment(args, {"DISCOGS_TOKEN": "tok"})
+    assert errors == []
+    assert isinstance(store, InMemorySharedStore)
+    assert isinstance(tag, DiscogsStyleSource)
+
+
+def test_plan_enrichment_combines_multiple_tag_sources_into_composite():
+    args = _analyze_args(
+        "--with-scene", "--with-musicbrainz-genre", "--with-discogs", "--shared-store", "memory"
+    )
+    store, audio, tag, errors = plan_enrichment(
+        args,
+        {
+            "LASTFM_API_KEY": "present",
+            "MUSICBRAINZ_APP_CONTACT": "me@example.com",
+            "DISCOGS_TOKEN": "tok",
+        },
+    )
+    assert errors == []
+    assert isinstance(tag, CompositeTagSource)
+    # order: Last.fm -> MusicBrainz genre -> Discogs, per the module docstring
+    assert [type(s) for s in tag._sources] == [
+        LastfmTagSource,
+        MusicBrainzGenreSource,
+        DiscogsStyleSource,
+    ]
 
 
 # --------------------------------------------------------------------------- #
