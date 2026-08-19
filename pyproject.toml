@@ -60,6 +60,16 @@ dev = [
 supabase = [
   "supabase>=2.0",
 ]
+# onnxruntime/librosa engine benchmark (#123, decision 16d7f570). Downloads real
+# ONNX model binaries and does real inference — never exercised by the default
+# unit-test suite, so this stays out of dev/default install.
+onnx-bench = [
+  "onnxruntime>=1.17",
+  "librosa>=0.10",
+  # Cross-platform peak-RSS sampling; stdlib `resource` is POSIX-only and
+  # unusable on this Windows-primary dev machine.
+  "psutil>=5.9",
+]
 
 [project.scripts]
 music-intel = "music_intel_mcp.cli:main"
