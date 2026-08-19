@@ -12,9 +12,11 @@ Personal data lives here and *only* here — never to the shared metadata store
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from .models import Library, ListenEvent, RootProfile
 
@@ -129,3 +131,30 @@ class UserStore:
     @staticmethod
     def _safe_name(snapshot_id: str) -> str:
         return _UNSAFE_FILENAME.sub("_", snapshot_id)
+
+    # --- live-capture audio analysis (#124 AC5) --------------------------- #
+
+    @property
+    def audio_analysis_dir(self) -> Path:
+        return self.root / "audio_analysis"
+
+    def write_audio_analysis(
+        self,
+        *,
+        track_id: str,
+        embedding: Any,
+        tags: dict[str, float],
+    ) -> Path:
+        """Write one live-capture inference result under the LOCAL store only
+        (#124 AC5). MTG-Jamendo outputs are licensing-gated local-only
+        (decision 29852699); ``UserStore`` never talks to Supabase/SharedStore,
+        so this path is structurally local-only, not just conventionally so."""
+        self.audio_analysis_dir.mkdir(parents=True, exist_ok=True)
+        path = self.audio_analysis_dir / f"{self._safe_name(track_id)}.json"
+        payload = {
+            "track_id": track_id,
+            "embedding": [float(x) for x in embedding],
+            "tags": {label: float(score) for label, score in tags.items()},
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path

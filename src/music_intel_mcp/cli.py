@@ -1,5 +1,5 @@
 """CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``,
-``import-spotify``, ``import-account``, ``build-mb-index``,
+``import-spotify``, ``import-account``, ``capture-spike``, ``build-mb-index``,
 ``build-artist-index``, and ``build-ab-index``.
 
     music-intel import-ifttt --from <dir> [--data-dir ./data]
@@ -75,6 +75,7 @@ from .artist_identity import (
 from .audio import AcousticBrainzDump, AudioFeatureSource
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
+from .live_pipeline import run_live_capture_spike
 from .mb_dump import build_artist_mbid_tsv, build_isrc_mbid_tsv
 from .scene import (
     CompositeTagSource,
@@ -559,6 +560,53 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_capture_spike(args: argparse.Namespace) -> int:
+    """Run one pass of the WASAPI per-process loopback capture spike (#124):
+    now-playing -> identity -> capture -> librosa/onnxruntime inference ->
+    local-only store. Windows-only; needs the ``live-capture`` extra
+    (``pip install -e .[live-capture]``) and the SMTC session + target app
+    actually playing — this is the manual/interactive entry point for the
+    live smoke session, not something CI exercises."""
+    from .capture import WasapiProcessLoopbackCapture
+    from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
+    from .nowplaying import InMemoryNowPlayingSource, SmtcNowPlayingSource
+
+    now_playing = SmtcNowPlayingSource().current()
+    if now_playing is None:
+        print("nothing is currently playing (SMTC reports no active session)")
+        return 1
+    if now_playing.process_id is None:
+        print(
+            f"could not resolve a process id for '{now_playing.app_id}' — "
+            "cannot scope loopback capture"
+        )
+        return 1
+
+    print(f"now playing: {now_playing.artist} - {now_playing.title} (pid={now_playing.process_id})")
+    resolver = _build_resolver(args)
+    capture = WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
+    store = UserStore(root=args.data_dir)
+
+    result = run_live_capture_spike(
+        duration_s=args.duration,
+        now_playing_source=InMemoryNowPlayingSource(now_playing),
+        identity_resolver=resolver,
+        capture=capture,
+        embedding_model=DiscogsEffnetOnnxModel(),
+        classifier=MtgJamendoClassifier(),
+        store=store,
+    )
+    if result is None:
+        print("nothing playing by the time capture ran")
+        return 1
+
+    print(f"identity: mbid={result.identity.mbid} level={result.identity.level}")
+    print(f"embedding: shape={result.inference.embedding.shape}")
+    print(f"tags: {result.inference.tags}")
+    print(f"wrote local-only analysis to {result.analysis_path}")
+    return 0
+
+
 def _cmd_build_mb_index(args: argparse.Namespace) -> int:
     """Distil the raw MusicBrainz ``isrc`` + ``recording`` dump tables into the
     compact ISRC->MBID TSV the resolver reads (#87 AC-B). Offline, one-off; the
@@ -779,6 +827,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_import_account_history.set_defaults(func=_cmd_import_account_history)
+
+    p_capture_spike = sub.add_parser(
+        "capture-spike",
+        help="live WASAPI per-process loopback capture -> librosa/onnxruntime spike"
+        " (#124, Windows-only)",
+    )
+    p_capture_spike.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="seconds of audio to capture and analyze (default: 10.0)",
+    )
+    p_capture_spike.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_capture_spike.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV for identity resolution "
+        "(default: $MUSICBRAINZ_ISRC_INDEX)",
+    )
+    p_capture_spike.set_defaults(func=_cmd_capture_spike)
 
     p_build_mb = sub.add_parser(
         "build-mb-index",
