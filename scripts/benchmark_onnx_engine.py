@@ -18,10 +18,13 @@ in scope for the future enricher implementation, not this spike.
 
 Model files are downloaded on first run into ``.scratch/onnx_models/``
 (gitignored — binaries are never committed, matching the AcousticBrainz/
-MusicBrainz dump convention) and verified against the SHA-256 hashes pinned in
-``MODELS`` below, captured from https://essentia.upf.edu/models/ on
-2026-08-19 (CC BY-NC-ND 4.0 per that directory's LICENSE file; local-only use
-here matches the storage/licensing gate in decision ``29852699``).
+MusicBrainz dump convention), and their SHA-256 is recorded into the report
+for provenance/reproducibility (AC4) — trust-on-first-use, not verification
+against a pinned expected hash (no expected hash is pinned in ``MODELS``; see
+the comment above that dict for why). Sourced from
+https://essentia.upf.edu/models/ on 2026-08-19 (CC BY-NC-ND 4.0 per that
+directory's LICENSE file; local-only use here matches the storage/licensing
+gate in decision ``29852699``).
 
 Usage::
 
@@ -105,7 +108,7 @@ _DURATION_BUCKETS_S = (90, 150, 180, 210, 240, 270, 300, 360, 480)
 
 
 # --------------------------------------------------------------------------- #
-# Model download + verification (network — not exercised by unit tests)
+# Model download + provenance hashing (network — not exercised by unit tests)
 # --------------------------------------------------------------------------- #
 
 
