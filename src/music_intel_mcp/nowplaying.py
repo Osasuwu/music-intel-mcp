@@ -102,7 +102,7 @@ def _process_id_for_app(app_id: str) -> int | None:
     matches = [
         proc.info["pid"]
         for proc in psutil.process_iter(["pid", "name"])
-        if Path(proc.info.get("name", "")).stem.lower() == stem
+        if Path(proc.info.get("name") or "").stem.lower() == stem
     ]
     if not matches:
         return None

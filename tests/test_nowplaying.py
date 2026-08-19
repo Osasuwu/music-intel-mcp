@@ -53,7 +53,7 @@ def test_resolve_now_playing_none_when_nothing_playing() -> None:
 @dataclass
 class _FakeProcInfo:
     pid: int
-    name: str
+    name: str | None
     ppid: int | None = None
 
 
@@ -132,3 +132,23 @@ def test_process_id_for_app_none_when_no_match(monkeypatch: pytest.MonkeyPatch) 
     _fake_psutil(monkeypatch, [_FakeProcInfo(pid=1, name="explorer.exe", ppid=None)])
 
     assert np_module._process_id_for_app("Spotify") is None
+
+
+def test_process_id_for_app_skips_access_denied_processes_with_none_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # psutil.process_iter(["pid", "name"]) sets "name" to None (not a missing
+    # key) for protected processes it can't read (AccessDenied/ZombieProcess --
+    # e.g. PID 4 "System", "Registry", "Secure System" are always present on
+    # Windows). Path(None) must not be reached.
+    _fake_psutil(
+        monkeypatch,
+        [
+            _FakeProcInfo(pid=4, name=None, ppid=0),
+            _FakeProcInfo(pid=100, name="Spotify.exe", ppid=1),
+        ],
+    )
+
+    pid = np_module._process_id_for_app("Spotify")
+
+    assert pid == 100
