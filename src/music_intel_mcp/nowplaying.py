@@ -13,6 +13,7 @@ track is matched the same way every other track in this codebase is.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .identity import IdentityResolver, ResolvedIdentity
@@ -80,15 +81,41 @@ def _await(async_op):
 
 
 def _process_id_for_app(app_id: str) -> int | None:
-    """Best-effort PID lookup for an SMTC ``source_app_user_model_id`` (e.g.
-    ``Spotify.exe``), used to scope WASAPI per-process loopback capture."""
+    """Best-effort PID lookup for an SMTC ``source_app_user_model_id``, used to
+    scope WASAPI per-process loopback capture.
+
+    The AUMID suffix (e.g. ``Spotify`` from ``SpotifyAB.SpotifyMusic_...!Spotify``)
+    is the app's display name, not its exe filename — psutil reports
+    ``Spotify.exe``, so comparison strips the extension. UWP-packaged apps (like
+    the Store Spotify build) also run as several sibling ``Spotify.exe``
+    processes rather than one; loopback capture uses
+    ``PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`` (_wasapi_loopback.py),
+    which only covers the target PID's own descendants, so the ancestor-most
+    match (the one whose parent isn't itself a match) is picked to maximize
+    tree coverage.
+    """
     import psutil
 
     name = app_id.rsplit("!", 1)[-1]  # AUMID may be "Package!App" or a bare exe name
-    for proc in psutil.process_iter(["pid", "name"]):
-        if proc.info.get("name", "").lower() == name.lower():
-            return proc.info["pid"]
-    return None
+    stem = Path(name).stem.lower()
+
+    matches = [
+        proc.info["pid"]
+        for proc in psutil.process_iter(["pid", "name"])
+        if Path(proc.info.get("name", "")).stem.lower() == stem
+    ]
+    if not matches:
+        return None
+
+    match_set = set(matches)
+    for pid in matches:
+        try:
+            ppid = psutil.Process(pid).ppid()
+        except psutil.Error:
+            continue
+        if ppid not in match_set:
+            return pid
+    return matches[0]
 
 
 def resolve_now_playing(

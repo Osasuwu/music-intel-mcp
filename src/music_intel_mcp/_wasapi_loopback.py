@@ -1,293 +1,202 @@
-"""Raw ctypes/comtypes interop for Windows per-process WASAPI loopback capture.
+"""Per-process WASAPI loopback capture via a subprocess-based native helper.
 
 Isolated in its own module (imported lazily by :mod:`capture`, never at package
-import time) because it is Windows-only, hardware-facing, and has no meaningful
-in-process fake: :class:`~music_intel_mcp.capture.WasapiProcessLoopbackCapture`
-is validated against a real playback session (issue #124 AC1), not covered by
-this repo's unit test suite. Requires Windows 10 2004+ (build 19041+) for the
-``AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`` activation path.
+import time) because it is Windows-only and hardware-facing.
+:class:`~music_intel_mcp.capture.WasapiProcessLoopbackCapture` is validated
+against a real playback session (issue #124 AC1).
 
-References: the Process Loopback API shipped in the ``mmdeviceapi.h`` /
-``audioclientactivationparams.h`` Windows SDK headers (no Python wheel wraps
-this specifically — pyaudiowpatch/soundcard only expose device-level loopback).
+Implementation note: the WASAPI process-loopback activation
+(``AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK``) delivers its
+``ActivateCompleted`` callback via genuine out-of-process RPC from audiosrv.
+comtypes never receives that callback for this specific API (root-caused via
+a hand-rolled native repro that proved the same activation call works
+correctly outside comtypes/Python). This module instead spawns a small
+compiled C++ helper (``native/wasapi_loopback_helper``) that performs the
+activation and capture natively, and streams raw PCM back over a pipe — see
+that directory's ``main.cpp`` for the wire protocol and the activation code.
+
+Wire protocol (helper stdout, binary):
+  1. One 16-byte header: 4x little-endian uint32 =
+     (status, sample_rate, channels, bits_per_sample). status == 0 is
+     success; nonzero is an HRESULT (or 0xFFFFFFFF for "activation timed
+     out") and no PCM follows.
+  2. On success: a continuous raw interleaved PCM byte stream until the
+     helper's max-seconds deadline elapses or the process is terminated.
+
+Audio is never written to disk by this module or the helper (issue #124
+AC2) — the helper writes only to its stdout pipe, and this module only ever
+buffers the bytes it reads from that pipe in memory.
 """
 
 from __future__ import annotations
 
-import ctypes
+import struct
+import subprocess
+import threading
 import time
-from ctypes import wintypes
+from pathlib import Path
 
-import comtypes
 import numpy as np
-from comtypes import GUID, COMObject, IUnknown
 
-# -- constants ------------------------------------------------------------- #
+_HEADER_SIZE = 16
+_HEADER_FORMAT = "<IIII"
 
-AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0
-AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+# Helper self-terminates after this many seconds regardless of how much is
+# actually consumed — a safety cap, not the intended capture duration.
+_HELPER_MAX_SECONDS = 3600.0
 
-PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0
-
-VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback"
-
-AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
-AUDCLNT_SHAREMODE_SHARED = 0
-
-VT_BLOB = 65
-
-IID_IAudioClient = GUID("{1CB9AD4C-DBFA-4c32-B178-C2F568A703B2}")
+_HELPER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "native"
+    / "wasapi_loopback_helper"
+    / "wasapi_loopback_helper.exe"
+)
 
 
-class WAVEFORMATEX(ctypes.Structure):
-    _fields_ = [
-        ("wFormatTag", wintypes.WORD),
-        ("nChannels", wintypes.WORD),
-        ("nSamplesPerSec", wintypes.DWORD),
-        ("nAvgBytesPerSec", wintypes.DWORD),
-        ("nBlockAlign", wintypes.WORD),
-        ("wBitsPerSample", wintypes.WORD),
-        ("cbSize", wintypes.WORD),
-    ]
+class WasapiLoopbackError(OSError):
+    """Raised when the native helper fails to activate or start capture."""
 
 
-WAVE_FORMAT_IEEE_FLOAT = 3
+class _StreamReader:
+    """Pumps a subprocess stdout pipe into an in-memory, lock-protected buffer."""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._eof = False
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        while True:
+            chunk = self._stream.read(65536)
+            if not chunk:
+                break
+            with self._lock:
+                self._buffer.extend(chunk)
+        with self._lock:
+            self._eof = True
+
+    def take(self, max_bytes: int | None = None) -> bytes:
+        """Remove and return up to ``max_bytes`` from the front of the buffer."""
+        with self._lock:
+            if max_bytes is None or max_bytes >= len(self._buffer):
+                data = bytes(self._buffer)
+                self._buffer.clear()
+            else:
+                data = bytes(self._buffer[:max_bytes])
+                del self._buffer[:max_bytes]
+            return data
+
+    def available(self) -> int:
+        with self._lock:
+            return len(self._buffer)
 
 
-class AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS(ctypes.Structure):
-    _fields_ = [
-        ("TargetProcessId", wintypes.DWORD),
-        ("ProcessLoopbackMode", ctypes.c_int),
-    ]
+def activate_process_loopback(
+    *, target_pid: int, sample_rate: int = 44100, channels: int = 2
+) -> tuple[subprocess.Popen, _StreamReader]:
+    """Spawn the native helper and wait for it to report activation status.
 
+    Returns ``(proc, reader)`` where ``proc`` is the running helper process
+    (``stop()`` terminates it) and ``reader`` accumulates PCM bytes read from
+    its stdout (consumed by :func:`read_available`).
 
-class _ACTIVATION_PARAMS_UNION(ctypes.Union):
-    _fields_ = [("ProcessLoopbackParams", AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS)]
+    The helper's own audio format is fixed (44100 Hz, 16-bit, stereo) — the
+    ``sample_rate``/``channels`` arguments here describe what the caller
+    expects and are validated against what the helper actually reports.
+    """
+    if not _HELPER_PATH.exists():
+        raise WasapiLoopbackError(
+            f"native helper not found at {_HELPER_PATH} — build it with "
+            "scripts/build_wasapi_helper.ps1"
+        )
 
-
-class AUDIOCLIENT_ACTIVATION_PARAMS(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("ActivationType", ctypes.c_int), ("u", _ACTIVATION_PARAMS_UNION)]
-
-
-class _BLOB(ctypes.Structure):
-    _fields_ = [("cbSize", wintypes.ULONG), ("pBlobData", ctypes.POINTER(ctypes.c_byte))]
-
-
-class PROPVARIANT(ctypes.Structure):
-    """Minimal VT_BLOB-only PROPVARIANT — enough to carry the activation params."""
-
-    _fields_ = [
-        ("vt", wintypes.USHORT),
-        ("wReserved1", wintypes.USHORT),
-        ("wReserved2", wintypes.USHORT),
-        ("wReserved3", wintypes.USHORT),
-        ("blob", _BLOB),
-        ("_pad", ctypes.c_byte * 8),
-    ]
-
-
-class IActivateAudioInterfaceAsyncOperation(IUnknown):
-    _iid_ = GUID("{72A22D78-CDE4-431D-B8CC-843A71199B6D}")
-    _methods_ = []  # only GetActivateResult is used, called via raw vtable below
-
-
-class IActivateAudioInterfaceCompletionHandler(COMObject):
-    _com_interfaces_ = [IUnknown]
-    _iid_ = GUID("{41D949AB-9862-444A-80F6-C261334DA5EB}")
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.done = False
-        self.hresult = None
-        self.audio_client = None
-
-    def IActivateAudioInterfaceCompletionHandler_ActivateCompleted(self, operation):
-        hr_activate = wintypes.HRESULT()
-        punk = ctypes.POINTER(IUnknown)()
-        # GetActivateResult(HRESULT*, IUnknown**) is vtable slot 3 (after
-        # QueryInterface/AddRef/Release) on IActivateAudioInterfaceAsyncOperation.
-        vtbl = ctypes.cast(operation, ctypes.POINTER(ctypes.c_void_p * 4))
-        get_activate_result = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.POINTER(wintypes.HRESULT),
-            ctypes.POINTER(ctypes.POINTER(IUnknown)),
-        )(vtbl.contents[3])
-        get_activate_result(operation, ctypes.byref(hr_activate), ctypes.byref(punk))
-        self.hresult = hr_activate.value
-        if punk:
-            self.audio_client = punk.QueryInterface(comtypes.gen.IUnknown)
-        self.done = True
-        return 0
-
-
-_mmdevapi = ctypes.WinDLL("Mmdevapi.dll")
-_ActivateAudioInterfaceAsync = _mmdevapi.ActivateAudioInterfaceAsync
-_ActivateAudioInterfaceAsync.restype = ctypes.HRESULT
-_ActivateAudioInterfaceAsync.argtypes = [
-    wintypes.LPCWSTR,
-    ctypes.POINTER(GUID),
-    ctypes.POINTER(PROPVARIANT),
-    ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_void_p),
-]
-
-
-def _build_activation_params(target_pid: int) -> tuple[PROPVARIANT, AUDIOCLIENT_ACTIVATION_PARAMS]:
-    params = AUDIOCLIENT_ACTIVATION_PARAMS()
-    params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
-    params.ProcessLoopbackParams.TargetProcessId = target_pid
-    params.ProcessLoopbackParams.ProcessLoopbackMode = (
-        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+    proc = subprocess.Popen(
+        [str(_HELPER_PATH), str(target_pid), str(_HELPER_MAX_SECONDS)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
     )
 
-    pv = PROPVARIANT()
-    pv.vt = VT_BLOB
-    pv.blob.cbSize = ctypes.sizeof(params)
-    pv.blob.pBlobData = ctypes.cast(ctypes.byref(params), ctypes.POINTER(ctypes.c_byte))
-    return pv, params  # keep `params` alive alongside the PROPVARIANT that points into it
+    header = _read_exact(proc.stdout, _HEADER_SIZE, timeout_s=30.0, proc=proc)
+    status, hdr_sample_rate, hdr_channels, hdr_bits = struct.unpack(_HEADER_FORMAT, header)
+
+    if status != 0:
+        proc.wait(timeout=5)
+        if status == 0xFFFFFFFF:
+            raise WasapiLoopbackError("WASAPI activation timed out in native helper")
+        raise WasapiLoopbackError(
+            f"WASAPI activation/capture-start failed in native helper: HRESULT=0x{status:08X}"
+        )
+
+    if hdr_sample_rate != sample_rate or hdr_channels != channels or hdr_bits != 16:
+        proc.terminate()
+        raise WasapiLoopbackError(
+            f"native helper format mismatch: expected {sample_rate}Hz/"
+            f"{channels}ch/16bit, got {hdr_sample_rate}Hz/{hdr_channels}ch/"
+            f"{hdr_bits}bit"
+        )
+
+    reader = _StreamReader(proc.stdout)
+    return proc, reader
 
 
-def activate_process_loopback(*, target_pid: int, sample_rate: int, channels: int):
-    """Activate a per-process loopback IAudioClient scoped to ``target_pid`` and
-    return ``(audio_client, capture_client)`` COM pointers, initialized in
-    shared-mode loopback and started. Raises ``OSError`` on any HRESULT failure."""
-    pv, _keepalive = _build_activation_params(target_pid)
-    handler = IActivateAudioInterfaceCompletionHandler()
-    op = ctypes.c_void_p()
-
-    hr = _ActivateAudioInterfaceAsync(
-        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-        ctypes.byref(IID_IAudioClient),
-        ctypes.byref(pv),
-        ctypes.cast(handler.this, ctypes.c_void_p),
-        ctypes.byref(op),
-    )
-    if hr != 0:
-        raise OSError(f"ActivateAudioInterfaceAsync failed: hresult=0x{hr & 0xFFFFFFFF:08X}")
-
-    deadline = time.monotonic() + 5.0
-    while not handler.done and time.monotonic() < deadline:
-        time.sleep(0.01)
-    if not handler.done:
-        raise TimeoutError("ActivateAudioInterfaceAsync did not complete in time")
-    if handler.hresult:
-        raise OSError(f"loopback activation failed: hresult=0x{handler.hresult & 0xFFFFFFFF:08X}")
-
-    audio_client = handler.audio_client
-    if audio_client is None:
-        raise OSError("loopback activation returned no IAudioClient")
-
-    wfx = WAVEFORMATEX()
-    wfx.wFormatTag = WAVE_FORMAT_IEEE_FLOAT
-    wfx.nChannels = channels
-    wfx.nSamplesPerSec = sample_rate
-    wfx.wBitsPerSample = 32
-    wfx.nBlockAlign = channels * wfx.wBitsPerSample // 8
-    wfx.nAvgBytesPerSec = sample_rate * wfx.nBlockAlign
-    wfx.cbSize = 0
-
-    # IAudioClient::Initialize(shareMode, streamFlags, hnsBufferDuration,
-    #   hnsPeriodicity, pFormat, audioSessionGuid)
-    initialize = ctypes.WINFUNCTYPE(
-        ctypes.HRESULT,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        wintypes.DWORD,
-        ctypes.c_longlong,
-        ctypes.c_longlong,
-        ctypes.POINTER(WAVEFORMATEX),
-        ctypes.POINTER(GUID),
-    )(_vtbl_slot(audio_client, 3))
-    hr = initialize(
-        audio_client.this if hasattr(audio_client, "this") else audio_client,
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK,
-        10_000_000,  # 1s buffer, in 100ns units
-        0,
-        ctypes.byref(wfx),
-        None,
-    )
-    if hr != 0:
-        raise OSError(f"IAudioClient::Initialize failed: hresult=0x{hr & 0xFFFFFFFF:08X}")
-
-    get_service = ctypes.WINFUNCTYPE(
-        ctypes.HRESULT, ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)
-    )(_vtbl_slot(audio_client, 14))
-    iid_capture_client = GUID("{C8ADBD64-E71E-48a0-A4DE-185C395CD317}")
-    capture_client = ctypes.c_void_p()
-    hr = get_service(
-        audio_client.this if hasattr(audio_client, "this") else audio_client,
-        ctypes.byref(iid_capture_client),
-        ctypes.byref(capture_client),
-    )
-    if hr != 0:
-        raise OSError(f"GetService(IAudioCaptureClient) failed: hresult=0x{hr & 0xFFFFFFFF:08X}")
-
-    start = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p)(_vtbl_slot(audio_client, 10))
-    hr = start(audio_client.this if hasattr(audio_client, "this") else audio_client)
-    if hr != 0:
-        raise OSError(f"IAudioClient::Start failed: hresult=0x{hr & 0xFFFFFFFF:08X}")
-
-    return audio_client, capture_client
-
-
-def _vtbl_slot(punk, index: int):
-    vtbl = ctypes.cast(
-        punk.this if hasattr(punk, "this") else punk, ctypes.POINTER(ctypes.c_void_p * 32)
-    )
-    return vtbl.contents[index]
+def _read_exact(stream, n: int, *, timeout_s: float, proc: subprocess.Popen) -> bytes:
+    """Read exactly ``n`` bytes from ``stream``, or raise on timeout/EOF."""
+    data = bytearray()
+    deadline = time.monotonic() + timeout_s
+    while len(data) < n:
+        if time.monotonic() > deadline:
+            proc.kill()
+            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            raise TimeoutError(f"timed out waiting for native helper header ({stderr.strip()})")
+        chunk = stream.read(n - len(data))
+        if not chunk:
+            if proc.poll() is not None:
+                stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+                raise WasapiLoopbackError(
+                    f"native helper exited early (code={proc.returncode}): {stderr.strip()}"
+                )
+            continue
+        data.extend(chunk)
+    return bytes(data)
 
 
 def read_available(
-    capture_client, *, duration_s: float, sample_rate: int, channels: int
+    reader: _StreamReader, *, duration_s: float, sample_rate: int, channels: int
 ) -> np.ndarray:
-    """Poll ``IAudioCaptureClient::GetBuffer`` for up to ``duration_s`` seconds,
-    returning whatever float32 PCM arrived (may be shorter than requested if
-    the source produced less audio in that window)."""
-    get_buffer = ctypes.WINFUNCTYPE(
-        ctypes.HRESULT,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.POINTER(ctypes.c_float)),
-        ctypes.POINTER(wintypes.UINT),
-        ctypes.POINTER(wintypes.DWORD),
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-    )(_vtbl_slot(capture_client, 3))
-    release_buffer = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, wintypes.UINT)(
-        _vtbl_slot(capture_client, 4)
-    )
+    """Poll ``reader`` for up to ``duration_s`` worth of PCM, then return it.
 
-    chunks: list[np.ndarray] = []
-    deadline = time.monotonic() + duration_s
-    while time.monotonic() < deadline:
-        data = ctypes.POINTER(ctypes.c_float)()
-        n_frames = wintypes.UINT()
-        flags = wintypes.DWORD()
-        hr = get_buffer(
-            capture_client,
-            ctypes.byref(data),
-            ctypes.byref(n_frames),
-            ctypes.byref(flags),
-            None,
-            None,
-        )
-        if hr != 0:
-            time.sleep(0.005)
-            continue
-        if n_frames.value:
-            arr = np.ctypeslib.as_array(data, shape=(n_frames.value * channels,)).copy()
-            chunks.append(arr.reshape(-1, channels))
-            release_buffer(capture_client, n_frames.value)
-        else:
-            time.sleep(0.005)
+    Returns a ``float32`` array shaped ``(n_samples, channels)`` in [-1, 1].
+    May return fewer samples than ``duration_s`` implies if the helper has
+    not produced that much audio yet.
+    """
+    bytes_per_frame = channels * 2  # 16-bit PCM
+    target_bytes = int(duration_s * sample_rate) * bytes_per_frame
 
-    if not chunks:
-        return np.zeros((0, channels), dtype=np.float32)
-    return np.concatenate(chunks, axis=0)
+    deadline = time.monotonic() + duration_s + 1.0  # small grace period
+    while reader.available() < target_bytes and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    raw = reader.take(target_bytes)
+    # Drop any trailing partial frame.
+    usable_len = len(raw) - (len(raw) % bytes_per_frame)
+    raw = raw[:usable_len]
+
+    samples_i16 = np.frombuffer(raw, dtype="<i2")
+    n_frames = len(samples_i16) // channels if channels else 0
+    samples_i16 = samples_i16[: n_frames * channels].reshape(n_frames, channels)
+    return (samples_i16.astype(np.float32)) / 32768.0
 
 
-def stop(audio_client) -> None:
-    stop_fn = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p)(_vtbl_slot(audio_client, 11))
-    stop_fn(audio_client.this if hasattr(audio_client, "this") else audio_client)
+def stop(proc: subprocess.Popen) -> None:
+    """Terminate the native helper. Hard kill — nothing is ever flushed to disk."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()

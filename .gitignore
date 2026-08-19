@@ -53,3 +53,9 @@ data/dumps/
 # Java legacy (in case anyone checks out legacy/java accidentally into main worktree)
 target/
 *.class
+
+# Native helper build output (source-only in git; scripts/build_wasapi_helper.ps1 builds it)
+native/**/*.exe
+native/**/*.obj
+native/**/*.pdb
+native/**/*.ilk
