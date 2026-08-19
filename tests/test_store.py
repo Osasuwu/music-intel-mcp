@@ -73,3 +73,30 @@ def test_replace_history_overwrites_not_appends(tmp_path):
     store.replace_history([e2])  # replaces, does not append
     reloaded = store.load_history()
     assert reloaded == [e2]
+
+
+# AC5 (#124): live-capture inference output is written to the LOCAL store
+# only. UserStore never talks to Supabase/SharedStore, so this write path is
+# structurally local-only, not just conventionally so.
+def test_write_audio_analysis_writes_under_local_root(tmp_path):
+    import numpy as np
+
+    store = UserStore(root=tmp_path)
+    path = store.write_audio_analysis(
+        track_id="mbid-around-the-world",
+        embedding=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+        tags={"genre---electronic": 0.9},
+    )
+
+    assert path.exists()
+    assert path.is_relative_to(tmp_path)
+    payload = path.read_text(encoding="utf-8")
+    assert "genre---electronic" in payload
+    assert "0.1" in payload
+
+
+def test_write_audio_analysis_sanitizes_track_id(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.write_audio_analysis(track_id="spotify:track:AAA/BBB", embedding=[0.1], tags={})
+    assert path.parent == store.root / "audio_analysis"
+    assert "/" not in path.name and "\\" not in path.name
