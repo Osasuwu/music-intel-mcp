@@ -1,4 +1,4 @@
-# Running the audio collector (friend setup)
+# Running the audio collector
 
 Thanks for helping test this. This app listens to whatever's playing in
 Spotify / YouTube Music / SoundCloud on your PC and saves a small numeric
@@ -28,7 +28,7 @@ cd music-intel-mcp
 ## 2. Run the setup script
 
 ```powershell
-.\scripts\setup_friend.ps1
+.\scripts\setup_collector.ps1
 ```
 
 This creates a private Python environment, installs everything needed, and

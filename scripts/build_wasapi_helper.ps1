@@ -2,7 +2,7 @@
 # using the MSVC toolchain (VS2022, x64 host/target). Full VS2022 Community is
 # not required -- the much smaller "Build Tools for Visual Studio 2022" (just
 # the "Desktop development with C++" workload) is enough, which is the path
-# friend-setup steers people toward (#136).
+# collector setup steers people toward (#136).
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot

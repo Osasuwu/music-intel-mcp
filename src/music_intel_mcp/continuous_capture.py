@@ -5,7 +5,7 @@ Wraps :func:`~music_intel_mcp.live_pipeline.run_live_capture_spike` per
 detected track change: polls a :class:`~music_intel_mcp.nowplaying.NowPlayingSource`
 on an interval, skips re-capturing a track that's still playing, and isolates
 any per-track failure (capture/inference/store) behind ``on_error`` so one bad
-track never kills a friend's unattended session — the loop logs and keeps
+track never kills an unattended session — the loop logs and keeps
 polling rather than raising. ``stop_event`` (a plain ``threading.Event``) is
 the cooperative shutdown seam a tray "Quit" action or a test drives.
 """
@@ -80,8 +80,8 @@ def run_continuous_capture(
                 classifier=classifier,
                 store=store,
             )
-        except Exception as exc:  # must survive to keep polling (#136) — a
-            # friend's unattended session shouldn't die on one bad track.
+        except Exception as exc:  # must survive to keep polling (#136) — an
+            # unattended session shouldn't die on one bad track.
             if on_error is not None:
                 on_error(now_playing, exc)
             sleep(poll_interval_s)

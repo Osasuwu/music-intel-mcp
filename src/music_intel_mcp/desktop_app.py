@@ -1,7 +1,7 @@
 """System-tray desktop shell for the continuous capture loop (#136).
 
 Wraps :func:`~music_intel_mcp.continuous_capture.run_continuous_capture` in a
-background thread behind a ``pystray`` icon so a non-technical friend can
+background thread behind a ``pystray`` icon so a non-technical user can
 start collection with a double-click and stop it from the tray menu, instead
 of a terminal invocation (``music-intel capture-loop``). This is the narrow
 live-capture-supervision UI the "Engine-first scope" invariant carves out —

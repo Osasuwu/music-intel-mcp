@@ -1,4 +1,4 @@
-# Friend-setup for the local audio-collection desktop app (#136).
+# Setup for the local audio-collection desktop app (#136).
 #
 # Gets a fresh checkout from "git clone" to "double-click the tray icon":
 # venv, live-capture + desktop extras, the native WASAPI helper build, and
@@ -10,7 +10,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $venvDir = Join-Path $repoRoot ".venv"
 $modelsDir = Join-Path $repoRoot ".scratch\models"
 
-Write-Host "== music-intel friend setup ==" -ForegroundColor Cyan
+Write-Host "== music-intel collector setup ==" -ForegroundColor Cyan
 
 if (-not (Test-Path $venvDir)) {
     Write-Host "Creating virtualenv at $venvDir"
