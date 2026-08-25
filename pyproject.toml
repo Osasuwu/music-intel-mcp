@@ -89,9 +89,18 @@ live-capture = [
   # Runs the Discogs-EffNet + MTG-Jamendo ONNX models (decision 16d7f570).
   "onnxruntime>=1.17",
 ]
+# System-tray shell around the continuous capture loop (#136), so a friend can
+# start/stop collection without a terminal. Windows-only like live-capture,
+# which this extra is meant to be installed alongside (desktop_app.py imports
+# live-capture's WASAPI/SMTC/onnxruntime backends internally).
+desktop = [
+  "pystray>=0.19",
+  "pillow>=10.0",
+]
 
 [project.scripts]
 music-intel = "music_intel_mcp.cli:main"
+music-intel-desktop = "music_intel_mcp.desktop_app:main"
 
 [project.urls]
 Homepage = "https://github.com/Osasuwu/music-intel-mcp"
