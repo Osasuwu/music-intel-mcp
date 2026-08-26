@@ -1,6 +1,6 @@
 """CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``,
-``import-spotify``, ``import-account``, ``capture-spike``, ``build-mb-index``,
-``build-artist-index``, and ``build-ab-index``.
+``import-spotify``, ``import-account``, ``capture-spike``, ``capture-loop``,
+``build-mb-index``, ``build-artist-index``, and ``build-ab-index``.
 
     music-intel import-ifttt --from <dir> [--data-dir ./data]
     music-intel import-spotify --from <dir> [--data-dir ./data]
@@ -73,6 +73,7 @@ from .artist_identity import (
     MusicBrainzArtistUrlIndex,
 )
 from .audio import AcousticBrainzDump, AudioFeatureSource
+from .continuous_capture import run_continuous_capture
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
 from .live_pipeline import run_live_capture_spike
@@ -607,6 +608,54 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_capture_loop(args: argparse.Namespace) -> int:
+    """Run the continuous capture loop (#136): poll SMTC now-playing, capture
+    + analyze + store each new track, keep going until Ctrl+C. Same
+    Windows-only / ``live-capture`` extra requirements as ``capture-spike``,
+    but meant to be left running unattended rather than run once."""
+    from .capture import WasapiProcessLoopbackCapture
+    from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
+    from .nowplaying import SmtcNowPlayingSource
+
+    resolver = _build_resolver(args)
+    store = UserStore(root=args.data_dir)
+    embedding_model = DiscogsEffnetOnnxModel()
+    classifier = MtgJamendoClassifier()
+
+    def capture_factory(now_playing):
+        return WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
+
+    def on_result(now_playing, result) -> None:
+        if result is None:
+            print(f"skipped: {now_playing.artist} - {now_playing.title} (nothing to capture)")
+            return
+        print(
+            f"captured: {now_playing.artist} - {now_playing.title} "
+            f"(mbid={result.identity.mbid}) -> {result.analysis_path}"
+        )
+
+    def on_error(now_playing, exc: Exception) -> None:
+        print(f"error on '{now_playing.artist} - {now_playing.title}': {exc}")
+
+    print(f"capture-loop running (poll every {args.poll_interval}s, Ctrl+C to stop)...")
+    try:
+        run_continuous_capture(
+            now_playing_source=SmtcNowPlayingSource(),
+            identity_resolver=resolver,
+            capture_factory=capture_factory,
+            embedding_model=embedding_model,
+            classifier=classifier,
+            store=store,
+            capture_duration_s=args.duration,
+            poll_interval_s=args.poll_interval,
+            on_result=on_result,
+            on_error=on_error,
+        )
+    except KeyboardInterrupt:
+        print("capture-loop stopped.")
+    return 0
+
+
 def _cmd_build_mb_index(args: argparse.Namespace) -> int:
     """Distil the raw MusicBrainz ``isrc`` + ``recording`` dump tables into the
     compact ISRC->MBID TSV the resolver reads (#87 AC-B). Offline, one-off; the
@@ -851,6 +900,35 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: $MUSICBRAINZ_ISRC_INDEX)",
     )
     p_capture_spike.set_defaults(func=_cmd_capture_spike)
+
+    p_capture_loop = sub.add_parser(
+        "capture-loop",
+        help="continuous WASAPI capture -> librosa/onnxruntime, until Ctrl+C (#136, Windows-only)",
+    )
+    p_capture_loop.add_argument(
+        "--duration",
+        type=float,
+        default=12.0,
+        help="seconds of audio to capture per track (default: 12.0)",
+    )
+    p_capture_loop.add_argument(
+        "--poll-interval",
+        type=float,
+        default=5.0,
+        help="seconds between now-playing polls (default: 5.0)",
+    )
+    p_capture_loop.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_capture_loop.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV for identity resolution "
+        "(default: $MUSICBRAINZ_ISRC_INDEX)",
+    )
+    p_capture_loop.set_defaults(func=_cmd_capture_loop)
 
     p_build_mb = sub.add_parser(
         "build-mb-index",
