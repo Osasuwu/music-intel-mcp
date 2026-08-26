@@ -60,33 +60,29 @@ def run_continuous_capture(
         now_playing = now_playing_source.current()
         if now_playing is None:
             last_key = None
-            sleep(poll_interval_s)
-            continue
+        else:
+            key = _track_key(now_playing)
+            if key == last_key or now_playing.process_id is None:
+                pass
+            else:
+                last_key = key
+                try:
+                    capture = capture_factory(now_playing)
+                    result = run_live_capture_spike(
+                        duration_s=capture_duration_s,
+                        now_playing_source=InMemoryNowPlayingSource(now_playing),
+                        identity_resolver=identity_resolver,
+                        capture=capture,
+                        embedding_model=embedding_model,
+                        classifier=classifier,
+                        store=store,
+                    )
+                except Exception as exc:  # must survive to keep polling (#136) — an
+                    # unattended session shouldn't die on one bad track.
+                    if on_error is not None:
+                        on_error(now_playing, exc)
+                else:
+                    if on_result is not None:
+                        on_result(now_playing, result)
 
-        key = _track_key(now_playing)
-        if key == last_key or now_playing.process_id is None:
-            sleep(poll_interval_s)
-            continue
-        last_key = key
-
-        try:
-            capture = capture_factory(now_playing)
-            result = run_live_capture_spike(
-                duration_s=capture_duration_s,
-                now_playing_source=InMemoryNowPlayingSource(now_playing),
-                identity_resolver=identity_resolver,
-                capture=capture,
-                embedding_model=embedding_model,
-                classifier=classifier,
-                store=store,
-            )
-        except Exception as exc:  # must survive to keep polling (#136) — an
-            # unattended session shouldn't die on one bad track.
-            if on_error is not None:
-                on_error(now_playing, exc)
-            sleep(poll_interval_s)
-            continue
-
-        if on_result is not None:
-            on_result(now_playing, result)
         sleep(poll_interval_s)
