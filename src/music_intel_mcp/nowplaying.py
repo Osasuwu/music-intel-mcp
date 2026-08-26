@@ -14,10 +14,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from .identity import IdentityResolver, ResolvedIdentity
 from .models import TrackRef
+
+# App-id allowlist (#138): only these app "stems" (AUMID suffix / exe name,
+# lowercased, extension-stripped — same normalization as _process_id_for_app)
+# are ever captured. A browser's AUMID identifies the browser process, not the
+# tab/site, so a browser candidate additionally needs the resolvability gate
+# below (see _select_now_playing) — see CONTEXT.md "Live capture pipeline".
+DEFAULT_SPOTIFY_APP_STEM = "spotify"
+DEFAULT_BROWSER_APP_STEMS = frozenset({"chrome", "msedge", "firefox", "brave", "opera", "vivaldi"})
+
+AppClass = Literal["spotify", "browser", "other"]
 
 
 @dataclass
@@ -50,26 +60,46 @@ class SmtcNowPlayingSource:
     """Production :class:`NowPlayingSource` backed by the Windows SMTC session
     manager (``winsdk.windows.media.control``). Imports ``winsdk`` lazily so
     the module stays importable (and this class merely unusable) off Windows
-    or without the package installed."""
+    or without the package installed.
+
+    Enumerates *all* sessions (#138) rather than trusting
+    ``get_current_session()``'s single-session guess — a music session behind
+    a non-media foreground app (e.g. a browser tab holding focus) is otherwise
+    invisible. Selection across the enumerated, allowlisted, Playing
+    candidates is delegated to :func:`_select_now_playing`, which needs
+    ``identity_resolver`` to gate ambiguous browser-AUMID candidates.
+    """
+
+    def __init__(self, *, identity_resolver: IdentityResolver) -> None:
+        self._identity_resolver = identity_resolver
 
     def current(self) -> NowPlayingInfo | None:
         from winsdk.windows.media.control import (
             GlobalSystemMediaTransportControlsSessionManager as SessionManager,
         )
+        from winsdk.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+        )
 
         manager = _await(SessionManager.request_async())
-        session = manager.get_current_session()
-        if session is None:
-            return None
-        props = _await(session.try_get_media_properties_async())
-        app_id = session.source_app_user_model_id
-        process_id = _process_id_for_app(app_id)
-        return NowPlayingInfo(
-            title=props.title or "",
-            artist=props.artist or "",
-            app_id=app_id,
-            process_id=process_id,
-        )
+        candidates = []
+        for session in manager.get_sessions():
+            props = _await(session.try_get_media_properties_async())
+            playback_info = session.get_playback_info()
+            app_id = session.source_app_user_model_id
+            info = NowPlayingInfo(
+                title=props.title or "",
+                artist=props.artist or "",
+                app_id=app_id,
+                process_id=_process_id_for_app(app_id),
+            )
+            is_playing = (
+                playback_info is not None
+                and playback_info.playback_status == PlaybackStatus.PLAYING
+            )
+            candidates.append(_SmtcCandidate(info=info, is_playing=is_playing))
+
+        return _select_now_playing(candidates, resolver=self._identity_resolver)
 
 
 def _await(async_op):
@@ -78,6 +108,89 @@ def _await(async_op):
     import asyncio
 
     return asyncio.run(async_op)
+
+
+@dataclass
+class _SmtcCandidate:
+    """One enumerated SMTC session, pre-selection (#138)."""
+
+    info: NowPlayingInfo
+    is_playing: bool
+
+
+def _app_stem(app_id: str) -> str:
+    """Normalize an SMTC ``source_app_user_model_id`` to a comparable "stem":
+    strip the AUMID's ``Package!App`` suffix (or bare exe name) down to its
+    lowercased, extension-free display name — the same normalization
+    :func:`_process_id_for_app` uses to match psutil process names."""
+    name = app_id.rsplit("!", 1)[-1]
+    return Path(name).stem.lower()
+
+
+def _classify_app(
+    app_id: str,
+    *,
+    spotify_stem: str = DEFAULT_SPOTIFY_APP_STEM,
+    browser_stems: frozenset[str] = DEFAULT_BROWSER_APP_STEMS,
+) -> AppClass:
+    stem = _app_stem(app_id)
+    if stem == spotify_stem:
+        return "spotify"
+    if stem in browser_stems:
+        return "browser"
+    return "other"
+
+
+def _is_resolvable(candidate: _SmtcCandidate, resolver: IdentityResolver) -> bool:
+    """A browser SMTC session's ``app_id`` can't distinguish a music tab from
+    any other tab (e.g. a podcast, a video call) playing audio in the same
+    browser — so browser candidates are only admitted if their track actually
+    resolves through the identity waterfall to something more specific than a
+    bare name match. See CONTEXT.md "Live capture pipeline" for why an
+    allowlist alone can't do this."""
+    track = TrackRef(
+        spotify_id=candidate.info.spotify_id,
+        name=candidate.info.title,
+        artist=candidate.info.artist,
+    )
+    identity = resolver.resolve(track)
+    return identity.level != "name"
+
+
+def _select_now_playing(
+    candidates: list[_SmtcCandidate],
+    *,
+    resolver: IdentityResolver,
+    spotify_stem: str = DEFAULT_SPOTIFY_APP_STEM,
+    browser_stems: frozenset[str] = DEFAULT_BROWSER_APP_STEMS,
+) -> NowPlayingInfo | None:
+    """Pick one track out of every enumerated SMTC session (#138).
+
+    Filters to allowlisted (Spotify or a known browser), currently-``Playing``
+    candidates; browser candidates are additionally gated on identity
+    resolvability. Ties (multiple simultaneously-Playing candidates) prefer
+    Spotify, else the first Playing candidate in enumeration order — SMTC
+    exposes no reliable recency signal, so no recency heuristic is used.
+    """
+    allowlisted = []
+    for candidate in candidates:
+        if not candidate.is_playing:
+            continue
+        app_class = _classify_app(
+            candidate.info.app_id, spotify_stem=spotify_stem, browser_stems=browser_stems
+        )
+        if app_class == "other":
+            continue
+        if app_class == "browser" and not _is_resolvable(candidate, resolver):
+            continue
+        allowlisted.append((app_class, candidate))
+
+    for app_class, candidate in allowlisted:
+        if app_class == "spotify":
+            return candidate.info
+    if allowlisted:
+        return allowlisted[0][1].info
+    return None
 
 
 def _process_id_for_app(app_id: str) -> int | None:

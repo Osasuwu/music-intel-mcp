@@ -65,7 +65,7 @@ def _run_loop(stop_event: threading.Event, status: _Status) -> None:
     status.set("listening for now-playing...")
     try:
         run_continuous_capture(
-            now_playing_source=SmtcNowPlayingSource(),
+            now_playing_source=SmtcNowPlayingSource(identity_resolver=resolver),
             identity_resolver=resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,
