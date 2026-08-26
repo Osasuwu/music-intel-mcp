@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 
 from music_intel_mcp.analyzer import analyze
@@ -100,3 +101,34 @@ def test_write_audio_analysis_sanitizes_track_id(tmp_path):
     path = store.write_audio_analysis(track_id="spotify:track:AAA/BBB", embedding=[0.1], tags={})
     assert path.parent == store.root / "audio_analysis"
     assert "/" not in path.name and "\\" not in path.name
+
+
+# AC5 (#139): every live-capture embedding is paired with a provenance sidecar
+# (raw title/artist, source app id, capture timestamp, chromaprint fingerprint)
+# so a future identity-strategy change is a re-mapping job over sidecars, never
+# a re-listen.
+def test_write_audio_analysis_persists_provenance_sidecar(tmp_path):
+    from music_intel_mcp.live_identity import ProvenanceSidecar
+
+    store = UserStore(root=tmp_path)
+    provenance = ProvenanceSidecar(
+        raw_title="Song (Official Video)",
+        raw_artist="Artist",
+        app_id="Spotify.exe",
+        captured_at="2026-01-01T00:00:00+00:00",
+        chromaprint_fingerprint="fp1",
+    )
+    path = store.write_audio_analysis(
+        track_id="mbid-1", embedding=[0.1], tags={}, provenance=provenance
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["provenance"]["raw_title"] == "Song (Official Video)"
+    assert payload["provenance"]["chromaprint_fingerprint"] == "fp1"
+
+
+def test_write_audio_analysis_provenance_optional(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.write_audio_analysis(track_id="mbid-1", embedding=[0.1], tags={})
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["provenance"] is None
