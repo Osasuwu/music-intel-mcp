@@ -14,14 +14,39 @@ imported by the core pipeline, only by its own console-script entry point
 
 from __future__ import annotations
 
+import os
 import threading
 
 from .continuous_capture import run_continuous_capture
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
+from .live_identity import AcoustIdApiSource, LiveIdentityResolver, LiveNegativeCache
 from .store import UserStore
 
-_CAPTURE_DURATION_S = 12.0
+_CAPTURE_DURATION_S = 120.0  # #139 AC1: ~120s capture window
 _POLL_INTERVAL_S = 5.0
+
+
+def _build_live_resolver(store: UserStore) -> LiveIdentityResolver:
+    """Mirrors ``cli.py``'s ``_build_live_resolver``: every network-backed
+    rung is gated on its own credential, so a missing key skips that rung
+    instead of crashing the tray loop."""
+    from .spotify_api import SpotifyApiIsrcSource, SpotifySearchApiSource
+
+    acoustid_source = AcoustIdApiSource() if os.environ.get("ACOUSTID_API_KEY") else None
+    spotify_search = None
+    spotify_isrc = None
+    if os.environ.get("SPOTIFY_CLIENT_ID") and os.environ.get("SPOTIFY_CLIENT_SECRET"):
+        isrc_source = SpotifyApiIsrcSource()
+        spotify_search = SpotifySearchApiSource(isrc_source=isrc_source)
+        spotify_isrc = isrc_source
+
+    return LiveIdentityResolver(
+        acoustid_source=acoustid_source,
+        spotify_search=spotify_search,
+        spotify_isrc=spotify_isrc,
+        isrc_index=MusicBrainzIsrcIndex(),
+        negative_cache=LiveNegativeCache(root=store.root),
+    )
 
 
 class _Status:
@@ -45,8 +70,12 @@ def _run_loop(stop_event: threading.Event, status: _Status) -> None:
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
     from .nowplaying import SmtcNowPlayingSource
 
-    resolver = IdentityResolver(MusicBrainzIsrcIndex(), cache=IdentityCache())
     store = UserStore()
+    live_resolver = _build_live_resolver(store)
+    # #138: separate batch-waterfall resolver, used only to gate ambiguous
+    # browser SMTC candidates (see SmtcNowPlayingSource) — distinct from
+    # live_resolver, which resolves the actually-captured track's identity.
+    identity_resolver = IdentityResolver(MusicBrainzIsrcIndex(), cache=IdentityCache())
     embedding_model = DiscogsEffnetOnnxModel()
     classifier = MtgJamendoClassifier()
 
@@ -65,8 +94,8 @@ def _run_loop(stop_event: threading.Event, status: _Status) -> None:
     status.set("listening for now-playing...")
     try:
         run_continuous_capture(
-            now_playing_source=SmtcNowPlayingSource(identity_resolver=resolver),
-            identity_resolver=resolver,
+            now_playing_source=SmtcNowPlayingSource(identity_resolver=identity_resolver),
+            live_identity_resolver=live_resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,
             classifier=classifier,

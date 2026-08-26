@@ -15,9 +15,11 @@ import httpx
 import respx
 
 from music_intel_mcp.spotify_api import (
+    SPOTIFY_SEARCH_URL,
     SPOTIFY_TOKEN_URL,
     SPOTIFY_TRACKS_URL,
     SpotifyApiIsrcSource,
+    SpotifySearchApiSource,
 )
 
 _CREDS = {"client_id": "cid", "client_secret": "csecret"}
@@ -206,3 +208,45 @@ def test_credentials_read_from_env_when_not_passed(tmp_path, monkeypatch):
         # the token call carried a Basic auth header derived from the env creds
         assert token.called
         assert token.calls[0].request.headers["Authorization"].startswith("Basic ")
+
+
+# --- SpotifySearchApiSource (#139 AC2) -------------------------------------- #
+
+
+def test_search_returns_top_result_track_id():
+    isrc_source = SpotifyApiIsrcSource(**_CREDS, sleep=lambda _s: None)
+    source = SpotifySearchApiSource(isrc_source=isrc_source)
+
+    with respx.mock(assert_all_called=False) as router:
+        _token_route(router)
+        router.get(SPOTIFY_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json={"tracks": {"items": [{"id": "SP-1"}, {"id": "SP-2"}]}}
+            )
+        )
+        assert source.search(title="Song", artist="Artist") == "SP-1"
+
+
+def test_search_returns_none_for_no_results():
+    isrc_source = SpotifyApiIsrcSource(**_CREDS, sleep=lambda _s: None)
+    source = SpotifySearchApiSource(isrc_source=isrc_source)
+
+    with respx.mock(assert_all_called=False) as router:
+        _token_route(router)
+        router.get(SPOTIFY_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json={"tracks": {"items": []}})
+        )
+        assert source.search(title="Nonexistent", artist="Nobody") is None
+
+
+def test_search_reuses_composed_isrc_source_credentials():
+    """Default-constructing without ``isrc_source`` still requires credentials --
+    the composed :class:`SpotifyApiIsrcSource` owns that check."""
+    empty_isrc_source = SpotifyApiIsrcSource(client_id=None, client_secret=None)
+    source = SpotifySearchApiSource(isrc_source=empty_isrc_source)
+    try:
+        source.search(title="Song", artist="Artist")
+    except RuntimeError as exc:
+        assert "SPOTIFY_CLIENT_ID" in str(exc)
+    else:  # pragma: no cover - the call must raise
+        raise AssertionError("expected a RuntimeError for missing credentials")

@@ -17,8 +17,8 @@ import time
 from collections.abc import Callable
 
 from .capture import LoopbackSource
-from .identity import IdentityResolver
 from .inference import AudioEmbeddingModel, ClassifierModel
+from .live_identity import LiveIdentityResolver
 from .live_pipeline import LiveCaptureResult, run_live_capture_spike
 from .nowplaying import InMemoryNowPlayingSource, NowPlayingInfo, NowPlayingSource
 from .store import UserStore
@@ -35,12 +35,12 @@ def _track_key(info: NowPlayingInfo) -> _TrackKey:
 def run_continuous_capture(
     *,
     now_playing_source: NowPlayingSource,
-    identity_resolver: IdentityResolver,
+    live_identity_resolver: LiveIdentityResolver,
     capture_factory: Callable[[NowPlayingInfo], LoopbackSource],
     embedding_model: AudioEmbeddingModel,
     classifier: ClassifierModel,
     store: UserStore,
-    capture_duration_s: float = 12.0,
+    capture_duration_s: float = 120.0,
     poll_interval_s: float = 5.0,
     stop_event: threading.Event | None = None,
     on_result: Callable[[NowPlayingInfo, LiveCaptureResult | None], None] | None = None,
@@ -71,7 +71,7 @@ def run_continuous_capture(
                     result = run_live_capture_spike(
                         duration_s=capture_duration_s,
                         now_playing_source=InMemoryNowPlayingSource(now_playing),
-                        identity_resolver=identity_resolver,
+                        live_identity_resolver=live_identity_resolver,
                         capture=capture,
                         embedding_model=embedding_model,
                         classifier=classifier,
