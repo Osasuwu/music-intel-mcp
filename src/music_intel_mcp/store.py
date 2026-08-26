@@ -144,17 +144,33 @@ class UserStore:
         track_id: str,
         embedding: Any,
         tags: dict[str, float],
+        provenance: Any | None = None,
     ) -> Path:
         """Write one live-capture inference result under the LOCAL store only
         (#124 AC5). MTG-Jamendo outputs are licensing-gated local-only
         (decision 29852699); ``UserStore`` never talks to Supabase/SharedStore,
-        so this path is structurally local-only, not just conventionally so."""
+        so this path is structurally local-only, not just conventionally so.
+
+        ``provenance`` (#139 AC5) is the live-capture sidecar — raw title/
+        artist, source app id, capture timestamp, chromaprint fingerprint —
+        stored alongside the embedding so a future identity-strategy change is
+        a re-mapping job over sidecars, never a re-listen. Accepts anything
+        with a ``model_dump()`` (a :class:`~music_intel_mcp.live_identity.
+        ProvenanceSidecar`) or a plain dict; ``None`` for the pre-#139 batch
+        path, which has no live capture metadata to attach."""
         self.audio_analysis_dir.mkdir(parents=True, exist_ok=True)
         path = self.audio_analysis_dir / f"{self._safe_name(track_id)}.json"
+        if provenance is None:
+            provenance_payload = None
+        elif hasattr(provenance, "model_dump"):
+            provenance_payload = provenance.model_dump()
+        else:
+            provenance_payload = dict(provenance)
         payload = {
             "track_id": track_id,
             "embedding": [float(x) for x in embedding],
             "tags": {label: float(score) for label, score in tags.items()},
+            "provenance": provenance_payload,
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path

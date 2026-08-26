@@ -42,6 +42,7 @@ _SPOTIFY_CLIENT_SECRET_ENV = "SPOTIFY_CLIENT_SECRET"
 
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_TRACKS_URL = "https://api.spotify.com/v1/tracks"
+SPOTIFY_SEARCH_URL = "https://api.spotify.com/v1/search"
 
 _TRACK_URI_PREFIX = "spotify:track:"
 _BATCH = 50  # Spotify caps GET /v1/tracks at 50 ids per call.
@@ -240,3 +241,40 @@ class SpotifyApiIsrcSource:
         results = self._fetch_batch(httpx, [sid])
         self._append_cache(results)
         return results.get(sid)
+
+
+class SpotifySearchApiSource:
+    """Live-capture "Spotify search" waterfall leg (#139 AC2): title/artist ->
+    best-guess spotify track id via ``GET /v1/search``.
+
+    Composes a :class:`SpotifyApiIsrcSource` purely to borrow its auth/backoff
+    plumbing — search has no natural batch key or hit/miss cache the way ISRC
+    lookups do (one query per newly detected live track, not a bulk warm), so
+    this class adds only the search-specific request/response shape."""
+
+    def __init__(self, *, isrc_source: SpotifyApiIsrcSource | None = None) -> None:
+        self._auth = isrc_source or SpotifyApiIsrcSource()
+
+    def search(self, *, title: str, artist: str) -> str | None:
+        """Best-guess spotify track id for ``title``/``artist``, or ``None`` when
+        the search returns no tracks. Takes the top result — this leg is meant to
+        be one rung in a waterfall (a wrong guess here just falls through to the
+        next rung's own verification, e.g. ISRC lookup), not a final answer."""
+        import httpx
+
+        query = f"track:{title} artist:{artist}"
+        resp = self._auth._request(
+            httpx,
+            "GET",
+            SPOTIFY_SEARCH_URL,
+            params={"q": query, "type": "track", "limit": 1},
+            headers=self._headers(httpx),
+        )
+        items = (resp.json().get("tracks") or {}).get("items") or []
+        if not items:
+            return None
+        return items[0].get("id")
+
+    def _headers(self, httpx) -> dict[str, str]:
+        bearer = self._auth._access_token(httpx)
+        return {"Authorization": f"Bearer {bearer}", "User-Agent": _USER_AGENT}

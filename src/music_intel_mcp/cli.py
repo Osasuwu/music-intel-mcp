@@ -76,6 +76,7 @@ from .audio import AcousticBrainzDump, AudioFeatureSource
 from .continuous_capture import run_continuous_capture
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
+from .live_identity import AcoustIdApiSource, LiveIdentityResolver, LiveNegativeCache
 from .live_pipeline import run_live_capture_spike
 from .mb_dump import build_artist_mbid_tsv, build_isrc_mbid_tsv
 from .scene import (
@@ -441,6 +442,33 @@ def _build_resolver(
     return IdentityResolver(index, cache=cache, ab_covered=ab_covered)
 
 
+def _build_live_resolver(args: argparse.Namespace) -> LiveIdentityResolver:
+    """Construct the live-capture identity waterfall (#139 AC2): AcoustID ->
+    Spotify search -> ISRC -> MBID -> MB name search -> name key. Every
+    network-backed rung is optional and gated on its own credential — an
+    unset ``ACOUSTID_API_KEY``/Spotify creds simply skips that rung and the
+    waterfall falls through, per the fragmentation-over-false-merge bias
+    (AC3). The ISRC->MBID index and the negative cache are always local and
+    cheap, so those wire in unconditionally."""
+    from .spotify_api import SpotifyApiIsrcSource, SpotifySearchApiSource
+
+    acoustid_source = AcoustIdApiSource() if os.environ.get("ACOUSTID_API_KEY") else None
+    spotify_search = None
+    spotify_isrc = None
+    if os.environ.get("SPOTIFY_CLIENT_ID") and os.environ.get("SPOTIFY_CLIENT_SECRET"):
+        isrc_source = SpotifyApiIsrcSource()
+        spotify_search = SpotifySearchApiSource(isrc_source=isrc_source)
+        spotify_isrc = isrc_source
+
+    return LiveIdentityResolver(
+        acoustid_source=acoustid_source,
+        spotify_search=spotify_search,
+        spotify_isrc=spotify_isrc,
+        isrc_index=MusicBrainzIsrcIndex(path=getattr(args, "mb_index", None)),
+        negative_cache=LiveNegativeCache(root=args.data_dir),
+    )
+
+
 def _build_artist_resolver(args: argparse.Namespace) -> ArtistIdentityResolver:
     """Construct the artist-identity resolver (#102), mirroring
     :func:`_build_resolver`. No live name-match source is wired at V0 — see
@@ -584,14 +612,14 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
         return 1
 
     print(f"now playing: {now_playing.artist} - {now_playing.title} (pid={now_playing.process_id})")
-    resolver = _build_resolver(args)
+    resolver = _build_live_resolver(args)
     capture = WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
     store = UserStore(root=args.data_dir)
 
     result = run_live_capture_spike(
         duration_s=args.duration,
         now_playing_source=InMemoryNowPlayingSource(now_playing),
-        identity_resolver=resolver,
+        live_identity_resolver=resolver,
         capture=capture,
         embedding_model=DiscogsEffnetOnnxModel(),
         classifier=MtgJamendoClassifier(),
@@ -617,7 +645,7 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
     from .nowplaying import SmtcNowPlayingSource
 
-    resolver = _build_resolver(args)
+    resolver = _build_live_resolver(args)
     store = UserStore(root=args.data_dir)
     embedding_model = DiscogsEffnetOnnxModel()
     classifier = MtgJamendoClassifier()
@@ -641,7 +669,7 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     try:
         run_continuous_capture(
             now_playing_source=SmtcNowPlayingSource(),
-            identity_resolver=resolver,
+            live_identity_resolver=resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,
             classifier=classifier,
@@ -885,8 +913,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_capture_spike.add_argument(
         "--duration",
         type=float,
-        default=10.0,
-        help="seconds of audio to capture and analyze (default: 10.0)",
+        default=120.0,
+        help="seconds of audio to capture and analyze (default: 120.0, #139 AC1)",
     )
     p_capture_spike.add_argument(
         "--data-dir",
@@ -908,8 +936,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_capture_loop.add_argument(
         "--duration",
         type=float,
-        default=12.0,
-        help="seconds of audio to capture per track (default: 12.0)",
+        default=120.0,
+        help="seconds of audio to capture per track (default: 120.0, #139 AC1)",
     )
     p_capture_loop.add_argument(
         "--poll-interval",

@@ -1,14 +1,19 @@
-# Setup for the local audio-collection desktop app (#136).
+# Setup for the local audio-collection desktop app (#136, #139).
 #
 # Gets a fresh checkout from "git clone" to "double-click the tray icon":
-# venv, live-capture + desktop extras, the native WASAPI helper build, and
-# instructions for the two ONNX model files (which this script deliberately
-# does NOT download -- see the printed notice below).
+# venv, live-capture + desktop extras, the native WASAPI helper build, the
+# fpcalc chromaprint binary (#139 AC7), and instructions for the two ONNX
+# model files (which this script deliberately does NOT download -- see the
+# printed notice below).
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $venvDir = Join-Path $repoRoot ".venv"
 $modelsDir = Join-Path $repoRoot ".scratch\models"
+$toolsDir = Join-Path $repoRoot ".scratch\tools"
+$fpcalcExe = Join-Path $toolsDir "fpcalc.exe"
+$chromaprintVersion = "1.5.1"
+$chromaprintZipUrl = "https://github.com/acoustid/chromaprint/releases/download/v$chromaprintVersion/chromaprint-fpcalc-$chromaprintVersion-windows-x86_64.zip"
 
 Write-Host "== music-intel collector setup ==" -ForegroundColor Cyan
 
@@ -28,6 +33,27 @@ Write-Host "Installing music-intel-mcp with live-capture + desktop extras..."
 
 Write-Host "Building the WASAPI native helper..."
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build_wasapi_helper.ps1")
+
+if (Get-Command fpcalc -ErrorAction SilentlyContinue) {
+    Write-Host "fpcalc already on PATH -- skipping chromaprint fetch."
+} elseif (Test-Path $fpcalcExe) {
+    Write-Host "fpcalc already fetched at $fpcalcExe -- add $toolsDir to PATH if needed."
+} else {
+    Write-Host "Fetching fpcalc (chromaprint $chromaprintVersion) for AcoustID fingerprinting (#139 AC7)..."
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+    $zipPath = Join-Path $toolsDir "chromaprint-fpcalc.zip"
+    Invoke-WebRequest -Uri $chromaprintZipUrl -OutFile $zipPath
+    Expand-Archive -Path $zipPath -DestinationPath $toolsDir -Force
+    Remove-Item $zipPath
+    $extracted = Get-ChildItem -Path $toolsDir -Filter "fpcalc.exe" -Recurse | Select-Object -First 1
+    if ($null -eq $extracted) {
+        throw "fpcalc.exe not found after extracting $chromaprintZipUrl"
+    }
+    if ($extracted.FullName -ne $fpcalcExe) {
+        Move-Item -Path $extracted.FullName -Destination $fpcalcExe -Force
+    }
+    Write-Host "fpcalc fetched to $fpcalcExe -- add $toolsDir to PATH (or pass fpcalc_path explicitly)."
+}
 
 if (-not (Test-Path $modelsDir)) {
     New-Item -ItemType Directory -Force -Path $modelsDir | Out-Null

@@ -9,8 +9,8 @@ import numpy as np
 
 from music_intel_mcp.capture import FakeLoopbackCapture
 from music_intel_mcp.continuous_capture import run_continuous_capture
-from music_intel_mcp.identity import IdentityResolver, InMemoryIsrcMbidIndex
 from music_intel_mcp.inference import ClassifierResult, InMemoryClassifier, InMemoryEmbeddingModel
+from music_intel_mcp.live_identity import LiveIdentityResolver
 from music_intel_mcp.nowplaying import NowPlayingInfo
 from music_intel_mcp.store import UserStore
 
@@ -32,7 +32,7 @@ class _SequenceNowPlayingSource:
 
 
 def _make_deps(tmp_path):
-    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    resolver = LiveIdentityResolver()
     embedding_model = InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32))
     classifier = InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9}))
     store = UserStore(root=tmp_path)
@@ -63,7 +63,7 @@ def test_same_track_polled_twice_captures_once(tmp_path) -> None:
 
     run_continuous_capture(
         now_playing_source=source,
-        identity_resolver=resolver,
+        live_identity_resolver=resolver,
         capture_factory=capture_factory,
         embedding_model=embedding_model,
         classifier=classifier,
@@ -89,7 +89,7 @@ def test_track_change_captures_each_track(tmp_path) -> None:
 
     run_continuous_capture(
         now_playing_source=source,
-        identity_resolver=resolver,
+        live_identity_resolver=resolver,
         capture_factory=capture_factory,
         embedding_model=embedding_model,
         classifier=classifier,
@@ -115,7 +115,7 @@ def test_nothing_playing_resets_dedup_and_does_not_capture(tmp_path) -> None:
 
     run_continuous_capture(
         now_playing_source=source,
-        identity_resolver=resolver,
+        live_identity_resolver=resolver,
         capture_factory=capture_factory,
         embedding_model=embedding_model,
         classifier=classifier,
@@ -151,7 +151,7 @@ def test_capture_failure_is_isolated_and_loop_continues(tmp_path) -> None:
 
     run_continuous_capture(
         now_playing_source=source,
-        identity_resolver=resolver,
+        live_identity_resolver=resolver,
         capture_factory=capture_factory,
         embedding_model=embedding_model,
         classifier=classifier,
@@ -183,7 +183,7 @@ def test_unresolved_process_id_is_skipped(tmp_path) -> None:
 
     run_continuous_capture(
         now_playing_source=source,
-        identity_resolver=resolver,
+        live_identity_resolver=resolver,
         capture_factory=capture_factory,
         embedding_model=embedding_model,
         classifier=classifier,
