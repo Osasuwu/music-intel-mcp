@@ -258,10 +258,12 @@ def _select_now_playing(
         )
         if app_class == "other":
             continue
-        if app_class == "browser" and not _is_resolvable(candidate, resolver, admission_memo):
-            if on_drop is not None:
-                on_drop(candidate.info)
-            continue
+        if app_class == "browser":
+            was_cached = _admission_memo_key(candidate) in admission_memo
+            if not _is_resolvable(candidate, resolver, admission_memo):
+                if on_drop is not None and not was_cached:
+                    on_drop(candidate.info)
+                continue
         allowlisted.append((app_class, candidate))
 
     for app_class, candidate in allowlisted:

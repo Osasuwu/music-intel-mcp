@@ -68,7 +68,7 @@ class _Status:
 def _run_loop(stop_event: threading.Event, status: _Status) -> None:
     from .capture import WasapiProcessLoopbackCapture
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
-    from .nowplaying import SmtcNowPlayingSource
+    from .nowplaying import DEFAULT_DROP_LOG_FILENAME, SmtcNowPlayingSource
 
     store = UserStore()
     live_resolver = _build_live_resolver(store)
@@ -90,7 +90,10 @@ def _run_loop(stop_event: threading.Event, status: _Status) -> None:
     status.set("listening for now-playing...")
     try:
         run_continuous_capture(
-            now_playing_source=SmtcNowPlayingSource(identity_resolver=live_resolver),
+            now_playing_source=SmtcNowPlayingSource(
+                identity_resolver=live_resolver,
+                drop_log_path=store.root / DEFAULT_DROP_LOG_FILENAME,
+            ),
             live_identity_resolver=live_resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,

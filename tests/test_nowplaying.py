@@ -166,6 +166,23 @@ def test_select_now_playing_reports_drop_breadcrumb_on_rejection() -> None:
     assert drops[0].artist == "Some Podcast"
 
 
+# Review finding on PR #147 (#145): on_drop must fire once per fresh
+# rejection, not on every poll of a memo-cached rejection — else
+# smtc_drops.jsonl grows unbounded for a single persistently-rejected track.
+def test_select_now_playing_reports_drop_once_for_memo_cached_rejection() -> None:
+    candidates = [
+        _candidate(title="Episode 42", artist="Some Podcast", app_id="chrome.exe", is_playing=True),
+    ]
+    resolver = LiveIdentityResolver()
+    memo: dict[tuple[str, str, str], bool] = {}
+    drops: list[NowPlayingInfo] = []
+
+    _select_now_playing(candidates, resolver=resolver, admission_memo=memo, on_drop=drops.append)
+    _select_now_playing(candidates, resolver=resolver, admission_memo=memo, on_drop=drops.append)
+
+    assert len(drops) == 1
+
+
 def test_select_now_playing_ignores_non_allowlisted_app() -> None:
     candidates = [
         _candidate(title="Some Notification", artist="", app_id="explorer.exe", is_playing=True),

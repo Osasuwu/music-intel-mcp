@@ -598,10 +598,18 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
     live smoke session, not something CI exercises."""
     from .capture import WasapiProcessLoopbackCapture
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
-    from .nowplaying import InMemoryNowPlayingSource, SmtcNowPlayingSource
+    from .nowplaying import (
+        DEFAULT_DROP_LOG_FILENAME,
+        InMemoryNowPlayingSource,
+        SmtcNowPlayingSource,
+    )
+    from .store import resolve_data_root
 
     live_resolver = _build_live_resolver(args)
-    now_playing = SmtcNowPlayingSource(identity_resolver=live_resolver).current()
+    drop_log_path = resolve_data_root(args.data_dir) / DEFAULT_DROP_LOG_FILENAME
+    now_playing = SmtcNowPlayingSource(
+        identity_resolver=live_resolver, drop_log_path=drop_log_path
+    ).current()
     if now_playing is None:
         print("nothing is currently playing (SMTC reports no active session)")
         return 1
@@ -643,7 +651,7 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     but meant to be left running unattended rather than run once."""
     from .capture import WasapiProcessLoopbackCapture
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
-    from .nowplaying import SmtcNowPlayingSource
+    from .nowplaying import DEFAULT_DROP_LOG_FILENAME, SmtcNowPlayingSource
 
     live_resolver = _build_live_resolver(args)
     store = UserStore(root=args.data_dir)
@@ -668,7 +676,10 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     print(f"capture-loop running (poll every {args.poll_interval}s, Ctrl+C to stop)...")
     try:
         run_continuous_capture(
-            now_playing_source=SmtcNowPlayingSource(identity_resolver=live_resolver),
+            now_playing_source=SmtcNowPlayingSource(
+                identity_resolver=live_resolver,
+                drop_log_path=store.root / DEFAULT_DROP_LOG_FILENAME,
+            ),
             live_identity_resolver=live_resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,
