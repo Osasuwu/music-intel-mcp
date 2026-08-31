@@ -600,8 +600,8 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
     from .nowplaying import InMemoryNowPlayingSource, SmtcNowPlayingSource
 
-    identity_resolver = _build_resolver(args)
-    now_playing = SmtcNowPlayingSource(identity_resolver=identity_resolver).current()
+    live_resolver = _build_live_resolver(args)
+    now_playing = SmtcNowPlayingSource(identity_resolver=live_resolver).current()
     if now_playing is None:
         print("nothing is currently playing (SMTC reports no active session)")
         return 1
@@ -613,7 +613,6 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
         return 1
 
     print(f"now playing: {now_playing.artist} - {now_playing.title} (pid={now_playing.process_id})")
-    live_resolver = _build_live_resolver(args)
     capture = WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
     store = UserStore(root=args.data_dir)
 
@@ -647,10 +646,6 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     from .nowplaying import SmtcNowPlayingSource
 
     live_resolver = _build_live_resolver(args)
-    # #138: separate batch-waterfall resolver, used only to gate ambiguous
-    # browser SMTC candidates (see SmtcNowPlayingSource) — distinct from
-    # live_resolver, which resolves the actually-captured track's identity.
-    identity_resolver = _build_resolver(args)
     store = UserStore(root=args.data_dir)
     embedding_model = DiscogsEffnetOnnxModel()
     classifier = MtgJamendoClassifier()
@@ -673,7 +668,7 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     print(f"capture-loop running (poll every {args.poll_interval}s, Ctrl+C to stop)...")
     try:
         run_continuous_capture(
-            now_playing_source=SmtcNowPlayingSource(identity_resolver=identity_resolver),
+            now_playing_source=SmtcNowPlayingSource(identity_resolver=live_resolver),
             live_identity_resolver=live_resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,

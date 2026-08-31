@@ -18,7 +18,7 @@ import os
 import threading
 
 from .continuous_capture import run_continuous_capture
-from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
+from .identity import MusicBrainzIsrcIndex
 from .live_identity import AcoustIdApiSource, LiveIdentityResolver, LiveNegativeCache
 from .store import UserStore
 
@@ -72,10 +72,6 @@ def _run_loop(stop_event: threading.Event, status: _Status) -> None:
 
     store = UserStore()
     live_resolver = _build_live_resolver(store)
-    # #138: separate batch-waterfall resolver, used only to gate ambiguous
-    # browser SMTC candidates (see SmtcNowPlayingSource) — distinct from
-    # live_resolver, which resolves the actually-captured track's identity.
-    identity_resolver = IdentityResolver(MusicBrainzIsrcIndex(), cache=IdentityCache())
     embedding_model = DiscogsEffnetOnnxModel()
     classifier = MtgJamendoClassifier()
 
@@ -94,7 +90,7 @@ def _run_loop(stop_event: threading.Event, status: _Status) -> None:
     status.set("listening for now-playing...")
     try:
         run_continuous_capture(
-            now_playing_source=SmtcNowPlayingSource(identity_resolver=identity_resolver),
+            now_playing_source=SmtcNowPlayingSource(identity_resolver=live_resolver),
             live_identity_resolver=live_resolver,
             capture_factory=capture_factory,
             embedding_model=embedding_model,
