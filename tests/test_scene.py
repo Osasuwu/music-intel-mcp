@@ -247,6 +247,17 @@ def test_composite_returns_none_when_later_source_cleanly_misses_after_earlier_e
     assert composite.lookup("Artist X", "Track A", None) is None
 
 
+def test_composite_raises_when_later_source_errors_after_earlier_clean_miss():
+    failing = _RaisingTagSource(httpx.HTTPError("bang"))
+    composite = CompositeTagSource([InMemoryTagSource(), failing])
+
+    # Source 1 cleanly missed, but source 2 -- the last source actually
+    # reached -- errored. The clean miss can't vouch for a source it never
+    # saw the result of, so the error must surface, not be swallowed.
+    with pytest.raises(httpx.HTTPError):
+        composite.lookup("Artist X", "Track A", None)
+
+
 # --------------------------------------------------------------------------- #
 # MusicBrainzGenreSource (#122)
 # --------------------------------------------------------------------------- #
