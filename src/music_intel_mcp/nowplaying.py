@@ -296,8 +296,7 @@ def _process_id_for_app(app_id: str) -> int | None:
     """
     import psutil
 
-    name = app_id.rsplit("!", 1)[-1]  # AUMID may be "Package!App" or a bare exe name
-    stem = Path(name).stem.lower()
+    stem = _app_stem(app_id)
 
     matches = [
         proc.info["pid"]

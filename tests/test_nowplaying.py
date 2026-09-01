@@ -347,6 +347,24 @@ def test_process_id_for_app_picks_ancestor_most_process_among_siblings(
     assert pid == 100
 
 
+def test_process_id_for_app_matches_multi_segment_browser_aumid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: _process_id_for_app used to compute its own stem via
+    # Path(name).stem, which only strips the LAST dot segment and left
+    # "msedge.userdata" for a real multi-profile Edge AUMID -- matching no
+    # real psutil process and silently disabling WASAPI capture for exactly
+    # the browser sessions #145's admission-gate fix was meant to admit.
+    _fake_psutil(
+        monkeypatch,
+        [_FakeProcInfo(pid=100, name="msedge.exe", ppid=1)],
+    )
+
+    pid = np_module._process_id_for_app("MSEdge.UserData.Profile2")
+
+    assert pid == 100
+
+
 def test_process_id_for_app_none_when_no_match(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_psutil(monkeypatch, [_FakeProcInfo(pid=1, name="explorer.exe", ppid=None)])
 
