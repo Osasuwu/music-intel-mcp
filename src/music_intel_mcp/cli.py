@@ -755,6 +755,135 @@ def _cmd_build_ab_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _wait_for_oauth_callback(*, port: int, expected_state: str, timeout: float = 120.0) -> str:
+    """Blocks until Spotify's authorization redirect hits
+    ``http://127.0.0.1:<port>/callback``, then returns the authorization
+    code. A one-shot stdlib HTTP server — no browser-automation dependency."""
+    import queue
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    received: queue.Queue = queue.Queue(maxsize=1)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib-mandated method name
+            params = parse_qs(urlparse(self.path).query)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Authorized. You can close this tab.")
+            received.put(params)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", port), _Handler)
+    server.timeout = timeout
+    server.handle_request()
+    params = received.get_nowait()
+    state = (params.get("state") or [None])[0]
+    if state != expected_state:
+        raise RuntimeError("OAuth state mismatch — possible CSRF, aborting")
+    code = (params.get("code") or [None])[0]
+    if not code:
+        raise RuntimeError(f"OAuth callback missing 'code': {params}")
+    return code
+
+
+def _cmd_spotify_login(args: argparse.Namespace) -> int:
+    app_id = os.environ.get(_SPOTIFY_CLIENT_ID_ENV) or ""
+    if not app_id:
+        print(f"error: {_SPOTIFY_CLIENT_ID_ENV} not set")
+        return 2
+
+    import secrets
+    from urllib.parse import urlparse
+
+    from .spotify_user_auth import SpotifyUserAuth, build_authorize_url, generate_pkce_pair
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    auth = SpotifyUserAuth(client_id=app_id, token_path=store.root / "spotify_user_token.json")
+
+    verifier, challenge = generate_pkce_pair()
+    state = secrets.token_urlsafe(16)
+    redirect_uri = args.redirect_uri
+    authorize_url = build_authorize_url(
+        client_id=app_id, redirect_uri=redirect_uri, code_challenge=challenge, state=state
+    )
+    print(f"open this URL to authorize: {authorize_url}")
+
+    port = urlparse(redirect_uri).port or 8888
+    try:
+        code = _wait_for_oauth_callback(port=port, expected_state=state, timeout=args.timeout)
+    except RuntimeError as exc:
+        print(f"error: {exc}")
+        return 2
+
+    auth.exchange_code(code=code, redirect_uri=redirect_uri, code_verifier=verifier)
+    print("authorized — token saved")
+    return 0
+
+
+def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
+    from .backfill_playlist import is_backfill_enabled
+
+    if not is_backfill_enabled():
+        print("backfill playlist disabled")
+        return 1
+
+    app_id = os.environ.get(_SPOTIFY_CLIENT_ID_ENV) or ""
+    if not app_id:
+        print(f"error: {_SPOTIFY_CLIENT_ID_ENV} not set")
+        return 2
+
+    from .spotify_user_auth import SpotifyUserAuth
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    auth = SpotifyUserAuth(client_id=app_id, token_path=store.root / "spotify_user_token.json")
+    if not auth.is_authorized():
+        print("not authorized — run `music-intel spotify-login` first")
+        return 2
+
+    from .backfill_playlist import (
+        DEFAULT_PLAYLIST_NAME,
+        SpotifyPlaylistClient,
+        fetch_current_user_id,
+        fetch_saved_track_refs,
+        played_track_ids,
+        select_backfill_tracks,
+        sync_backfill_playlist,
+    )
+    from .shared_store import canonical_track_id
+
+    events = store.load_history()
+    played_ids = played_track_ids(events)
+    get_token = lambda: auth.access_token()  # noqa: E731
+
+    candidates = fetch_saved_track_refs(access_token=get_token)
+
+    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
+    analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+
+    selected = select_backfill_tracks(
+        candidates,
+        played_ids=played_ids,
+        has_audio_analysis=lambda cid: cid in analyzed,
+    )
+    desired_ids = [canonical_track_id(t) for t in selected]
+
+    fetched_user_id = fetch_current_user_id(access_token=get_token)
+    playlist_client = SpotifyPlaylistClient(access_token=get_token, user_id=fetched_user_id)
+    diff = sync_backfill_playlist(
+        playlist_client, desired_ids=desired_ids, playlist_name=DEFAULT_PLAYLIST_NAME
+    )
+
+    print(f"backfill playlist: {len(candidates)} saved tracks, {len(selected)} selected")
+    print(f"  synced: +{len(diff.to_add)} -{len(diff.to_remove)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="music-intel", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1044,6 +1173,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="resumable raw-scalar sidecar (default: <data root>/acousticbrainz_raw.jsonl)",
     )
     p_build_ab.set_defaults(func=_cmd_build_ab_index)
+
+    p_backfill = sub.add_parser(
+        "backfill-playlist",
+        help="sync the opt-in 'to-analyze' Spotify playlist (#127, daily refresh)",
+    )
+    p_backfill.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_backfill.add_argument(
+        "--shared-store",
+        choices=["local", "supabase", "memory"],
+        default="local",
+        help="metadata store for the AC3 analyzed-check (default: local)",
+    )
+    p_backfill.add_argument(
+        "--shared-store-path",
+        default=None,
+        help="path to the local shared-store JSONL",
+    )
+    p_backfill.set_defaults(func=_cmd_backfill_playlist)
+
+    p_login = sub.add_parser(
+        "spotify-login",
+        help="authorize the backfill playlist's Spotify user-OAuth scopes (#127 AC1/AC5)",
+    )
+    p_login.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root to write the local token file into "
+        "(default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_login.add_argument(
+        "--redirect-uri",
+        default="http://127.0.0.1:8888/callback",
+        help="registered Spotify app redirect URI (default: http://127.0.0.1:8888/callback)",
+    )
+    p_login.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="seconds to wait for the browser redirect before giving up (default: 120)",
+    )
+    p_login.set_defaults(func=_cmd_spotify_login)
     return parser
 
 
