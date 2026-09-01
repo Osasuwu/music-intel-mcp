@@ -105,6 +105,73 @@ def test_enrich_tags_skips_already_tagged_no_lookup():
     assert source.lookups == []
 
 
+class _FlakyTagSource:
+    """Raises ``httpx.HTTPError`` for specific tracks, delegates the rest to
+    an :class:`InMemoryTagSource` — for asserting a mid-run failure doesn't
+    lose the rest of the batch (#132 follow-up)."""
+
+    def __init__(self, mapping: dict[tuple[str, str], list[TrackTag]], fail_for: set[str]) -> None:
+        self._inner = InMemoryTagSource(mapping)
+        self._fail_for = fail_for
+
+    def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
+        if track in self._fail_for:
+            raise httpx.ConnectTimeout("simulated network failure")
+        return self._inner.lookup(artist, track, mbid)
+
+
+def test_enrich_tags_records_source_errors_without_aborting_the_run():
+    store = InMemorySharedStore(
+        [
+            _record("a", "Track A", "Artist X", None),  # source raises
+            _record("b", "Track B", "Artist Y", None),  # source succeeds
+        ]
+    )
+    source = _FlakyTagSource(
+        {("Artist Y", "Track B"): [TrackTag(tag="jazz", weight=1.0, source="lastfm")]},
+        fail_for={"Track A"},
+    )
+
+    report = enrich_tags(["a", "b"], store, source, now=NOW)
+
+    assert report.errors == ["a"]
+    assert report.enriched == ["b"]
+    # errors don't count toward coverage — only 'b' was actually measured
+    assert report.total_considered == 1
+    assert report.coverage == 1.0
+    # 'b' was still written back despite 'a' raising first
+    assert [t.tag for t in store.get_tracks(["b"])["b"].tags] == ["jazz"]
+
+
+def test_enrich_tags_flushes_write_back_periodically(monkeypatch):
+    monkeypatch.setattr("music_intel_mcp.scene._WRITE_BACK_BATCH_SIZE", 2)
+    track_ids = [f"t{i}" for i in range(5)]
+    store = InMemorySharedStore(
+        [_record(tid, f"Track {tid}", "Artist X", None) for tid in track_ids]
+    )
+    source = InMemoryTagSource(
+        {
+            ("Artist X", f"Track {tid}"): [TrackTag(tag="metal", weight=1.0, source="lastfm")]
+            for tid in track_ids
+        }
+    )
+
+    upsert_calls: list[int] = []
+    original_upsert = store.upsert_tracks
+
+    def _tracking_upsert(records):
+        upsert_calls.append(len(list(records)))
+        return original_upsert(records)
+
+    monkeypatch.setattr(store, "upsert_tracks", _tracking_upsert)
+
+    report = enrich_tags(track_ids, store, source, now=NOW)
+
+    assert report.enriched == track_ids
+    # batch size 2 over 5 records -> flushes at [2, 2, 1], not one write of 5
+    assert upsert_calls == [2, 2, 1]
+
+
 # --------------------------------------------------------------------------- #
 # CompositeTagSource (#122)
 # --------------------------------------------------------------------------- #
@@ -148,7 +215,8 @@ _MB_MBID = "1fc545d3-94b6-4a3d-bff3-bb8b861943d6"
 _MB_URL = f"https://musicbrainz.org/ws/2/recording/{_MB_MBID}"
 
 
-def test_musicbrainz_genre_source_merges_genres_and_tags_deduped():
+def test_musicbrainz_genre_source_merges_genres_and_tags_deduped(monkeypatch):
+    monkeypatch.setattr("music_intel_mcp.scene.time.sleep", lambda _seconds: None)
     source = MusicBrainzGenreSource(app_contact="me@example.com")
     body = {
         "genres": [{"name": "Metal", "count": 5}],
@@ -178,6 +246,17 @@ def test_musicbrainz_genre_source_requires_app_contact():
         source.lookup("Artist X", "Track A", _MB_MBID)
 
 
+def test_musicbrainz_genre_source_rate_limits_even_on_http_error(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("music_intel_mcp.scene.time.sleep", sleeps.append)
+    source = MusicBrainzGenreSource(app_contact="me@example.com")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(_MB_URL).mock(return_value=httpx.Response(503))
+        with pytest.raises(httpx.HTTPStatusError):
+            source.lookup("Artist X", "Track A", _MB_MBID)
+    assert sleeps == [MusicBrainzGenreSource._RATE_LIMIT_SECONDS]
+
+
 # --------------------------------------------------------------------------- #
 # DiscogsStyleSource (#122)
 # --------------------------------------------------------------------------- #
@@ -185,7 +264,8 @@ def test_musicbrainz_genre_source_requires_app_contact():
 _DISCOGS_URL = "https://api.discogs.com/database/search"
 
 
-def test_discogs_style_source_returns_first_result_styles():
+def test_discogs_style_source_returns_first_result_styles(monkeypatch):
+    monkeypatch.setattr("music_intel_mcp.scene.time.sleep", lambda _seconds: None)
     source = DiscogsStyleSource(token="tok")
     body = {"results": [{"style": ["Thrash", "Speed Metal"]}]}
     with respx.mock(assert_all_called=False) as router:
@@ -195,12 +275,34 @@ def test_discogs_style_source_returns_first_result_styles():
     assert all(t.source == "discogs" for t in tags)
 
 
-def test_discogs_style_source_empty_results_returns_none():
+def test_discogs_style_source_empty_results_returns_none(monkeypatch):
+    monkeypatch.setattr("music_intel_mcp.scene.time.sleep", lambda _seconds: None)
     source = DiscogsStyleSource(token="tok")
     with respx.mock(assert_all_called=False) as router:
         router.get(_DISCOGS_URL).mock(return_value=httpx.Response(200, json={"results": []}))
         result = source.lookup("Artist X", "Track A", None)
     assert result is None
+
+
+def test_discogs_style_source_rate_limits_calls(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("music_intel_mcp.scene.time.sleep", sleeps.append)
+    source = DiscogsStyleSource(token="tok")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(_DISCOGS_URL).mock(return_value=httpx.Response(200, json={"results": []}))
+        source.lookup("Artist X", "Track A", None)
+    assert sleeps == [DiscogsStyleSource._RATE_LIMIT_SECONDS]
+
+
+def test_discogs_style_source_rate_limits_even_on_http_error(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("music_intel_mcp.scene.time.sleep", sleeps.append)
+    source = DiscogsStyleSource(token="tok")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(_DISCOGS_URL).mock(return_value=httpx.Response(503))
+        with pytest.raises(httpx.HTTPStatusError):
+            source.lookup("Artist X", "Track A", None)
+    assert sleeps == [DiscogsStyleSource._RATE_LIMIT_SECONDS]
 
 
 def test_discogs_style_source_requires_token():

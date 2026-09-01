@@ -208,13 +208,19 @@ class MusicBrainzGenreSource:
         except ImportError as exc:
             raise RuntimeError("MusicBrainzGenreSource needs httpx: pip install httpx") from exc
         headers = {"User-Agent": f"music-intel-mcp/0.1 ({self._app_contact})"}
-        resp = httpx.get(
-            self._ENDPOINT.format(mbid=mbid),
-            params={"inc": "genres+tags", "fmt": "json"},
-            headers=headers,
-            timeout=15.0,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.get(
+                self._ENDPOINT.format(mbid=mbid),
+                params={"inc": "genres+tags", "fmt": "json"},
+                headers=headers,
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+        finally:
+            # Rate limit must hold even on a failed request — an HTTP error
+            # (e.g. a 503 under load) must not let the caller retry sooner
+            # than MusicBrainz's usage policy allows.
+            time.sleep(self._RATE_LIMIT_SECONDS)
         body = resp.json()
         seen: set[str] = set()
         tags: list[TrackTag] = []
@@ -226,7 +232,6 @@ class MusicBrainzGenreSource:
             tags.append(
                 TrackTag(tag=name, weight=float(entry.get("count", 0)), source="musicbrainz")
             )
-        time.sleep(self._RATE_LIMIT_SECONDS)
         return tags or None
 
 
@@ -240,6 +245,10 @@ class DiscogsStyleSource:
     """
 
     _ENDPOINT = "https://api.discogs.com/database/search"
+    # Discogs caps authenticated requests at 60/min; 1.1s keeps a margin
+    # rather than sitting exactly on the boundary (#132 follow-up — this
+    # source previously had no client-side throttle at all).
+    _RATE_LIMIT_SECONDS = 1.1
 
     def __init__(self, token: str | None = None) -> None:
         self._token = token or os.environ.get(_DISCOGS_TOKEN_ENV)
@@ -255,13 +264,16 @@ class DiscogsStyleSource:
             "User-Agent": "music-intel-mcp/0.1",
             "Authorization": f"Discogs token={self._token}",
         }
-        resp = httpx.get(
-            self._ENDPOINT,
-            params={"artist": artist, "track": track, "type": "release"},
-            headers=headers,
-            timeout=15.0,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.get(
+                self._ENDPOINT,
+                params={"artist": artist, "track": track, "type": "release"},
+                headers=headers,
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+        finally:
+            time.sleep(self._RATE_LIMIT_SECONDS)
         results = resp.json().get("results", [])
         if not results:
             return None
@@ -301,11 +313,15 @@ class TagEnrichmentReport:
     - ``enriched`` — gained tags from the source this run (written back).
     - ``already_present`` — carried tags already; source not queried.
     - ``missing_tags`` — the source had nothing for the track.
+    - ``errors`` — the source lookup raised (network/HTTP failure); the
+      track's tag state is unknown, not confirmed absent, so it does not
+      count toward ``total_considered``/``coverage``.
     """
 
     enriched: list[str] = field(default_factory=list)
     already_present: list[str] = field(default_factory=list)
     missing_tags: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     @property
     def total_considered(self) -> int:
@@ -320,6 +336,15 @@ class TagEnrichmentReport:
         return (len(self.enriched) + len(self.already_present)) / n
 
 
+# Flush cadence for the write-back loop below — bounds how much enriched
+# work a mid-run crash (or an unhandled error a source's lookup doesn't
+# raise as HTTPError) can lose, without regressing to a write-per-track
+# round-trip (#132 follow-up: a real run considers 100k+ tracks over
+# multiple hours; the prior single end-of-run write lost everything on any
+# failure between the first lookup and the last).
+_WRITE_BACK_BATCH_SIZE = 50
+
+
 def enrich_tags(
     track_ids: Sequence[str],
     store: SharedStore,
@@ -329,9 +354,23 @@ def enrich_tags(
 ) -> TagEnrichmentReport:
     """Populate ``tags`` on the store's records for ``track_ids``.
 
-    One bulk read, one bulk write-back (the shared-store round-trip discipline).
-    Tracks already carrying tags are skipped (no source lookup). Records absent
-    from the store are not considered (the caller seeds them first)."""
+    Bulk read, then incremental write-back every ``_WRITE_BACK_BATCH_SIZE``
+    enriched records (plus a final flush) rather than a single end-of-run
+    write — a long live run must not lose already-enriched tracks to one
+    later failure. Tracks already carrying tags are skipped (no source
+    lookup). Records absent from the store are not considered (the caller
+    seeds them first).
+
+    A source lookup that raises ``httpx.HTTPError`` (rate limit, timeout,
+    transport failure) is caught per-track and recorded in
+    ``report.errors`` rather than aborting the whole run."""
+    try:
+        import httpx
+
+        network_errors: tuple[type[BaseException], ...] = (httpx.HTTPError,)
+    except ImportError:
+        network_errors = ()
+
     records = store.get_tracks(list(dict.fromkeys(track_ids)))
     report = TagEnrichmentReport()
     to_write: list[TrackMetadataRecord] = []
@@ -340,13 +379,21 @@ def enrich_tags(
         if record.tags:
             report.already_present.append(tid)
             continue
-        tags = source.lookup(record.artist, record.name, record.mbid)
+        try:
+            tags = source.lookup(record.artist, record.name, record.mbid)
+        except network_errors:
+            report.errors.append(tid)
+            continue
         if not tags:
             report.missing_tags.append(tid)
             continue
         record.tags = tags
         to_write.append(record)
         report.enriched.append(tid)
+
+        if len(to_write) >= _WRITE_BACK_BATCH_SIZE:
+            store.upsert_tracks(to_write)
+            to_write = []
 
     if to_write:
         store.upsert_tracks(to_write)
