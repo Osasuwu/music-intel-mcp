@@ -19,7 +19,9 @@ touching half is :class:`SpotifyPlaybackClient`.
   skip-through, so a run against N tracks takes ~sum(durations) wall-clock.
 - **AC3** (revocable at any time, mid-track): ``has_consent`` is polled both
   before starting a new track and during every sleep increment within a
-  track, so revocation takes effect within one poll interval.
+  track, so revocation takes effect within one poll interval; a mid-track
+  revocation also calls the optional ``pause`` callable so the actual
+  Spotify device stops, not just the local loop.
 - **AC4** (traceable as agent-originated): :data:`AUTOMATED_PLAYBACK_SOURCE`
   is a distinct :attr:`~music_intel_mcp.models.ListenEvent.source` value,
   built by :func:`build_automated_play_event`.
@@ -58,11 +60,19 @@ def run_automated_playback(
     track_duration_s: Callable[[TrackRef], float],
     has_consent: Callable[[], bool],
     on_play: Callable[[TrackRef], None] | None = None,
+    pause: Callable[[], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     poll_interval_s: float = DEFAULT_CONSENT_POLL_INTERVAL_S,
 ) -> AutomatedPlaybackResult:
     """Play ``queue`` in order, human-paced (AC2), stopping immediately (even
-    mid-track) the moment ``has_consent`` returns False (AC3)."""
+    mid-track) the moment ``has_consent`` returns False (AC3).
+
+    ``pause`` (typically :meth:`SpotifyPlaybackClient.pause`) is called only
+    when revocation happens *mid-track* -- the one point where the Spotify
+    device is actually still making sound. Revocation checked before a track
+    starts never needs it: either nothing has played yet, or the previous
+    track already ran out its full duration on the device.
+    """
     played: list[TrackRef] = []
     for track in queue:
         if not has_consent():
@@ -74,6 +84,8 @@ def run_automated_playback(
         remaining = track_duration_s(track)
         while remaining > 0:
             if not has_consent():
+                if pause is not None:
+                    pause()
                 return AutomatedPlaybackResult(played=played, stopped_early=True)
             wait = min(poll_interval_s, remaining)
             sleep(wait)

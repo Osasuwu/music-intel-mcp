@@ -105,6 +105,67 @@ def test_run_automated_playback_stops_before_first_track_if_no_consent():
     assert result.stopped_early is True
 
 
+# #128 AC3 (real-device gap caught by review, PR #151): local revocation must
+# also pause the actual Spotify device -- otherwise the already-playing track
+# keeps making sound after the local loop has "stopped".
+def test_run_automated_playback_pauses_device_when_revoked_mid_track():
+    tracks = [_track("a"), _track("b")]
+    played: list[TrackRef] = []
+    pause_calls = {"n": 0}
+    consent_calls = {"n": 0}
+
+    def has_consent() -> bool:
+        consent_calls["n"] += 1
+        return consent_calls["n"] <= 2
+
+    result = run_automated_playback(
+        queue=tracks,
+        play_track=played.append,
+        track_duration_s=lambda t: 20.0,
+        has_consent=has_consent,
+        sleep=lambda s: None,
+        poll_interval_s=5.0,
+        pause=lambda: pause_calls.__setitem__("n", pause_calls["n"] + 1),
+    )
+
+    assert result.stopped_early is True
+    assert pause_calls["n"] == 1
+
+
+def test_run_automated_playback_does_not_pause_before_first_track_starts():
+    # nothing has been played yet, so there is nothing on the device to pause
+    pause_calls = {"n": 0}
+
+    result = run_automated_playback(
+        queue=[_track("a")],
+        play_track=lambda t: (_ for _ in ()).throw(AssertionError("must not play")),
+        track_duration_s=lambda t: 1.0,
+        has_consent=lambda: False,
+        sleep=lambda s: None,
+        pause=lambda: pause_calls.__setitem__("n", pause_calls["n"] + 1),
+    )
+
+    assert result.stopped_early is True
+    assert pause_calls["n"] == 0
+
+
+def test_run_automated_playback_does_not_pause_when_queue_completes_normally():
+    # the last track already finished its full duration -- nothing to pause
+    pause_calls = {"n": 0}
+
+    result = run_automated_playback(
+        queue=[_track("a")],
+        play_track=lambda t: None,
+        track_duration_s=lambda t: 1.0,
+        has_consent=lambda: True,
+        sleep=lambda s: None,
+        pause=lambda: pause_calls.__setitem__("n", pause_calls["n"] + 1),
+    )
+
+    assert result.stopped_early is False
+    assert pause_calls["n"] == 0
+
+
 def test_run_automated_playback_completes_full_queue_without_revocation():
     tracks = [_track("a"), _track("b"), _track("c")]
 

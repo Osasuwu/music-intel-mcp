@@ -990,6 +990,7 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
         track_duration_s=lambda t: playback_client.track_duration_s(canonical_track_id(t)),
         has_consent=store.has_automated_playback_consent,
         on_play=on_play,
+        pause=playback_client.pause,
         sleep=time.sleep,
     )
     print(f"automated playback: played {len(result.played)}/{len(queue)}")

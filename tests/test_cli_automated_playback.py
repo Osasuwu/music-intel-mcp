@@ -147,6 +147,71 @@ def test_automated_playback_plays_queue_and_records_agent_originated_history(
     assert agent_events[0].track.spotify_id == "fresh1"
 
 
+# #128 AC3 (real-device gap caught by review, PR #151): a consent revocation
+# during the CLI's session must issue a real PUT to Spotify's pause endpoint,
+# not just stop the local loop.
+def test_automated_playback_pauses_spotify_device_on_mid_session_revocation(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
+    _write_token(tmp_path)
+    store = UserStore(root=tmp_path)
+    store.grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+
+    from music_intel_mcp import cli
+
+    sleep_calls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        sleep_calls["n"] += 1
+        if sleep_calls["n"] == 1:
+            store.revoke_automated_playback_consent()
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://api.spotify.com/v1/me/tracks").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "track": {
+                                "id": "fresh1",
+                                "name": "Fresh",
+                                "artists": [{"name": "Artist"}],
+                                "album": {"name": "Album"},
+                            }
+                        }
+                    ],
+                    "next": None,
+                },
+            )
+        )
+        router.put("https://api.spotify.com/v1/me/player/play").mock(
+            return_value=httpx.Response(204)
+        )
+        router.get("https://api.spotify.com/v1/tracks/fresh1").mock(
+            return_value=httpx.Response(200, json={"duration_ms": 20_000})
+        )
+        pause_route = router.put("https://api.spotify.com/v1/me/player/pause").mock(
+            return_value=httpx.Response(204)
+        )
+
+        rc = main(
+            [
+                "automated-playback",
+                "--data-dir",
+                str(tmp_path),
+                "--shared-store",
+                "memory",
+            ]
+        )
+
+    assert rc == 0
+    assert pause_route.called
+
+
 def test_automated_playback_stops_early_when_nothing_to_play(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
