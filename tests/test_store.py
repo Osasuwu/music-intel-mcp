@@ -212,3 +212,45 @@ def test_write_audio_analysis_first_write_wins_under_thread_concurrency(tmp_path
     path = store.audio_analysis_path("mbid-race")
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["embedding"] in ([1.0], [2.0])  # exactly one writer's payload, never a mix
+
+
+# #128 AC1: automated-playback mode is off by default; enabling it requires an
+# explicit, separately-recorded consent action distinct from #127's
+# MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED env-var opt-in.
+def test_automated_playback_consent_is_off_by_default(tmp_path):
+    assert UserStore(root=tmp_path).has_automated_playback_consent() is False
+
+
+def test_grant_automated_playback_consent_persists_it(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+
+    assert path.exists()
+    assert store.has_automated_playback_consent() is True
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["granted_at"] == "2026-01-01T00:00:00Z"
+
+
+# #128 AC3: consent is revocable at any time.
+def test_revoke_automated_playback_consent_removes_it(tmp_path):
+    store = UserStore(root=tmp_path)
+    store.grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+
+    store.revoke_automated_playback_consent()
+
+    assert store.has_automated_playback_consent() is False
+
+
+def test_revoke_automated_playback_consent_is_a_noop_when_never_granted(tmp_path):
+    store = UserStore(root=tmp_path)
+    store.revoke_automated_playback_consent()  # must not raise
+    assert store.has_automated_playback_consent() is False
+
+
+def test_automated_playback_consent_is_independent_of_backfill_playlist_opt_in(
+    tmp_path, monkeypatch
+):
+    # "distinct from S6's playlist opt-in" (#128 issue body) -- setting the
+    # unrelated #127 env flag must not itself grant automated-playback consent.
+    monkeypatch.setenv("MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED", "true")
+    assert UserStore(root=tmp_path).has_automated_playback_consent() is False

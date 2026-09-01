@@ -29,6 +29,13 @@ PLAYLIST_SCOPES = (
     "playlist-modify-private",
 )
 
+# #128: automated playback drives a real playback session (not just a
+# playlist), so it needs its own scopes beyond PLAYLIST_SCOPES.
+PLAYBACK_SCOPES = (
+    "user-modify-playback-state",
+    "user-read-playback-state",
+)
+
 _TOKEN_EXPIRY_MARGIN_S = 60
 
 
@@ -42,10 +49,17 @@ def generate_pkce_pair() -> tuple[str, str]:
 
 
 def build_authorize_url(
-    *, client_id: str, redirect_uri: str, code_challenge: str, state: str
+    *,
+    client_id: str,
+    redirect_uri: str,
+    code_challenge: str,
+    state: str,
+    scopes: tuple[str, ...] = PLAYLIST_SCOPES,
 ) -> str:
     """The URL to send the user to for the authorization-code+PKCE grant,
-    scoped to :data:`PLAYLIST_SCOPES`."""
+    scoped to ``scopes`` (default :data:`PLAYLIST_SCOPES`; the CLI passes
+    ``PLAYLIST_SCOPES + PLAYBACK_SCOPES`` so one login covers both #127 and
+    #128)."""
     params = {
         "client_id": client_id,
         "response_type": "code",
@@ -53,7 +67,7 @@ def build_authorize_url(
         "code_challenge_method": "S256",
         "code_challenge": code_challenge,
         "state": state,
-        "scope": " ".join(PLAYLIST_SCOPES),
+        "scope": " ".join(scopes),
     }
     return f"{SPOTIFY_AUTHORIZE_URL}?{urlencode(params)}"
 
