@@ -28,6 +28,8 @@ respx-mocked-in-CI convention) compose it against the live Spotify Web API.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -36,6 +38,7 @@ from .shared_store import canonical_track_id
 
 DEFAULT_PLAYLIST_NAME = "music-intel: to-analyze"
 MAX_BACKFILL_TRACKS = 10_000
+DEFAULT_REFRESH_INTERVAL_S = 24 * 60 * 60  # AC2: daily cadence
 _BACKFILL_ENABLED_ENV = "MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -281,3 +284,33 @@ def sync_backfill_playlist(
     if diff.to_remove:
         client.remove_tracks(playlist_id, diff.to_remove)
     return diff
+
+
+def run_continuous_backfill(
+    *,
+    sync_once: Callable[[], PlaylistDiff],
+    interval_s: float = DEFAULT_REFRESH_INTERVAL_S,
+    stop_event: threading.Event | None = None,
+    on_result: Callable[[PlaylistDiff], None] | None = None,
+    on_error: Callable[[Exception], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """AC2's daily-cadence half: keep re-running ``sync_once`` (typically
+    :func:`sync_backfill_playlist` bound to a live client/desired-ids
+    closure) every ``interval_s`` seconds until ``stop_event`` is set —
+    mirrors :func:`~music_intel_mcp.continuous_capture.run_continuous_capture`'s
+    ``stop_event``/``sleep``-injection convention so this is testable without
+    a real day-long sleep. A single cycle's failure is reported via
+    ``on_error`` rather than killing the loop, matching the always-keep-
+    running behavior a daily background job needs."""
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        try:
+            result = sync_once()
+        except Exception as exc:  # noqa: BLE001 - reported, loop keeps running
+            if on_error is not None:
+                on_error(exc)
+        else:
+            if on_result is not None:
+                on_result(result)
+        sleep(interval_s)

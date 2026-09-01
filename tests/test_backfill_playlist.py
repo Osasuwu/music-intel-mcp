@@ -8,12 +8,16 @@ Spotify-API half) follows in ``test_backfill_playlist_sync.py``.
 
 from __future__ import annotations
 
+import threading
+
 from music_intel_mcp.backfill_playlist import (
+    DEFAULT_REFRESH_INTERVAL_S,
     MAX_BACKFILL_TRACKS,
     PlaylistDiff,
     diff_playlist_membership,
     is_backfill_enabled,
     played_track_ids,
+    run_continuous_backfill,
     select_backfill_tracks,
 )
 from music_intel_mcp.models import ListenEvent, PlayContext, TrackRef
@@ -160,3 +164,79 @@ def test_backfill_enabled_via_explicit_opt_in():
 def test_backfill_disabled_for_falsy_values():
     for value in ("0", "false", "no", ""):
         assert is_backfill_enabled({"MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED": value}) is False
+
+
+# --- AC2 (cadence half): daily-refresh loop --------------------------------- #
+
+
+def test_default_refresh_interval_is_daily():
+    assert DEFAULT_REFRESH_INTERVAL_S == 24 * 60 * 60
+
+
+def test_run_continuous_backfill_syncs_then_sleeps_then_stops():
+    # sync_once runs once per cycle; the injected stop_event/sleep let the
+    # loop be driven deterministically instead of actually sleeping a day.
+    calls: list[str] = []
+    stop_event = threading.Event()
+
+    def sync_once() -> PlaylistDiff:
+        calls.append("sync")
+        return PlaylistDiff(to_add=[], to_remove=[])
+
+    def fake_sleep(seconds: float) -> None:
+        calls.append(f"sleep:{seconds}")
+        stop_event.set()
+
+    run_continuous_backfill(
+        sync_once=sync_once,
+        interval_s=99.0,
+        stop_event=stop_event,
+        sleep=fake_sleep,
+    )
+
+    assert calls == ["sync", "sleep:99.0"]
+
+
+def test_run_continuous_backfill_reports_each_cycle_result():
+    stop_event = threading.Event()
+    results: list[PlaylistDiff] = []
+    diff = PlaylistDiff(to_add=["a"], to_remove=[])
+
+    def sync_once() -> PlaylistDiff:
+        return diff
+
+    def fake_sleep(_seconds: float) -> None:
+        stop_event.set()
+
+    run_continuous_backfill(
+        sync_once=sync_once,
+        stop_event=stop_event,
+        sleep=fake_sleep,
+        on_result=results.append,
+    )
+
+    assert results == [diff]
+
+
+def test_run_continuous_backfill_reports_sync_errors_without_stopping():
+    stop_event = threading.Event()
+    errors: list[Exception] = []
+    attempts = {"n": 0}
+
+    def sync_once() -> PlaylistDiff:
+        attempts["n"] += 1
+        raise RuntimeError("boom")
+
+    def fake_sleep(_seconds: float) -> None:
+        stop_event.set()
+
+    run_continuous_backfill(
+        sync_once=sync_once,
+        stop_event=stop_event,
+        sleep=fake_sleep,
+        on_error=errors.append,
+    )
+
+    assert attempts["n"] == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)

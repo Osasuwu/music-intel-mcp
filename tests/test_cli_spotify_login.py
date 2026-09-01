@@ -44,6 +44,14 @@ def test_wait_for_oauth_callback_rejects_state_mismatch():
         assert "state mismatch" in str(exc)
 
 
+def test_wait_for_oauth_callback_times_out_cleanly():
+    try:
+        cli._wait_for_oauth_callback(port=8767, expected_state="s1", timeout=0.3)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+
+
 def test_spotify_login_requires_client_id(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
     rc = main(["spotify-login", "--data-dir", str(tmp_path)])

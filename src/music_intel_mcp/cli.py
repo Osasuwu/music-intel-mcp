@@ -73,6 +73,7 @@ from .artist_identity import (
     MusicBrainzArtistUrlIndex,
 )
 from .audio import AcousticBrainzDump, AudioFeatureSource
+from .backfill_playlist import run_continuous_backfill
 from .continuous_capture import run_continuous_capture
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
@@ -780,7 +781,10 @@ def _wait_for_oauth_callback(*, port: int, expected_state: str, timeout: float =
     server = HTTPServer(("127.0.0.1", port), _Handler)
     server.timeout = timeout
     server.handle_request()
-    params = received.get_nowait()
+    try:
+        params = received.get_nowait()
+    except queue.Empty:
+        raise RuntimeError(f"OAuth callback timed out after {timeout}s") from None
     state = (params.get("state") or [None])[0]
     if state != expected_state:
         raise RuntimeError("OAuth state mismatch — possible CSRF, aborting")
@@ -848,6 +852,7 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
 
     from .backfill_playlist import (
         DEFAULT_PLAYLIST_NAME,
+        PlaylistDiff,
         SpotifyPlaylistClient,
         fetch_current_user_id,
         fetch_saved_track_refs,
@@ -857,30 +862,44 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
     )
     from .shared_store import canonical_track_id
 
-    events = store.load_history()
-    played_ids = played_track_ids(events)
     get_token = lambda: auth.access_token()  # noqa: E731
-
-    candidates = fetch_saved_track_refs(access_token=get_token)
-
     shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
-    analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
-
-    selected = select_backfill_tracks(
-        candidates,
-        played_ids=played_ids,
-        has_audio_analysis=lambda cid: cid in analyzed,
-    )
-    desired_ids = [canonical_track_id(t) for t in selected]
-
     fetched_user_id = fetch_current_user_id(access_token=get_token)
     playlist_client = SpotifyPlaylistClient(access_token=get_token, user_id=fetched_user_id)
-    diff = sync_backfill_playlist(
-        playlist_client, desired_ids=desired_ids, playlist_name=DEFAULT_PLAYLIST_NAME
-    )
 
-    print(f"backfill playlist: {len(candidates)} saved tracks, {len(selected)} selected")
-    print(f"  synced: +{len(diff.to_add)} -{len(diff.to_remove)}")
+    def sync_once() -> PlaylistDiff:
+        events = store.load_history()
+        played_ids = played_track_ids(events)
+        candidates = fetch_saved_track_refs(access_token=get_token)
+        analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+        selected = select_backfill_tracks(
+            candidates,
+            played_ids=played_ids,
+            has_audio_analysis=lambda cid: cid in analyzed,
+        )
+        desired_ids = [canonical_track_id(t) for t in selected]
+        diff = sync_backfill_playlist(
+            playlist_client, desired_ids=desired_ids, playlist_name=DEFAULT_PLAYLIST_NAME
+        )
+        print(f"backfill playlist: {len(candidates)} saved tracks, {len(selected)} selected")
+        print(f"  synced: +{len(diff.to_add)} -{len(diff.to_remove)}")
+        return diff
+
+    if not args.loop:
+        sync_once()
+        return 0
+
+    def on_error(exc: Exception) -> None:
+        print(f"backfill-playlist cycle failed: {exc}")
+
+    interval_s = args.interval_hours * 3600.0
+    print(
+        f"backfill-playlist running in loop mode (every {args.interval_hours}h, Ctrl+C to stop)..."
+    )
+    try:
+        run_continuous_backfill(sync_once=sync_once, interval_s=interval_s, on_error=on_error)
+    except KeyboardInterrupt:
+        print("backfill-playlist loop stopped.")
     return 0
 
 
@@ -1193,6 +1212,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--shared-store-path",
         default=None,
         help="path to the local shared-store JSONL",
+    )
+    p_backfill.add_argument(
+        "--loop",
+        action="store_true",
+        help="keep re-syncing on --interval-hours until Ctrl+C, instead of a single run (AC2)",
+    )
+    p_backfill.add_argument(
+        "--interval-hours",
+        dest="interval_hours",
+        type=float,
+        default=24.0,
+        help="hours between refreshes in --loop mode (default: 24.0, AC2's daily cadence)",
     )
     p_backfill.set_defaults(func=_cmd_backfill_playlist)
 

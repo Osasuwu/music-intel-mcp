@@ -121,3 +121,56 @@ def test_backfill_playlist_syncs_selected_tracks(tmp_path, capsys, monkeypatch):
     assert add_route.called
     add_body = json.loads(add_route.calls[0].request.content)
     assert add_body["uris"] == ["spotify:track:fresh1"]
+
+
+def test_backfill_playlist_loop_runs_until_stopped(tmp_path, capsys, monkeypatch):
+    # AC2's daily-cadence half: --loop wires run_continuous_backfill in so a
+    # single invocation keeps refreshing instead of running once and exiting.
+    monkeypatch.setenv("MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED", "true")
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
+    _write_token(tmp_path)
+
+    from music_intel_mcp import cli
+
+    calls = {"n": 0}
+
+    def fake_run_continuous_backfill(*, sync_once, interval_s, on_error=None, **_kw):
+        assert interval_s == 2 * 3600.0
+        calls["n"] += 1
+        sync_once()  # one cycle, then stop — no real loop/sleep in a unit test
+
+    monkeypatch.setattr(cli, "run_continuous_backfill", fake_run_continuous_backfill)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://api.spotify.com/v1/me/tracks").mock(
+            return_value=httpx.Response(200, json={"items": [], "next": None})
+        )
+        router.get("https://api.spotify.com/v1/me").mock(
+            return_value=httpx.Response(200, json={"id": "the_user"})
+        )
+        router.get("https://api.spotify.com/v1/me/playlists").mock(
+            return_value=httpx.Response(
+                200,
+                json={"items": [{"id": "pl1", "name": "music-intel: to-analyze"}], "next": None},
+            )
+        )
+        router.get("https://api.spotify.com/v1/playlists/pl1/tracks").mock(
+            return_value=httpx.Response(200, json={"items": [], "next": None})
+        )
+
+        rc = main(
+            [
+                "backfill-playlist",
+                "--data-dir",
+                str(tmp_path),
+                "--shared-store",
+                "memory",
+                "--loop",
+                "--interval-hours",
+                "2",
+            ]
+        )
+
+    assert rc == 0
+    assert calls["n"] == 1
+    assert "loop mode" in capsys.readouterr().out
