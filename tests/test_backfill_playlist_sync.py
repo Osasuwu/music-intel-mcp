@@ -148,7 +148,7 @@ def test_get_playlist_track_ids_follows_pagination():
         router.get(url__regex=r".*/playlists/pl1/tracks.*").mock(side_effect=_paged_response)
         track_ids = client.get_playlist_track_ids("pl1")
 
-    assert track_ids == ["a", "b", "c"]
+    assert track_ids == ["spotify:a", "spotify:b", "spotify:c"]
 
 
 # --- AC3: end-to-end sync adds newly-desired, removes now-analyzed -------- #
@@ -167,7 +167,7 @@ def test_sync_backfill_playlist_adds_and_removes():
             return_value=httpx.Response(
                 200,
                 json={
-                    "items": [{"track": {"id": "spotify:stale"}}],
+                    "items": [{"track": {"id": "stale"}}],
                     "next": None,
                 },
             )
@@ -205,7 +205,7 @@ def test_sync_backfill_playlist_is_noop_when_membership_already_matches():
         router.get(playlist_tracks_url("pl1")).mock(
             return_value=httpx.Response(
                 200,
-                json={"items": [{"track": {"id": "spotify:keep"}}], "next": None},
+                json={"items": [{"track": {"id": "keep"}}], "next": None},
             )
         )
 

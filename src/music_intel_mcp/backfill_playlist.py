@@ -196,7 +196,14 @@ class SpotifyPlaylistClient:
         return resp.json()["id"]
 
     def get_playlist_track_ids(self, playlist_id: str) -> list[str]:
-        """Every track id currently on the playlist, following pagination."""
+        """Every track id currently on the playlist, following pagination.
+
+        Spotify's API returns bare ids (e.g. ``6y0igZArWVi6Iz0rj35c1Y``); these
+        are re-prefixed to the canonical ``spotify:<id>`` form (matching
+        :func:`~music_intel_mcp.shared_store.canonical_track_id`) so
+        :func:`diff_playlist_membership` compares like-for-like against
+        ``desired_ids``, which is always built via that same canonicalizer.
+        """
         import httpx
 
         ids: list[str] = []
@@ -209,7 +216,7 @@ class SpotifyPlaylistClient:
                 track = item.get("track") or {}
                 tid = track.get("id")
                 if tid:
-                    ids.append(tid)
+                    ids.append(f"spotify:{tid}")
             url = payload.get("next")
         return ids
 
