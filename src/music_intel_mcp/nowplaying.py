@@ -4,20 +4,38 @@ Uses Windows System Media Transport Controls (SMTC) via the ``winsdk`` package
 rather than Spotify Web API user-authorized OAuth: this codebase's Spotify
 integration (``spotify_api.py``) only implements the client-credentials flow,
 and SMTC gives both the track metadata *and* the source app/process in one
-OS-level call with no new auth flow to build. ``resolve_now_playing`` feeds
-whatever identity SMTC exposes into the existing spotify_id -> ISRC -> MBID
+OS-level call with no new auth flow to build.
+
+Two identity resolvers are involved, deliberately kept apart (#145): the
+pre-capture browser-admission gate (``SmtcNowPlayingSource`` /
+``_is_resolvable``) walks the richer, AcoustID-first
+:class:`~music_intel_mcp.live_identity.LiveIdentityResolver` waterfall to
+decide whether a candidate browser tab is even worth capturing, while
+``resolve_now_playing`` — a separate, out-of-scope-for-#145 function — feeds
+whatever identity SMTC exposes into the older spotify_id -> ISRC -> MBID
 waterfall (:class:`~music_intel_mcp.identity.IdentityResolver`) so the played
-track is matched the same way every other track in this codebase is.
+track is matched the same way every other track in this codebase is. They
+share a same-named ``resolver`` parameter by coincidence, not by design
+relationship.
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from .identity import IdentityResolver, ResolvedIdentity
+from .live_identity import LiveIdentityResolver
 from .models import TrackRef
+from .store import resolve_data_root
+
+# #145 AC3: rejected browser SMTC candidates are a transparent rejection, not
+# a silent drop — appended here (JSONL, mirrors store.py's append-only
+# convention) so a wrong admission call is debuggable after the fact.
+DEFAULT_DROP_LOG_FILENAME = "smtc_drops.jsonl"
 
 # App-id allowlist (#138): only these app "stems" (AUMID suffix / exe name,
 # lowercased, extension-stripped — same normalization as _process_id_for_app)
@@ -70,8 +88,25 @@ class SmtcNowPlayingSource:
     ``identity_resolver`` to gate ambiguous browser-AUMID candidates.
     """
 
-    def __init__(self, *, identity_resolver: IdentityResolver) -> None:
+    def __init__(
+        self,
+        *,
+        identity_resolver: LiveIdentityResolver,
+        drop_log_path: str | Path | None = None,
+    ) -> None:
         self._identity_resolver = identity_resolver
+        self._admission_memo: dict[tuple[str, str, str], bool] = {}
+        self._drop_log_path = (
+            Path(drop_log_path)
+            if drop_log_path is not None
+            else resolve_data_root(None) / DEFAULT_DROP_LOG_FILENAME
+        )
+
+    def _log_drop(self, info: NowPlayingInfo) -> None:
+        self._drop_log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"title": info.title, "artist": info.artist, "app_id": info.app_id}
+        with self._drop_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload) + "\n")
 
     def current(self) -> NowPlayingInfo | None:
         from winsdk.windows.media.control import (
@@ -99,7 +134,12 @@ class SmtcNowPlayingSource:
             )
             candidates.append(_SmtcCandidate(info=info, is_playing=is_playing))
 
-        return _select_now_playing(candidates, resolver=self._identity_resolver)
+        return _select_now_playing(
+            candidates,
+            resolver=self._identity_resolver,
+            admission_memo=self._admission_memo,
+            on_drop=self._log_drop,
+        )
 
 
 def _await(async_op):
@@ -122,9 +162,15 @@ def _app_stem(app_id: str) -> str:
     """Normalize an SMTC ``source_app_user_model_id`` to a comparable "stem":
     strip the AUMID's ``Package!App`` suffix (or bare exe name) down to its
     lowercased, extension-free display name — the same normalization
-    :func:`_process_id_for_app` uses to match psutil process names."""
+    :func:`_process_id_for_app` uses to match psutil process names.
+
+    Real multi-profile Chromium AUMIDs (e.g. ``MSEdge.UserData.Profile2``)
+    have no ``!`` separator and multiple dot segments, so ``Path.stem``
+    (which only strips the last segment) leaves ``msedge.userdata`` instead
+    of the bare process stem. Take the first dot segment instead — this
+    still collapses a plain ``chrome.exe`` to ``chrome``."""
     name = app_id.rsplit("!", 1)[-1]
-    return Path(name).stem.lower()
+    return Path(name).name.split(".", 1)[0].lower()
 
 
 def _classify_app(
@@ -141,26 +187,49 @@ def _classify_app(
     return "other"
 
 
-def _is_resolvable(candidate: _SmtcCandidate, resolver: IdentityResolver) -> bool:
+def _admission_memo_key(candidate: _SmtcCandidate) -> tuple[str, str, str]:
+    """Mirrors ``continuous_capture.py``'s ``_track_key`` shape."""
+    return (candidate.info.title, candidate.info.artist, candidate.info.app_id)
+
+
+def _is_resolvable(
+    candidate: _SmtcCandidate,
+    resolver: LiveIdentityResolver,
+    admission_memo: dict[tuple[str, str, str], bool],
+) -> bool:
     """A browser SMTC session's ``app_id`` can't distinguish a music tab from
     any other tab (e.g. a podcast, a video call) playing audio in the same
     browser — so browser candidates are only admitted if their track actually
     resolves through the identity waterfall to something more specific than a
-    bare name match. See CONTEXT.md "Live capture pipeline" for why an
-    allowlist alone can't do this."""
-    track = TrackRef(
-        spotify_id=candidate.info.spotify_id,
-        name=candidate.info.title,
+    bare name match. This gate runs pre-capture (no PCM yet), so it only ever
+    reaches the waterfall's text rungs (spotify_search, mb_name) — the
+    ``fingerprint=None`` AcoustID rung is a no-op here (#145). See
+    CONTEXT.md "Live capture pipeline" for why an allowlist alone can't do
+    this.
+
+    ``admission_memo`` caches the verdict per ``(title, artist, app_id)`` for
+    the session's lifetime (#145 AC2) — this gate runs on every 5s poll, not
+    once per track, so without memoization the same browser track would walk
+    the waterfall repeatedly."""
+    key = _admission_memo_key(candidate)
+    if key in admission_memo:
+        return admission_memo[key]
+    identity = resolver.resolve(
+        title=candidate.info.title,
         artist=candidate.info.artist,
+        fingerprint=None,
     )
-    identity = resolver.resolve(track)
-    return identity.level != "name"
+    verdict = identity.level != "name"
+    admission_memo[key] = verdict
+    return verdict
 
 
 def _select_now_playing(
     candidates: list[_SmtcCandidate],
     *,
-    resolver: IdentityResolver,
+    resolver: LiveIdentityResolver,
+    admission_memo: dict[tuple[str, str, str], bool] | None = None,
+    on_drop: Callable[[NowPlayingInfo], None] | None = None,
     spotify_stem: str = DEFAULT_SPOTIFY_APP_STEM,
     browser_stems: frozenset[str] = DEFAULT_BROWSER_APP_STEMS,
 ) -> NowPlayingInfo | None:
@@ -171,7 +240,21 @@ def _select_now_playing(
     resolvability. Ties (multiple simultaneously-Playing candidates) prefer
     Spotify, else the first Playing candidate in enumeration order — SMTC
     exposes no reliable recency signal, so no recency heuristic is used.
+
+    ``admission_memo`` defaults to a fresh, call-scoped dict when omitted
+    (as every pre-#145-AC2 caller does) — only a caller holding one memo
+    across repeated calls (:class:`SmtcNowPlayingSource`) gets the
+    once-per-session memoization.
+
+    ``on_drop`` is called with a rejected browser candidate's
+    :class:`NowPlayingInfo` (#145 AC3) — a transparent-rejection hook so a
+    caller can persist a breadcrumb without this function knowing about file
+    I/O. Never called for the memo's cached rejections (only the resolver
+    call site knows it's a fresh verdict) — see
+    :class:`SmtcNowPlayingSource` for the JSONL sink.
     """
+    if admission_memo is None:
+        admission_memo = {}
     allowlisted = []
     for candidate in candidates:
         if not candidate.is_playing:
@@ -181,8 +264,12 @@ def _select_now_playing(
         )
         if app_class == "other":
             continue
-        if app_class == "browser" and not _is_resolvable(candidate, resolver):
-            continue
+        if app_class == "browser":
+            was_cached = _admission_memo_key(candidate) in admission_memo
+            if not _is_resolvable(candidate, resolver, admission_memo):
+                if on_drop is not None and not was_cached:
+                    on_drop(candidate.info)
+                continue
         allowlisted.append((app_class, candidate))
 
     for app_class, candidate in allowlisted:
@@ -209,8 +296,7 @@ def _process_id_for_app(app_id: str) -> int | None:
     """
     import psutil
 
-    name = app_id.rsplit("!", 1)[-1]  # AUMID may be "Package!App" or a bare exe name
-    stem = Path(name).stem.lower()
+    stem = _app_stem(app_id)
 
     matches = [
         proc.info["pid"]

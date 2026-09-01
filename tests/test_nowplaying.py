@@ -12,9 +12,15 @@ from music_intel_mcp.identity import (
     InMemoryIsrcMbidIndex,
     InMemorySpotifyIsrcSource,
 )
+from music_intel_mcp.live_identity import (
+    InMemoryMusicBrainzNameSearchSource,
+    LiveIdentityResolver,
+)
 from music_intel_mcp.nowplaying import (
     InMemoryNowPlayingSource,
     NowPlayingInfo,
+    _app_stem,
+    _classify_app,
     _select_now_playing,
     _SmtcCandidate,
     resolve_now_playing,
@@ -75,7 +81,7 @@ def test_select_now_playing_finds_playing_session_behind_non_media_foreground_ap
     candidates = [
         _candidate(title="Discovery", artist="Daft Punk", app_id="Spotify.exe", is_playing=True),
     ]
-    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    resolver = LiveIdentityResolver()
 
     result = _select_now_playing(candidates, resolver=resolver)
 
@@ -90,25 +96,27 @@ def test_select_now_playing_drops_unresolvable_browser_session() -> None:
     candidates = [
         _candidate(title="Episode 42", artist="Some Podcast", app_id="chrome.exe", is_playing=True),
     ]
-    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    resolver = LiveIdentityResolver()
 
     assert _select_now_playing(candidates, resolver=resolver) is None
 
 
 def test_select_now_playing_admits_resolvable_browser_session() -> None:
-    # A browser session IS admitted once its track resolves past bare-name level.
+    # A browser session IS admitted once its track resolves past bare-name level
+    # via the live waterfall's text-only rungs (#145) — pre-capture there is no
+    # fingerprint yet, so this exercises the mb_name rung, not AcoustID.
     candidates = [
         _candidate(
             title="Around the World",
             artist="Daft Punk",
             app_id="chrome.exe",
             is_playing=True,
-            spotify_id="1pKYYY0dkg23sQQXi0Q5zN",
         ),
     ]
-    resolver = IdentityResolver(
-        InMemoryIsrcMbidIndex({"FRDM19700001": "mbid-around-the-world"}),
-        spotify_source=InMemorySpotifyIsrcSource({"1pKYYY0dkg23sQQXi0Q5zN": "FRDM19700001"}),
+    resolver = LiveIdentityResolver(
+        mb_name_search=InMemoryMusicBrainzNameSearchSource(
+            {("Around the World", "Daft Punk"): "mbid-around-the-world"}
+        ),
     )
 
     result = _select_now_playing(candidates, resolver=resolver)
@@ -117,11 +125,71 @@ def test_select_now_playing_admits_resolvable_browser_session() -> None:
     assert result.title == "Around the World"
 
 
+# #145 AC2: the gate runs on every 5s poll, so a session-lifetime admission
+# memo keyed by (title, artist, app_id) must keep the waterfall from being
+# walked more than once per unique track per session.
+def test_select_now_playing_admission_memo_avoids_repeat_resolver_calls() -> None:
+    candidates = [
+        _candidate(
+            title="Around the World",
+            artist="Daft Punk",
+            app_id="chrome.exe",
+            is_playing=True,
+        ),
+    ]
+    mb_name_search = InMemoryMusicBrainzNameSearchSource(
+        {("Around the World", "Daft Punk"): "mbid-around-the-world"}
+    )
+    resolver = LiveIdentityResolver(mb_name_search=mb_name_search)
+    memo: dict[tuple[str, str, str], bool] = {}
+
+    _select_now_playing(candidates, resolver=resolver, admission_memo=memo)
+    _select_now_playing(candidates, resolver=resolver, admission_memo=memo)
+
+    assert len(mb_name_search.calls) == 1
+
+
+# #145 AC3: rejected browser candidates are a transparent rejection, not a
+# silent drop — recorded via a caller-supplied sink so SmtcNowPlayingSource
+# can persist it as a JSONL breadcrumb without _select_now_playing knowing
+# about file I/O.
+def test_select_now_playing_reports_drop_breadcrumb_on_rejection() -> None:
+    candidates = [
+        _candidate(title="Episode 42", artist="Some Podcast", app_id="chrome.exe", is_playing=True),
+    ]
+    resolver = LiveIdentityResolver()
+    drops: list[NowPlayingInfo] = []
+
+    result = _select_now_playing(candidates, resolver=resolver, on_drop=drops.append)
+
+    assert result is None
+    assert len(drops) == 1
+    assert drops[0].title == "Episode 42"
+    assert drops[0].artist == "Some Podcast"
+
+
+# Review finding on PR #147 (#145): on_drop must fire once per fresh
+# rejection, not on every poll of a memo-cached rejection — else
+# smtc_drops.jsonl grows unbounded for a single persistently-rejected track.
+def test_select_now_playing_reports_drop_once_for_memo_cached_rejection() -> None:
+    candidates = [
+        _candidate(title="Episode 42", artist="Some Podcast", app_id="chrome.exe", is_playing=True),
+    ]
+    resolver = LiveIdentityResolver()
+    memo: dict[tuple[str, str, str], bool] = {}
+    drops: list[NowPlayingInfo] = []
+
+    _select_now_playing(candidates, resolver=resolver, admission_memo=memo, on_drop=drops.append)
+    _select_now_playing(candidates, resolver=resolver, admission_memo=memo, on_drop=drops.append)
+
+    assert len(drops) == 1
+
+
 def test_select_now_playing_ignores_non_allowlisted_app() -> None:
     candidates = [
         _candidate(title="Some Notification", artist="", app_id="explorer.exe", is_playing=True),
     ]
-    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    resolver = LiveIdentityResolver()
 
     assert _select_now_playing(candidates, resolver=resolver) is None
 
@@ -130,7 +198,7 @@ def test_select_now_playing_ignores_non_playing_session() -> None:
     candidates = [
         _candidate(title="Discovery", artist="Daft Punk", app_id="Spotify.exe", is_playing=False),
     ]
-    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    resolver = LiveIdentityResolver()
 
     assert _select_now_playing(candidates, resolver=resolver) is None
 
@@ -145,13 +213,11 @@ def test_select_now_playing_prefers_spotify_when_multiple_sessions_playing() -> 
             artist="Podcast",
             app_id="chrome.exe",
             is_playing=True,
-            spotify_id="track-2",
         ),
         _candidate(title="Discovery", artist="Daft Punk", app_id="Spotify.exe", is_playing=True),
     ]
-    resolver = IdentityResolver(
-        InMemoryIsrcMbidIndex({"ISRC2": "mbid-2"}),
-        spotify_source=InMemorySpotifyIsrcSource({"track-2": "ISRC2"}),
+    resolver = LiveIdentityResolver(
+        mb_name_search=InMemoryMusicBrainzNameSearchSource({("Episode 1", "Podcast"): "mbid-2"}),
     )
 
     result = _select_now_playing(candidates, resolver=resolver)
@@ -169,25 +235,37 @@ def test_select_now_playing_first_playing_when_no_spotify_among_ties() -> None:
             artist="A",
             app_id="chrome.exe",
             is_playing=True,
-            spotify_id="track-a",
         ),
         _candidate(
             title="Second",
             artist="B",
             app_id="msedge.exe",
             is_playing=True,
-            spotify_id="track-b",
         ),
     ]
-    resolver = IdentityResolver(
-        InMemoryIsrcMbidIndex({"ISRC_A": "mbid-a", "ISRC_B": "mbid-b"}),
-        spotify_source=InMemorySpotifyIsrcSource({"track-a": "ISRC_A", "track-b": "ISRC_B"}),
+    resolver = LiveIdentityResolver(
+        mb_name_search=InMemoryMusicBrainzNameSearchSource(
+            {("First", "A"): "mbid-a", ("Second", "B"): "mbid-b"}
+        ),
     )
 
     result = _select_now_playing(candidates, resolver=resolver)
 
     assert result is not None
     assert result.title == "First"
+
+
+# Real-world multi-profile Chromium AUMIDs (e.g. "MSEdge.UserData.Profile2")
+# have no "!" separator and multiple dot segments, so Path(name).stem only
+# strips the last segment ("MSEdge.UserData") instead of collapsing to the
+# bare process stem ("msedge"). Confirmed live: a real Edge SMTC session was
+# silently dropped at classification and never reached the resolvability gate.
+def test_app_stem_handles_multi_segment_browser_aumid() -> None:
+    assert _app_stem("MSEdge.UserData.Profile2") == "msedge"
+
+
+def test_classify_app_recognizes_multi_segment_edge_aumid_as_browser() -> None:
+    assert _classify_app("MSEdge.UserData.Profile2") == "browser"
 
 
 # AC1: per-process capture needs the right PID scoped to the target app.
@@ -265,6 +343,24 @@ def test_process_id_for_app_picks_ancestor_most_process_among_siblings(
     )
 
     pid = np_module._process_id_for_app("Spotify")
+
+    assert pid == 100
+
+
+def test_process_id_for_app_matches_multi_segment_browser_aumid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: _process_id_for_app used to compute its own stem via
+    # Path(name).stem, which only strips the LAST dot segment and left
+    # "msedge.userdata" for a real multi-profile Edge AUMID -- matching no
+    # real psutil process and silently disabling WASAPI capture for exactly
+    # the browser sessions #145's admission-gate fix was meant to admit.
+    _fake_psutil(
+        monkeypatch,
+        [_FakeProcInfo(pid=100, name="msedge.exe", ppid=1)],
+    )
+
+    pid = np_module._process_id_for_app("MSEdge.UserData.Profile2")
 
     assert pid == 100
 
