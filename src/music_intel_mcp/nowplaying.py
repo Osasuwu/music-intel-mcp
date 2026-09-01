@@ -162,9 +162,15 @@ def _app_stem(app_id: str) -> str:
     """Normalize an SMTC ``source_app_user_model_id`` to a comparable "stem":
     strip the AUMID's ``Package!App`` suffix (or bare exe name) down to its
     lowercased, extension-free display name — the same normalization
-    :func:`_process_id_for_app` uses to match psutil process names."""
+    :func:`_process_id_for_app` uses to match psutil process names.
+
+    Real multi-profile Chromium AUMIDs (e.g. ``MSEdge.UserData.Profile2``)
+    have no ``!`` separator and multiple dot segments, so ``Path.stem``
+    (which only strips the last segment) leaves ``msedge.userdata`` instead
+    of the bare process stem. Take the first dot segment instead — this
+    still collapses a plain ``chrome.exe`` to ``chrome``."""
     name = app_id.rsplit("!", 1)[-1]
-    return Path(name).stem.lower()
+    return Path(name).name.split(".", 1)[0].lower()
 
 
 def _classify_app(

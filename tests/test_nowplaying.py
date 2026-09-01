@@ -19,6 +19,8 @@ from music_intel_mcp.live_identity import (
 from music_intel_mcp.nowplaying import (
     InMemoryNowPlayingSource,
     NowPlayingInfo,
+    _app_stem,
+    _classify_app,
     _select_now_playing,
     _SmtcCandidate,
     resolve_now_playing,
@@ -251,6 +253,19 @@ def test_select_now_playing_first_playing_when_no_spotify_among_ties() -> None:
 
     assert result is not None
     assert result.title == "First"
+
+
+# Real-world multi-profile Chromium AUMIDs (e.g. "MSEdge.UserData.Profile2")
+# have no "!" separator and multiple dot segments, so Path(name).stem only
+# strips the last segment ("MSEdge.UserData") instead of collapsing to the
+# bare process stem ("msedge"). Confirmed live: a real Edge SMTC session was
+# silently dropped at classification and never reached the resolvability gate.
+def test_app_stem_handles_multi_segment_browser_aumid() -> None:
+    assert _app_stem("MSEdge.UserData.Profile2") == "msedge"
+
+
+def test_classify_app_recognizes_multi_segment_edge_aumid_as_browser() -> None:
+    assert _classify_app("MSEdge.UserData.Profile2") == "browser"
 
 
 # AC1: per-process capture needs the right PID scoped to the target app.
