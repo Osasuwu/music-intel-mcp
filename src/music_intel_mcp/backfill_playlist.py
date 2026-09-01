@@ -34,7 +34,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .models import ListenEvent, TrackRef
-from .shared_store import canonical_track_id
+from .shared_store import canonical_track_id, spotify_track_uri
 
 DEFAULT_PLAYLIST_NAME = "music-intel: to-analyze"
 MAX_BACKFILL_TRACKS = 10_000
@@ -232,7 +232,7 @@ class SpotifyPlaylistClient:
             resp = httpx.post(
                 playlist_tracks_url(playlist_id),
                 headers=self._headers(),
-                json={"uris": [_track_uri(tid) for tid in batch]},
+                json={"uris": [spotify_track_uri(tid) for tid in batch]},
                 timeout=self._timeout,
             )
             resp.raise_for_status()
@@ -247,22 +247,10 @@ class SpotifyPlaylistClient:
                 "DELETE",
                 playlist_tracks_url(playlist_id),
                 headers=self._headers(),
-                json={"tracks": [{"uri": _track_uri(tid)} for tid in batch]},
+                json={"tracks": [{"uri": spotify_track_uri(tid)} for tid in batch]},
                 timeout=self._timeout,
             )
             resp.raise_for_status()
-
-
-def _track_uri(track_id: str) -> str:
-    """A bare id becomes a full ``spotify:track:<id>`` uri; an id already
-    carrying our internal ``spotify:<id>`` canonical prefix (see
-    :func:`~music_intel_mcp.shared_store.canonical_track_id`) is passed
-    through as-is — Spotify's API only cares that it's a resolvable uri."""
-    if track_id.startswith("spotify:track:"):
-        return track_id
-    if track_id.startswith("spotify:"):
-        return f"spotify:track:{track_id.split(':', 1)[1]}"
-    return f"spotify:track:{track_id}"
 
 
 def sync_backfill_playlist(

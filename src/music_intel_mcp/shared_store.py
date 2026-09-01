@@ -63,6 +63,21 @@ def _chunked(seq: Sequence, size: int):
 # --------------------------------------------------------------------------- #
 
 
+def spotify_track_uri(track_id: str) -> str:
+    """A bare id becomes a full ``spotify:track:<id>`` uri; an id already
+    carrying our internal ``spotify:<id>`` canonical prefix (see
+    :func:`canonical_track_id`) is passed through as-is -- Spotify's API only
+    cares that it's a resolvable uri. Shared by
+    :mod:`music_intel_mcp.backfill_playlist` and
+    :mod:`music_intel_mcp.automated_playback`, the two modules that talk to
+    Spotify's playlist/playback write endpoints."""
+    if track_id.startswith("spotify:track:"):
+        return track_id
+    if track_id.startswith("spotify:"):
+        return f"spotify:track:{track_id.split(':', 1)[1]}"
+    return f"spotify:track:{track_id}"
+
+
 def canonical_track_id(track: TrackRef) -> str:
     """Stable string key for a track across the shared store and local cache.
 

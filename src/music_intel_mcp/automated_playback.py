@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .models import ListenEvent, TrackRef
+from .shared_store import spotify_track_uri
 
 AUTOMATED_PLAYBACK_SOURCE = "agent_automated_playback"
 DEFAULT_CONSENT_POLL_INTERVAL_S = 5.0
@@ -101,17 +102,6 @@ def build_automated_play_event(track: TrackRef, *, played_at: datetime) -> Liste
     return ListenEvent(track=track, played_at=played_at, source=AUTOMATED_PLAYBACK_SOURCE)
 
 
-def _track_uri(track_id: str) -> str:
-    """Mirrors :func:`music_intel_mcp.backfill_playlist._track_uri` -- a bare
-    id or our internal ``spotify:<id>`` canonical prefix both normalize to a
-    full ``spotify:track:<id>`` uri."""
-    if track_id.startswith("spotify:track:"):
-        return track_id
-    if track_id.startswith("spotify:"):
-        return f"spotify:track:{track_id.split(':', 1)[1]}"
-    return f"spotify:track:{track_id}"
-
-
 class SpotifyPlaybackClient:
     """Thin wrapper over the Player Playback Control half of the Spotify Web
     API (``user-modify-playback-state`` / ``user-read-playback-state`` -- see
@@ -134,7 +124,7 @@ class SpotifyPlaybackClient:
         resp = httpx.put(
             SPOTIFY_PLAYER_PLAY_URL,
             headers=self._headers(),
-            json={"uris": [_track_uri(track_id)]},
+            json={"uris": [spotify_track_uri(track_id)]},
             timeout=self._timeout,
         )
         resp.raise_for_status()
