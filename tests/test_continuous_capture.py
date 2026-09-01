@@ -169,6 +169,35 @@ def test_capture_failure_is_isolated_and_loop_continues(tmp_path) -> None:
     assert results[0][0] is _TRACK_B
 
 
+def test_new_track_is_analyzed_and_stored_with_no_manual_trigger(tmp_path) -> None:
+    """#126 AC3: a track with no existing store entry is auto-identified and
+    analyzed on its next play — the polling loop alone drives the write, no
+    manual trigger call is made anywhere in this test."""
+    resolver, embedding_model, classifier, store = _make_deps(tmp_path)
+    source = _SequenceNowPlayingSource([_TRACK_A])
+    stop_event = threading.Event()
+
+    def capture_factory(_info: NowPlayingInfo) -> FakeLoopbackCapture:
+        return FakeLoopbackCapture(sample_rate=16000, channels=1)
+
+    assert list(store.audio_analysis_dir.glob("*.json")) == []
+
+    run_continuous_capture(
+        now_playing_source=source,
+        live_identity_resolver=resolver,
+        capture_factory=capture_factory,
+        embedding_model=embedding_model,
+        classifier=classifier,
+        store=store,
+        capture_duration_s=0.05,
+        stop_event=stop_event,
+        sleep=_stopping_sleep(stop_event, after=1),
+    )
+
+    written = list(store.audio_analysis_dir.glob("*.json"))
+    assert len(written) == 1
+
+
 def test_unresolved_process_id_is_skipped(tmp_path) -> None:
     resolver, embedding_model, classifier, store = _make_deps(tmp_path)
     unresolved = NowPlayingInfo(title="C", artist="Artist", app_id="chrome.exe", process_id=None)

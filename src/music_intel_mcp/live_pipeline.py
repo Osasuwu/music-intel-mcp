@@ -41,8 +41,9 @@ FingerprintFn = Callable[[np.ndarray, int], tuple[str, float]]
 @dataclass
 class LiveCaptureResult:
     identity: LiveResolvedIdentity
-    inference: InferenceResult
+    inference: InferenceResult | None
     analysis_path: Path
+    skipped: bool = False
 
 
 def run_live_capture_spike(
@@ -94,11 +95,22 @@ def run_live_capture_spike(
         duration_s=fp_duration_s,
     )
 
+    track_id = identity.mbid or identity.spotify_id or identity.isrc or identity.name_key
+
+    # #126 AC1/AC4: dedup purely off the identity waterfall + local store — an
+    # already-analyzed track is skipped, no re-inference (the expensive step).
+    if track_id is not None and store.has_audio_analysis(track_id):
+        return LiveCaptureResult(
+            identity=identity,
+            inference=None,
+            analysis_path=store.audio_analysis_path(track_id),
+            skipped=True,
+        )
+
     inference = run_inference(
         pcm, sample_rate=sink.sample_rate, embedding_model=embedding_model, classifier=classifier
     )
 
-    track_id = identity.mbid or identity.spotify_id or identity.isrc or identity.name_key
     provenance = ProvenanceSidecar(
         raw_title=now_playing.title,
         raw_artist=now_playing.artist,
@@ -106,6 +118,9 @@ def run_live_capture_spike(
         captured_at=now().isoformat(),
         chromaprint_fingerprint=fingerprint,
     )
+    # #126 AC2: first-write-wins — write_audio_analysis atomically claims
+    # track_id; a concurrent second writer for the same track discards its
+    # write rather than overwriting (embeddings aren't meaningfully averageable).
     analysis_path = store.write_audio_analysis(
         track_id=track_id,
         embedding=inference.embedding,

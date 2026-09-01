@@ -154,6 +154,14 @@ class UserStore:
     def audio_analysis_dir(self) -> Path:
         return self.root / "audio_analysis"
 
+    def audio_analysis_path(self, track_id: str) -> Path:
+        return self.audio_analysis_dir / f"{self._safe_name(track_id)}.json"
+
+    def has_audio_analysis(self, track_id: str) -> bool:
+        """#126 AC1/AC4: dedup check the live pipeline runs via the identity
+        waterfall's resolved ``track_id`` before paying for inference."""
+        return self.audio_analysis_path(track_id).exists()
+
     def write_audio_analysis(
         self,
         *,
@@ -173,9 +181,15 @@ class UserStore:
         a re-mapping job over sidecars, never a re-listen. Accepts anything
         with a ``model_dump()`` (a :class:`~music_intel_mcp.live_identity.
         ProvenanceSidecar`) or a plain dict; ``None`` for the pre-#139 batch
-        path, which has no live capture metadata to attach."""
+        path, which has no live capture metadata to attach.
+
+        #126 AC2: first-write-wins. Two near-simultaneous writers for the same
+        ``track_id`` (e.g. two overlapping capture sessions) must not average
+        or clobber each other's embedding — the file is claimed atomically via
+        ``O_CREAT | O_EXCL`` at the OS level; a losing writer's payload is
+        silently discarded and the winner's path is returned either way."""
         self.audio_analysis_dir.mkdir(parents=True, exist_ok=True)
-        path = self.audio_analysis_dir / f"{self._safe_name(track_id)}.json"
+        path = self.audio_analysis_path(track_id)
         if provenance is None:
             provenance_payload = None
         elif hasattr(provenance, "model_dump"):
@@ -188,7 +202,12 @@ class UserStore:
             "tags": {label: float(score) for label, score in tags.items()},
             "provenance": provenance_payload,
         }
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return path
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
         return path
 
     def list_audio_analyses(self) -> list[AudioAnalysisRecord]:
