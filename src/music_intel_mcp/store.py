@@ -15,10 +15,26 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .models import Library, ListenEvent, RootProfile
+
+
+@dataclass(frozen=True)
+class AudioAnalysisRecord:
+    """One persisted live-capture inference result, read back from
+    ``audio_analysis/*.json`` (#125 AC1). ``embedding`` is the raw
+    Discogs-EffNet vector (~1280-dim in production); ``tags`` are the
+    MTG-Jamendo classifier scores — descriptive only, never clustering input
+    (decision 0c762eec)."""
+
+    track_id: str
+    embedding: list[float]
+    tags: dict[str, float]
+    provenance: dict[str, Any] | None = None
+
 
 DEFAULT_DATA_DIR = "data"
 _DATA_DIR_ENV = "MUSIC_INTEL_DATA_DIR"
@@ -174,3 +190,26 @@ class UserStore:
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
+
+    def list_audio_analyses(self) -> list[AudioAnalysisRecord]:
+        """Read every persisted per-track embedding+tags record back (#125
+        AC1) — the population :func:`music_intel_mcp.timbre.derive_timbre_clusters`
+        clusters over. Missing dir -> empty list (honest-empty: no capture run
+        yet), mirroring ``load_history``'s missing-file idiom. Sorted by
+        ``track_id`` (not filename — sanitization can reorder them) for
+        deterministic downstream clustering input."""
+        if not self.audio_analysis_dir.exists():
+            return []
+        records: list[AudioAnalysisRecord] = []
+        for path in self.audio_analysis_dir.glob("*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            records.append(
+                AudioAnalysisRecord(
+                    track_id=payload["track_id"],
+                    embedding=[float(x) for x in payload["embedding"]],
+                    tags={k: float(v) for k, v in payload.get("tags", {}).items()},
+                    provenance=payload.get("provenance"),
+                )
+            )
+        records.sort(key=lambda r: r.track_id)
+        return records

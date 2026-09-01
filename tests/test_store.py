@@ -132,3 +132,37 @@ def test_write_audio_analysis_provenance_optional(tmp_path):
     path = store.write_audio_analysis(track_id="mbid-1", embedding=[0.1], tags={})
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["provenance"] is None
+
+
+# #125 AC1: a reader for the local store so per-user clustering can consume
+# every persisted per-track embedding, not just write them.
+def test_list_audio_analyses_reads_back_every_persisted_record(tmp_path):
+    store = UserStore(root=tmp_path)
+    store.write_audio_analysis(track_id="b", embedding=[0.4, 0.5], tags={"genre---rock": 0.8})
+    store.write_audio_analysis(track_id="a", embedding=[0.1, 0.2], tags={"genre---jazz": 0.6})
+
+    records = store.list_audio_analyses()
+
+    assert [r.track_id for r in records] == ["a", "b"]  # sorted, deterministic
+    assert records[0].embedding == [0.1, 0.2]
+    assert records[0].tags == {"genre---jazz": 0.6}
+
+
+def test_list_audio_analyses_missing_dir_is_empty(tmp_path):
+    assert UserStore(root=tmp_path).list_audio_analyses() == []
+
+
+def test_list_audio_analyses_sorts_by_track_id_not_filename(tmp_path):
+    # "spotify:track:Z" sanitizes to "spotify_track_Z" (filename order: Z after A),
+    # but "b" (raw track_id) sorts before "spotify:track:Z" only by track_id,
+    # not by the sanitized filename — glob's filename order would put "b.json"
+    # before "spotify_track_Z.json" too, so instead pick ids where sanitization
+    # flips relative order: "A/Z" -> "A_Z" vs "A0" stays "A0" (raw '/' < '0' in
+    # ASCII, but sanitized '_' > '0'), so filename-order and track_id-order disagree.
+    store = UserStore(root=tmp_path)
+    store.write_audio_analysis(track_id="A0", embedding=[0.1], tags={})
+    store.write_audio_analysis(track_id="A/Z", embedding=[0.2], tags={})
+
+    records = store.list_audio_analyses()
+
+    assert [r.track_id for r in records] == ["A/Z", "A0"]  # raw track_id order
