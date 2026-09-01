@@ -301,18 +301,23 @@ class CompositeTagSource:
             network_errors = ()
 
         last_error: BaseException | None = None
+        any_clean_lookup = False
         for source in self._sources:
             try:
                 tags = source.lookup(artist, track, mbid)
             except network_errors as exc:
                 # One source's transient failure (rate limit, timeout) must
                 # not stop the remaining fallback sources from being tried —
-                # only re-raise if every source in the chain failed.
+                # only re-raise if every source in the chain raised.
                 last_error = exc
                 continue
+            # This source answered without raising — even a "no tags" answer
+            # is a definitive result, not an error, so a stale error from an
+            # earlier source must not be re-raised over it.
+            any_clean_lookup = True
             if tags:
                 return tags
-        if last_error is not None:
+        if last_error is not None and not any_clean_lookup:
             raise last_error
         return None
 

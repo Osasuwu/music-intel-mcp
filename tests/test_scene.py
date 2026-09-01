@@ -238,6 +238,15 @@ def test_composite_raises_when_all_sources_error():
         composite.lookup("Artist X", "Track A", None)
 
 
+def test_composite_returns_none_when_later_source_cleanly_misses_after_earlier_error():
+    failing = _RaisingTagSource(httpx.HTTPError("boom"))
+    composite = CompositeTagSource([failing, InMemoryTagSource()])
+
+    # Source 1 raised, but source 2 completed cleanly with "no tags" -- that
+    # is a definitive miss, not an error, so the stale error must not surface.
+    assert composite.lookup("Artist X", "Track A", None) is None
+
+
 # --------------------------------------------------------------------------- #
 # MusicBrainzGenreSource (#122)
 # --------------------------------------------------------------------------- #
