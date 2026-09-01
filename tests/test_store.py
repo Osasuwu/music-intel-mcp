@@ -166,3 +166,49 @@ def test_list_audio_analyses_sorts_by_track_id_not_filename(tmp_path):
     records = store.list_audio_analyses()
 
     assert [r.track_id for r in records] == ["A/Z", "A0"]  # raw track_id order
+
+
+# #126 AC2: concurrent-duplicate race — pinned first-write-wins, no averaging,
+# no data loss. A second writer for the same track_id must not clobber the
+# first writer's payload, and must not raise.
+def test_write_audio_analysis_first_write_wins_on_duplicate_track_id(tmp_path):
+    store = UserStore(root=tmp_path)
+    first_path = store.write_audio_analysis(
+        track_id="mbid-dup", embedding=[0.1], tags={"genre---rock": 1.0}
+    )
+    second_path = store.write_audio_analysis(
+        track_id="mbid-dup", embedding=[0.9], tags={"genre---jazz": 1.0}
+    )
+
+    assert first_path == second_path
+    payload = json.loads(first_path.read_text(encoding="utf-8"))
+    assert payload["tags"] == {"genre---rock": 1.0}
+    assert payload["embedding"] == [0.1]
+
+
+def test_write_audio_analysis_first_write_wins_under_thread_concurrency(tmp_path):
+    import threading
+
+    store = UserStore(root=tmp_path)
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def _write(tag_value: float) -> None:
+        try:
+            barrier.wait()
+            store.write_audio_analysis(
+                track_id="mbid-race", embedding=[tag_value], tags={"genre---x": tag_value}
+            )
+        except Exception as exc:  # pragma: no cover - failure path asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_write, args=(v,)) for v in (1.0, 2.0)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    path = store.audio_analysis_path("mbid-race")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["embedding"] in ([1.0], [2.0])  # exactly one writer's payload, never a mix

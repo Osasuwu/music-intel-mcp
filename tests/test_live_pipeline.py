@@ -116,6 +116,39 @@ def test_run_live_capture_spike_falls_through_when_fingerprinting_fails(tmp_path
     assert result.identity.level == "name"
 
 
+def test_run_live_capture_spike_skips_inference_when_already_analyzed(tmp_path) -> None:
+    """#126 AC1: the store is checked via the identity waterfall before
+    analysis; a track that already has a stored embedding is skipped — no
+    re-inference (embedding_model/classifier must not be called)."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="Spotify.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    live_resolver = LiveIdentityResolver(acoustid_source=acoustid)
+    embedding_model = InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32))
+    classifier = InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9}))
+    store = UserStore(root=tmp_path)
+    store.write_audio_analysis(track_id="M-1", embedding=[0.5], tags={"genre---rock": 1.0})
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=embedding_model,
+        classifier=classifier,
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    assert embedding_model.calls == 0
+    assert classifier.calls == 0
+    assert result is not None
+    assert result.skipped is True
+    assert result.identity.mbid == "M-1"
+    assert result.inference is None
+
+
 def test_run_live_capture_spike_none_when_nothing_playing(tmp_path) -> None:
     result = run_live_capture_spike(
         duration_s=0.1,
