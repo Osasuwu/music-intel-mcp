@@ -207,6 +207,37 @@ def test_composite_returns_none_when_all_sources_miss():
     assert composite.lookup("Artist X", "Track A", None) is None
 
 
+class _RaisingTagSource:
+    """Stub source whose ``lookup`` always raises, for exercising
+    :class:`CompositeTagSource`'s per-source error isolation."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
+        raise self._exc
+
+
+def test_composite_tries_next_source_when_one_raises_http_error():
+    key = ("artist x", "track a")
+    failing = _RaisingTagSource(httpx.HTTPError("boom"))
+    second = InMemoryTagSource({key: [TrackTag(tag="thrash", weight=1.0, source="musicbrainz")]})
+    composite = CompositeTagSource([failing, second])
+
+    tags = composite.lookup("Artist X", "Track A", None)
+
+    assert [t.tag for t in tags] == ["thrash"]
+
+
+def test_composite_raises_when_all_sources_error():
+    composite = CompositeTagSource(
+        [_RaisingTagSource(httpx.HTTPError("boom")), _RaisingTagSource(httpx.HTTPError("bang"))]
+    )
+
+    with pytest.raises(httpx.HTTPError):
+        composite.lookup("Artist X", "Track A", None)
+
+
 # --------------------------------------------------------------------------- #
 # MusicBrainzGenreSource (#122)
 # --------------------------------------------------------------------------- #

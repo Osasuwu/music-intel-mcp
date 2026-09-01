@@ -293,10 +293,27 @@ class CompositeTagSource:
         self._sources = list(sources)
 
     def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
+        try:
+            import httpx
+
+            network_errors: tuple[type[BaseException], ...] = (httpx.HTTPError,)
+        except ImportError:
+            network_errors = ()
+
+        last_error: BaseException | None = None
         for source in self._sources:
-            tags = source.lookup(artist, track, mbid)
+            try:
+                tags = source.lookup(artist, track, mbid)
+            except network_errors as exc:
+                # One source's transient failure (rate limit, timeout) must
+                # not stop the remaining fallback sources from being tried —
+                # only re-raise if every source in the chain failed.
+                last_error = exc
+                continue
             if tags:
                 return tags
+        if last_error is not None:
+            raise last_error
         return None
 
 
