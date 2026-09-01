@@ -15,6 +15,7 @@ import httpx
 import respx
 
 from music_intel_mcp.spotify_user_auth import (
+    PLAYBACK_SCOPES,
     PLAYLIST_SCOPES,
     SPOTIFY_AUTHORIZE_URL,
     SPOTIFY_TOKEN_URL,
@@ -53,6 +54,20 @@ def test_build_authorize_url_includes_pkce_and_playlist_scopes():
     assert "code_challenge_method=S256" in url
     assert "state=st8" in url
     for scope in PLAYLIST_SCOPES:
+        assert scope in url
+
+
+# #128: automated playback needs PLAYBACK_SCOPES on top of PLAYLIST_SCOPES,
+# via one combined login rather than a second OAuth flow.
+def test_build_authorize_url_accepts_combined_scopes():
+    url = build_authorize_url(
+        client_id="cid",
+        redirect_uri="http://127.0.0.1:8765/callback",
+        code_challenge="chal123",
+        state="st8",
+        scopes=PLAYLIST_SCOPES + PLAYBACK_SCOPES,
+    )
+    for scope in PLAYLIST_SCOPES + PLAYBACK_SCOPES:
         assert scope in url
 
 

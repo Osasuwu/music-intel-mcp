@@ -232,3 +232,29 @@ class UserStore:
             )
         records.sort(key=lambda r: r.track_id)
         return records
+
+    # --- automated playback consent (#128 AC1/AC3) ------------------------ #
+
+    @property
+    def automated_playback_consent_path(self) -> Path:
+        return self.root / "automated_playback_consent.json"
+
+    def has_automated_playback_consent(self) -> bool:
+        """#128 AC1: off by default. Deliberately a separate file from any
+        env-var opt-in (e.g. #127's ``MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED``)
+        — this drives a real playback session, not just a queue, so it needs
+        its own, separately-recorded consent action."""
+        return self.automated_playback_consent_path.exists()
+
+    def grant_automated_playback_consent(self, *, granted_at: str) -> Path:
+        self.automated_playback_consent_path.parent.mkdir(parents=True, exist_ok=True)
+        self.automated_playback_consent_path.write_text(
+            json.dumps({"granted_at": granted_at}), encoding="utf-8"
+        )
+        return self.automated_playback_consent_path
+
+    def revoke_automated_playback_consent(self) -> None:
+        """#128 AC3: revocable at any time. The automated-playback loop polls
+        this every few seconds, so deleting the file stops an in-progress
+        session within one poll interval, mid-track if needed."""
+        self.automated_playback_consent_path.unlink(missing_ok=True)

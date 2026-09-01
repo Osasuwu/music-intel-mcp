@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
@@ -803,7 +804,13 @@ def _cmd_spotify_login(args: argparse.Namespace) -> int:
     import secrets
     from urllib.parse import urlparse
 
-    from .spotify_user_auth import SpotifyUserAuth, build_authorize_url, generate_pkce_pair
+    from .spotify_user_auth import (
+        PLAYBACK_SCOPES,
+        PLAYLIST_SCOPES,
+        SpotifyUserAuth,
+        build_authorize_url,
+        generate_pkce_pair,
+    )
     from .store import UserStore
 
     store = UserStore(root=args.data_dir)
@@ -812,8 +819,14 @@ def _cmd_spotify_login(args: argparse.Namespace) -> int:
     verifier, challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(16)
     redirect_uri = args.redirect_uri
+    # one combined login covers both #127 (playlist) and #128 (automated
+    # playback) scopes, rather than a second OAuth flow.
     authorize_url = build_authorize_url(
-        client_id=app_id, redirect_uri=redirect_uri, code_challenge=challenge, state=state
+        client_id=app_id,
+        redirect_uri=redirect_uri,
+        code_challenge=challenge,
+        state=state,
+        scopes=PLAYLIST_SCOPES + PLAYBACK_SCOPES,
     )
     print(f"open this URL to authorize: {authorize_url}")
 
@@ -900,6 +913,86 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
         run_continuous_backfill(sync_once=sync_once, interval_s=interval_s, on_error=on_error)
     except KeyboardInterrupt:
         print("backfill-playlist loop stopped.")
+    return 0
+
+
+def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    if args.revoke:
+        store.revoke_automated_playback_consent()
+        print("automated-playback consent revoked")
+        return 0
+
+    store.grant_automated_playback_consent(granted_at=datetime.now(UTC).isoformat())
+    print("automated-playback consent granted")
+    return 0
+
+
+def _cmd_automated_playback(args: argparse.Namespace) -> int:
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    if not store.has_automated_playback_consent():
+        print(
+            "automated playback consent not granted — "
+            "run `music-intel automated-playback-consent --grant` first"
+        )
+        return 1
+
+    app_id = os.environ.get(_SPOTIFY_CLIENT_ID_ENV) or ""
+    if not app_id:
+        print(f"error: {_SPOTIFY_CLIENT_ID_ENV} not set")
+        return 2
+
+    from .spotify_user_auth import SpotifyUserAuth
+
+    auth = SpotifyUserAuth(client_id=app_id, token_path=store.root / "spotify_user_token.json")
+    if not auth.is_authorized():
+        print("not authorized — run `music-intel spotify-login` first")
+        return 2
+
+    from .automated_playback import (
+        SpotifyPlaybackClient,
+        build_automated_play_event,
+        run_automated_playback,
+    )
+    from .backfill_playlist import (
+        fetch_saved_track_refs,
+        played_track_ids,
+        select_backfill_tracks,
+    )
+    from .shared_store import canonical_track_id
+
+    get_token = lambda: auth.access_token()  # noqa: E731
+    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
+    played_ids = played_track_ids(store.load_history())
+    candidates = fetch_saved_track_refs(access_token=get_token)
+    analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+    queue = select_backfill_tracks(
+        candidates,
+        played_ids=played_ids,
+        has_audio_analysis=lambda cid: cid in analyzed,
+    )
+    if not queue:
+        print("automated playback: nothing to play")
+        return 0
+
+    playback_client = SpotifyPlaybackClient(access_token=get_token)
+
+    def on_play(track) -> None:
+        store.append_events([build_automated_play_event(track, played_at=datetime.now(UTC))])
+
+    result = run_automated_playback(
+        queue=queue,
+        play_track=lambda t: playback_client.play(canonical_track_id(t)),
+        track_duration_s=lambda t: playback_client.track_duration_s(canonical_track_id(t)),
+        has_consent=store.has_automated_playback_consent,
+        on_play=on_play,
+        sleep=time.sleep,
+    )
+    print(f"automated playback: played {len(result.played)}/{len(queue)}")
     return 0
 
 
@@ -1249,6 +1342,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for the browser redirect before giving up (default: 120)",
     )
     p_login.set_defaults(func=_cmd_spotify_login)
+
+    p_playback_consent = sub.add_parser(
+        "automated-playback-consent",
+        help="grant/revoke consent for automated playback mode (#128 AC1/AC3)",
+    )
+    p_playback_consent.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    consent_group = p_playback_consent.add_mutually_exclusive_group(required=True)
+    consent_group.add_argument(
+        "--grant",
+        action="store_true",
+        help="grant consent for the agent to drive automated playback",
+    )
+    consent_group.add_argument(
+        "--revoke",
+        action="store_true",
+        help="revoke consent immediately, stopping any running session (AC3)",
+    )
+    p_playback_consent.set_defaults(func=_cmd_automated_playback_consent)
+
+    p_playback = sub.add_parser(
+        "automated-playback",
+        help="play through the backfill queue via the real Spotify client, human-paced (#128)",
+    )
+    p_playback.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_playback.add_argument(
+        "--shared-store",
+        choices=["local", "supabase", "memory"],
+        default="local",
+        help="metadata store for the already-analyzed check (default: local)",
+    )
+    p_playback.add_argument(
+        "--shared-store-path",
+        default=None,
+        help="path to the local shared-store JSONL",
+    )
+    p_playback.set_defaults(func=_cmd_automated_playback)
     return parser
 
 
