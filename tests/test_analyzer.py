@@ -6,8 +6,9 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from music_intel_mcp.analyzer import _group_and_seed, _temporal_plays, analyze
+from music_intel_mcp.analyzer import _group_and_seed, _is_user_initiated, _temporal_plays, analyze
 from music_intel_mcp.audio import InMemoryAudioFeatureSource
+from music_intel_mcp.automated_playback import AUTOMATED_PLAYBACK_SOURCE
 from music_intel_mcp.identity import (
     IdentityResolver,
     InMemoryIsrcMbidIndex,
@@ -593,3 +594,123 @@ def test_temporal_plays_logs_unshifted_count_split_by_source(caplog):
         _temporal_plays(events, None, {})
     msg = " ".join(r.getMessage() for r in caplog.records)
     assert "ifttt" in msg and "2" in msg
+
+
+# --------------------------------------------------------------------------- #
+# #129: agent-originated plays excluded from taste analytics by default
+# --------------------------------------------------------------------------- #
+
+
+def test_is_user_initiated_driven_by_origin_tag_not_heuristic():
+    """AC4: the predicate checks the exact source tag from #128's AC, no
+    guessing based on duration/skip/context."""
+    assert _is_user_initiated("spotify_extended") is True
+    assert _is_user_initiated(AUTOMATED_PLAYBACK_SOURCE) is False
+
+
+def test_group_and_seed_excludes_agent_originated_plays_by_default():
+    """AC1: an automated-playback play contributes no evidence to the
+    audio/scene seed set or play map by default."""
+    events = [
+        ListenEvent(
+            track=TrackRef(spotify_id="S-1", name="n", artist="a"),
+            played_at=EARLY,
+            source=AUTOMATED_PLAYBACK_SOURCE,
+        )
+    ]
+    plays, unique_ids = _group_and_seed(events, InMemorySharedStore(), FIXED_NOW)
+    assert plays == {}
+    assert unique_ids == []
+
+
+def test_group_and_seed_opt_in_override_includes_agent_originated_plays():
+    """AC2: the opt-in override (off by default) counts agent-originated
+    plays when explicitly requested."""
+    events = [
+        ListenEvent(
+            track=TrackRef(spotify_id="S-1", name="n", artist="a"),
+            played_at=EARLY,
+            source=AUTOMATED_PLAYBACK_SOURCE,
+        )
+    ]
+    plays, unique_ids = _group_and_seed(
+        events, InMemorySharedStore(), FIXED_NOW, exclude_agent_originated=False
+    )
+    assert unique_ids == ["spotify:S-1"]
+    assert plays["spotify:S-1"] == [EARLY]
+
+
+def test_temporal_plays_excludes_agent_originated_plays_by_default():
+    """AC1: an automated-playback play is dropped from both the filtered and
+    unfiltered temporal maps by default -- it's not organic listening signal
+    for lift/buckets *or* epoch detection."""
+    ev = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=200_000, conn_country="KZ"),
+    )
+    filtered, unfiltered = _temporal_plays([ev], None, {})
+    assert filtered == {}
+    assert unfiltered == {}
+
+
+def test_temporal_plays_composes_origin_exclusion_with_validity_filter():
+    """AC3: the composed case -- an automated-playback play that PASSES
+    MIN_VALID_MS validity is still excluded from the filtered map by origin
+    (default). With the origin override off, that same play's validity is
+    still evaluated independently: a long automated play survives, a short
+    one is dropped by `_is_valid` alone -- proving neither filter
+    short-circuits the other."""
+    long_agent_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=200_000, conn_country="KZ"),
+    )
+    short_agent_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 11, 12, 0, tzinfo=UTC),
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=1_000, conn_country="KZ"),
+    )
+
+    # Default: origin exclusion wins regardless of validity -- neither play
+    # reaches the filtered map, but validity-passing plays still populate
+    # nothing at all (both maps empty, origin gate runs first).
+    filtered, unfiltered = _temporal_plays([long_agent_play, short_agent_play], None, {})
+    assert filtered == {}
+    assert unfiltered == {}
+
+    # Opt-in override off origin exclusion: validity now applies on its own
+    # merits -- the long play survives, the short one is dropped by
+    # `_is_valid` alone, proving the two filters compose independently.
+    filtered, unfiltered = _temporal_plays(
+        [long_agent_play, short_agent_play], None, {}, exclude_agent_originated=False
+    )
+    assert len(unfiltered["spotify:S"]) == 2  # both present pre-validity
+    assert len(filtered["spotify:S"]) == 1  # only the long one is valid
+
+
+def test_analyze_default_excludes_agent_originated_from_audio_evidence():
+    """AC1 end-to-end: an automated-playback-only track contributes zero
+    audio-stage evidence by default, even with a store+source wired."""
+    events = [
+        ListenEvent(
+            track=TrackRef(spotify_id="S-1", name="n", artist="a"),
+            played_at=EARLY,
+            source=AUTOMATED_PLAYBACK_SOURCE,
+        )
+    ]
+    store = InMemorySharedStore()
+    audio_source = InMemoryAudioFeatureSource({})
+    profile = analyze(
+        events,
+        user_id="u1",
+        generated_at=FIXED_NOW,
+        method_params=AUDIO_METHOD_PARAMS,
+        shared_store=store,
+        audio_source=audio_source,
+    )
+    assert profile.generated_from.n_unique_tracks == 1  # raw ingest count unaffected
+    assert store.get_tracks(["spotify:S-1"]) == {}  # never seeded -- zero evidence

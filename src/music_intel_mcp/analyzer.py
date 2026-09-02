@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from .account_history import SOURCE as ACCOUNT_HISTORY_SOURCE
 from .audio import AudioFeatureSource, derive_audio_roots, enrich_audio_features
+from .automated_playback import AUTOMATED_PLAYBACK_SOURCE
 from .identity import IdentityResolver
 from .models import (
     Epoch,
@@ -45,6 +46,20 @@ logger = logging.getLogger(__name__)
 # is assumed already-local wall-clock (e.g. ifttt, #76) and is only stripped
 # of tzinfo, never shifted.
 _UTC_STAMPED_SOURCES = frozenset({SPOTIFY_EXTENDED_SOURCE, ACCOUNT_HISTORY_SOURCE})
+
+
+def _is_user_initiated(source: str) -> bool:
+    """True unless ``source`` marks an agent-originated play (#129).
+
+    Agent-originated plays -- currently only :data:`AUTOMATED_PLAYBACK_SOURCE`
+    (#128's automated-playback mode) -- are coverage plays, not genuine
+    listening signal (decision ``1c0f37f0``), so they're excluded from taste
+    analytics by default. Backfill-queue plays (#127) carry no distinct
+    ``source``: the user actually clicked play, so they read as ordinary
+    user-initiated listens and are never excluded here -- there is no
+    heuristic guess involved, only this one origin tag (AC4).
+    """
+    return source != AUTOMATED_PLAYBACK_SOURCE
 
 
 def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
@@ -101,9 +116,16 @@ def _group_and_seed(
     now: datetime,
     resolver: IdentityResolver | None = None,
     resolved_cache: dict[str, TrackRef] | None = None,
+    *,
+    exclude_agent_originated: bool = True,
 ) -> tuple[dict[str, list[datetime]], list[str]]:
     """Group plays by canonical id and seed any unknown tracks into the shared
     store, returning the play map and the unique id list both stages share.
+
+    ``exclude_agent_originated`` (#129, on by default) drops agent-originated
+    plays (:func:`_is_user_initiated`) before they ever reach the play map or
+    the seed set -- they must not contribute audio/scene root evidence. Pass
+    ``False`` for the opt-in override that counts them anyway.
 
     When a ``resolver`` is supplied (the P9 bridge, #87), each event's track is
     walked up the identity waterfall and grouped by its *resolved* canonical id
@@ -123,6 +145,8 @@ def _group_and_seed(
     plays: dict[str, list[datetime]] = {}
     refs: dict[str, TrackRef] = {}
     for event in events:
+        if exclude_agent_originated and not _is_user_initiated(event.source):
+            continue
         track = _resolve_ref(event.track, resolver, resolved_cache)
         cid = canonical_track_id(track)
         played = event.played_at
@@ -206,6 +230,8 @@ def _temporal_plays(
     events: Sequence[ListenEvent],
     resolver: IdentityResolver | None,
     resolved_cache: dict[str, TrackRef],
+    *,
+    exclude_agent_originated: bool = True,
 ) -> tuple[dict[str, list[datetime]], dict[str, list[datetime]]]:
     """Build the temporal-seed play maps straight off the events (#90, AC2/AC4).
 
@@ -217,6 +243,14 @@ def _temporal_plays(
     **unfiltered** one (feeds epoch detection only), so the filter never moves an
     epoch boundary (decision ``77111ce0``).
 
+    ``exclude_agent_originated`` (#129, on by default) drops agent-originated
+    plays before either map — unlike the validity filter, origin exclusion is
+    a data-*source* gate, not a data-quality one, so it applies to epoch
+    detection too. It composes independently of :func:`_is_valid`: with the
+    override off (``exclude_agent_originated=False``), an agent-originated
+    play still goes through the validity check on its own merits, proving
+    neither filter short-circuits the other.
+
     AC4: logs the count of *unshifted* plays split by source — the IFTTT
     traveler-smear residual that local-tz bucketize cannot correct.
     """
@@ -225,6 +259,8 @@ def _temporal_plays(
     unfiltered: dict[str, list[datetime]] = {}
     unshifted: Counter[str] = Counter()
     for event in events:
+        if exclude_agent_originated and not _is_user_initiated(event.source):
+            continue
         cid = canonical_track_id(_resolve_ref(event.track, resolver, resolved_cache))
         local, shifted = _localize(event, modal_zone)
         if not shifted:
@@ -258,6 +294,7 @@ def analyze(
     audio_source: AudioFeatureSource | None = None,
     tag_source: TagSource | None = None,
     resolver: IdentityResolver | None = None,
+    exclude_agent_originated: bool = True,
 ) -> RootProfile:
     """Run the derivation pipeline over ``events`` and assemble a ``RootProfile``.
 
@@ -273,6 +310,12 @@ def analyze(
     enrichers see the resolved MBID rather than the raw ingest-time identity.
     Without it, spotify-only history resolves to no MBID and audio stays
     honest-empty regardless of the dump.
+
+    ``exclude_agent_originated`` (#129, on by default) drops plays sourced
+    from agent-originated capture (currently automated playback, #128) before
+    they can contribute audio/scene/temporal evidence — they're coverage
+    plays, not genuine listening signal, and must not skew scoring (decision
+    ``1c0f37f0``). Pass ``False`` for the opt-in override to count them anyway.
     """
     generated_at = generated_at or datetime.now(UTC)
     generated_from = _generated_from(events)
@@ -288,7 +331,12 @@ def analyze(
     if events and shared_store is not None and (audio_source is not None or tag_source is not None):
         resolved_cache: dict[str, TrackRef] = {}
         plays, unique_ids = _group_and_seed(
-            events, shared_store, generated_at, resolver, resolved_cache
+            events,
+            shared_store,
+            generated_at,
+            resolver,
+            resolved_cache,
+            exclude_agent_originated=exclude_agent_originated,
         )
         ctx = _dataset_ctx(generated_from)
 
@@ -329,7 +377,9 @@ def analyze(
         # Temporal seeds off the events directly, localized to the listener's wall
         # clock (#90): the filtered map drives lift/buckets, the unfiltered map
         # drives epoch detection only. Shares the resolve cache with the seed step.
-        temporal_filtered, temporal_unfiltered = _temporal_plays(events, resolver, resolved_cache)
+        temporal_filtered, temporal_unfiltered = _temporal_plays(
+            events, resolver, resolved_cache, exclude_agent_originated=exclude_agent_originated
+        )
         temporal = derive_temporal_roots(
             members,
             temporal_filtered,
