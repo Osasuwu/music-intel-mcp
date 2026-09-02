@@ -107,6 +107,37 @@ def _stop_tags(version: str) -> frozenset[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _network_error_types() -> tuple[type[BaseException], ...]:
+    """``httpx.HTTPError`` if ``httpx`` is installed, else an empty tuple (an
+    empty ``except ()`` never matches, so lookups fail closed rather than
+    silently swallowing something unrelated when the extra isn't installed)."""
+    try:
+        import httpx
+    except ImportError:
+        return ()
+    return (httpx.HTTPError,)
+
+
+def _rate_limited_get(
+    httpx_module,
+    url: str,
+    *,
+    params: dict,
+    headers: dict,
+    timeout: float,
+    rate_limit_seconds: float,
+):
+    """GET via ``httpx_module``, sleeping ``rate_limit_seconds`` after — even on
+    a failed request, since an HTTP error (e.g. a 503 under load) must not let
+    the caller retry sooner than the source's usage policy allows."""
+    try:
+        resp = httpx_module.get(url, params=params, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp
+    finally:
+        time.sleep(rate_limit_seconds)
+
+
 @runtime_checkable
 class TagSource(Protocol):
     """Looks scene tags up for a track. Last.fm in production, a map in tests."""
@@ -208,19 +239,14 @@ class MusicBrainzGenreSource:
         except ImportError as exc:
             raise RuntimeError("MusicBrainzGenreSource needs httpx: pip install httpx") from exc
         headers = {"User-Agent": f"music-intel-mcp/0.1 ({self._app_contact})"}
-        try:
-            resp = httpx.get(
-                self._ENDPOINT.format(mbid=mbid),
-                params={"inc": "genres+tags", "fmt": "json"},
-                headers=headers,
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-        finally:
-            # Rate limit must hold even on a failed request — an HTTP error
-            # (e.g. a 503 under load) must not let the caller retry sooner
-            # than MusicBrainz's usage policy allows.
-            time.sleep(self._RATE_LIMIT_SECONDS)
+        resp = _rate_limited_get(
+            httpx,
+            self._ENDPOINT.format(mbid=mbid),
+            params={"inc": "genres+tags", "fmt": "json"},
+            headers=headers,
+            timeout=15.0,
+            rate_limit_seconds=self._RATE_LIMIT_SECONDS,
+        )
         body = resp.json()
         seen: set[str] = set()
         tags: list[TrackTag] = []
@@ -264,16 +290,14 @@ class DiscogsStyleSource:
             "User-Agent": "music-intel-mcp/0.1",
             "Authorization": f"Discogs token={self._token}",
         }
-        try:
-            resp = httpx.get(
-                self._ENDPOINT,
-                params={"artist": artist, "track": track, "type": "release"},
-                headers=headers,
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-        finally:
-            time.sleep(self._RATE_LIMIT_SECONDS)
+        resp = _rate_limited_get(
+            httpx,
+            self._ENDPOINT,
+            params={"artist": artist, "track": track, "type": "release"},
+            headers=headers,
+            timeout=15.0,
+            rate_limit_seconds=self._RATE_LIMIT_SECONDS,
+        )
         results = resp.json().get("results", [])
         if not results:
             return None
@@ -293,12 +317,7 @@ class CompositeTagSource:
         self._sources = list(sources)
 
     def lookup(self, artist: str, track: str, mbid: str | None) -> list[TrackTag] | None:
-        try:
-            import httpx
-
-            network_errors: tuple[type[BaseException], ...] = (httpx.HTTPError,)
-        except ImportError:
-            network_errors = ()
+        network_errors = _network_error_types()
 
         last_error: BaseException | None = None
         for source in self._sources:
@@ -386,12 +405,7 @@ def enrich_tags(
     A source lookup that raises ``httpx.HTTPError`` (rate limit, timeout,
     transport failure) is caught per-track and recorded in
     ``report.errors`` rather than aborting the whole run."""
-    try:
-        import httpx
-
-        network_errors: tuple[type[BaseException], ...] = (httpx.HTTPError,)
-    except ImportError:
-        network_errors = ()
+    network_errors = _network_error_types()
 
     records = store.get_tracks(list(dict.fromkeys(track_ids)))
     report = TagEnrichmentReport()
