@@ -6,8 +6,14 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from music_intel_mcp.analyzer import _group_and_seed, _temporal_plays, analyze
+from music_intel_mcp.analyzer import (
+    _analytics_events,
+    _group_and_seed,
+    _temporal_plays,
+    analyze,
+)
 from music_intel_mcp.audio import InMemoryAudioFeatureSource
+from music_intel_mcp.automated_playback import AUTOMATED_PLAYBACK_SOURCE
 from music_intel_mcp.identity import (
     IdentityResolver,
     InMemoryIsrcMbidIndex,
@@ -593,3 +599,93 @@ def test_temporal_plays_logs_unshifted_count_split_by_source(caplog):
         _temporal_plays(events, None, {})
     msg = " ".join(r.getMessage() for r in caplog.records)
     assert "ifttt" in msg and "2" in msg
+
+
+# --------------------------------------------------------------------------- #
+# Backfill/automated-play analytics exclusion (#129, decision ``1c0f37f0``).
+# `_analytics_events` drops agent-originated plays before any downstream stage
+# sees them, unless opted back in -- independent of, and composing with, the
+# play-validity filter (`_is_valid`, decision ``c69c6f17``).
+# --------------------------------------------------------------------------- #
+
+
+def test_analytics_events_excludes_agent_originated_plays_by_default():
+    """AC1: a play tagged with AUTOMATED_PLAYBACK_SOURCE (covers both the S6
+    backfill queue and S7 automated playback -- the queue is only ever actually
+    played via automated playback) is excluded from analytics by default."""
+    genuine = ListenEvent(track=_KZ_TRACK, played_at=EARLY, source="spotify_extended")
+    agent = ListenEvent(track=_KZ_TRACK, played_at=EARLY, source=AUTOMATED_PLAYBACK_SOURCE)
+    result = _analytics_events([genuine, agent], include_agent_originated=False)
+    assert result == [genuine]
+
+
+def test_analytics_events_opt_in_includes_agent_originated_plays():
+    """AC2: the opt-in override, when explicitly set, includes agent-originated
+    plays instead of dropping them."""
+    genuine = ListenEvent(track=_KZ_TRACK, played_at=EARLY, source="spotify_extended")
+    agent = ListenEvent(track=_KZ_TRACK, played_at=EARLY, source=AUTOMATED_PLAYBACK_SOURCE)
+    result = _analytics_events([genuine, agent], include_agent_originated=True)
+    assert result == [genuine, agent]
+
+
+def test_analyze_excludes_valid_automated_play_from_generated_from_by_default():
+    """AC1 at the `analyze()` boundary: an automated-origin play that easily
+    passes MIN_VALID_MS (60s) is still excluded from `generated_from.n_events`
+    -- origin exclusion is not subsumed by, or gated on, validity."""
+    agent_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=EARLY,
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=60_000),
+    )
+    profile = analyze([agent_play], user_id="u", generated_at=FIXED_NOW)
+    assert profile.generated_from.n_events == 0
+
+
+def test_analyze_include_agent_originated_plays_override_counts_them():
+    """AC2 at the `analyze()` boundary: passing the override explicitly brings
+    an agent-originated play back into `generated_from`."""
+    agent_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=EARLY,
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=60_000),
+    )
+    profile = analyze(
+        [agent_play], user_id="u", generated_at=FIXED_NOW, include_agent_originated_plays=True
+    )
+    assert profile.generated_from.n_events == 1
+
+
+def test_analytics_exclusion_composes_independently_with_validity_filter():
+    """AC3, the composed case: origin-inclusion (opt-in) and duration-validity
+    are independent predicates -- neither shortcircuits the other. Two
+    agent-originated plays, one valid (60s) and one too short (1s): with the
+    opt-in override, both survive origin-filtering into the unfiltered map
+    (epoch detection), but only the valid one survives into the filtered map
+    (lift/buckets)."""
+    valid_agent_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 10, 12, 0, tzinfo=UTC),
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=60_000, conn_country="KZ"),
+    )
+    short_agent_play = ListenEvent(
+        track=_KZ_TRACK,
+        played_at=datetime(2024, 4, 11, 12, 0, tzinfo=UTC),
+        source=AUTOMATED_PLAYBACK_SOURCE,
+        context=PlayContext(ms_played=1_000, conn_country="KZ"),
+    )
+    included = _analytics_events(
+        [valid_agent_play, short_agent_play], include_agent_originated=True
+    )
+    filtered, unfiltered = _temporal_plays(included, None, {})
+    assert len(unfiltered["spotify:S"]) == 2  # origin filter let both through
+    assert len(filtered["spotify:S"]) == 1  # validity filter still drops the short one
+
+    # And with the default (no opt-in), origin-exclusion drops both regardless
+    # of either one's validity -- the two filters never short-circuit each other.
+    excluded = _analytics_events(
+        [valid_agent_play, short_agent_play], include_agent_originated=False
+    )
+    assert excluded == []

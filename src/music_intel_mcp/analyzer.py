@@ -15,6 +15,7 @@ invariant, not a failure.
 from __future__ import annotations
 
 import logging
+import os
 from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from .account_history import SOURCE as ACCOUNT_HISTORY_SOURCE
 from .audio import AudioFeatureSource, derive_audio_roots, enrich_audio_features
+from .automated_playback import AUTOMATED_PLAYBACK_SOURCE
 from .identity import IdentityResolver
 from .models import (
     Epoch,
@@ -45,6 +47,40 @@ logger = logging.getLogger(__name__)
 # is assumed already-local wall-clock (e.g. ifttt, #76) and is only stripped
 # of tzinfo, never shifted.
 _UTC_STAMPED_SOURCES = frozenset({SPOTIFY_EXTENDED_SOURCE, ACCOUNT_HISTORY_SOURCE})
+
+# Sources that are coverage plays, not genuine listening signal (#129, decision
+# ``1c0f37f0``): the backfill playlist (#127) has no source of its own -- per
+# its own module docstring, a backfill-queue track is only ever actually
+# *played* via automated playback (#128) -- so this single origin tag already
+# covers both origins named in the issue, with no separate tag/schema change
+# (AC4: driven by the existing tag, not a heuristic).
+_ANALYTICS_EXCLUDED_SOURCES = frozenset({AUTOMATED_PLAYBACK_SOURCE})
+_INCLUDE_AGENT_PLAYS_ENV = "MUSIC_INTEL_INCLUDE_AGENT_PLAYS_IN_ANALYTICS"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def include_agent_originated_plays_by_default(env: dict[str, str] | None = None) -> bool:
+    """AC2's opt-in override: off by default, so backfill/automated-origin
+    plays stay excluded from taste analytics unless the user explicitly opts
+    in via ``MUSIC_INTEL_INCLUDE_AGENT_PLAYS_IN_ANALYTICS`` (mirrors
+    :func:`~music_intel_mcp.backfill_playlist.is_backfill_enabled`)."""
+    source = env if env is not None else os.environ
+    return source.get(_INCLUDE_AGENT_PLAYS_ENV, "").strip().lower() in _TRUTHY
+
+
+def _analytics_events(
+    events: Sequence[ListenEvent], *, include_agent_originated: bool
+) -> list[ListenEvent]:
+    """AC1's exclusion half: drop agent-originated (backfill/automated) plays
+    from taste analytics unless ``include_agent_originated`` opts them back in.
+
+    This runs independently of, and before, the play-validity filter
+    (:func:`~music_intel_mcp.temporal._is_valid`, decision ``c69c6f17``) --
+    the two are orthogonal predicates over different fields (origin vs.
+    duration/skip), neither shortcircuits the other (AC3)."""
+    if include_agent_originated:
+        return list(events)
+    return [e for e in events if e.source not in _ANALYTICS_EXCLUDED_SOURCES]
 
 
 def _generated_from(events: Sequence[ListenEvent]) -> GeneratedFrom:
@@ -258,6 +294,7 @@ def analyze(
     audio_source: AudioFeatureSource | None = None,
     tag_source: TagSource | None = None,
     resolver: IdentityResolver | None = None,
+    include_agent_originated_plays: bool | None = None,
 ) -> RootProfile:
     """Run the derivation pipeline over ``events`` and assemble a ``RootProfile``.
 
@@ -273,8 +310,20 @@ def analyze(
     enrichers see the resolved MBID rather than the raw ingest-time identity.
     Without it, spotify-only history resolves to no MBID and audio stays
     honest-empty regardless of the dump.
+
+    ``include_agent_originated_plays`` (#129): backfill/automated-origin plays
+    (``AUTOMATED_PLAYBACK_SOURCE``) are excluded from every downstream stage by
+    default -- they are coverage plays, not genuine listening signal. ``None``
+    (the default) resolves via :func:`include_agent_originated_plays_by_default`'s
+    env-var opt-in; pass ``True``/``False`` explicitly to override.
     """
     generated_at = generated_at or datetime.now(UTC)
+    include_agent = (
+        include_agent_originated_plays
+        if include_agent_originated_plays is not None
+        else include_agent_originated_plays_by_default()
+    )
+    events = _analytics_events(events, include_agent_originated=include_agent)
     generated_from = _generated_from(events)
     # Deep copy so recording chosen params (e.g. scene.K_selected) never mutates
     # the caller's MethodParams.
