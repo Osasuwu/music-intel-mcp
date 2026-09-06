@@ -1417,17 +1417,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_playback.add_argument(
-        "--shared-store",
-        choices=["local", "supabase", "memory"],
-        default="local",
-        help="metadata store for the already-analyzed check (default: local)",
-    )
-    p_playback.add_argument(
-        "--shared-store-path",
-        default=None,
-        help="path to the local shared-store JSONL",
-    )
-    p_playback.add_argument(
         "--device-name",
         required=True,
         help="exact Spotify device name to replay through (#159 AC1) -- "

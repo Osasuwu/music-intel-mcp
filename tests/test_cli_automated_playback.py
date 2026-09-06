@@ -144,8 +144,6 @@ def test_automated_playback_plays_queue_and_records_agent_originated_history(
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -232,8 +230,6 @@ def test_automated_playback_metadata_only_track_is_not_treated_as_analyzed(
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -282,8 +278,6 @@ def test_automated_playback_reports_error_when_device_name_not_found(tmp_path, c
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -346,8 +340,6 @@ def test_automated_playback_requeues_and_plays_after_transient_404(tmp_path, cap
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -428,8 +420,6 @@ def test_automated_playback_pauses_spotify_device_on_mid_session_revocation(
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -454,8 +444,6 @@ def test_automated_playback_stops_early_when_nothing_to_play(tmp_path, capsys, m
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
