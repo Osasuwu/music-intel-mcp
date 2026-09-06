@@ -247,6 +247,9 @@ class PlayAttempt:
       retry count is still within ``max_retries``; the caller should
       re-queue it (AC3).
     - ``"abandoned"`` -- rejected again after exhausting ``max_retries``.
+    - ``"skipped"`` -- the track has no usable Spotify id (e.g. a
+      locally-added/unavailable saved track); never retriable, since there
+      is no id to retry with.
     """
 
     status: str
@@ -268,6 +271,11 @@ def attempt_play(
         if journal is not None:
             journal(track, "account_busy")
         return PlayAttempt(status="deferred", reason="account_busy")
+
+    if track.spotify_id is None:
+        if journal is not None:
+            journal(track, "missing_spotify_id")
+        return PlayAttempt(status="skipped", reason="missing_spotify_id")
 
     try:
         client.play(track.spotify_id)

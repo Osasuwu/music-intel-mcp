@@ -231,6 +231,34 @@ def test_attempt_play_abandons_track_once_max_retries_exceeded():
     assert retry_counts == {"AAA": 4}
 
 
+def test_attempt_play_skips_track_with_no_spotify_id_without_crashing():
+    """A saved track with no usable Spotify id (e.g. Spotify returned
+    ``id: null`` for a locally-added/unavailable saved track, per
+    ``fetch_saved_track_refs``) must be skipped, not crash the run -- there
+    is no id to retry with, so this is never retriable."""
+    client = _client()
+    retry_counts: dict[str, int] = {}
+    journaled: list[tuple[TrackRef, str]] = []
+    track = TrackRef(name="Song", artist="Artist", spotify_id=None)
+    with respx.mock(assert_all_called=True) as router:
+        router.get(SPOTIFY_PLAYER_URL).mock(
+            return_value=httpx.Response(200, json={"is_playing": False})
+        )
+        # No play route registered -- assert_all_called=True fails the test
+        # if attempt_play calls play() with no resolvable id.
+
+        result = attempt_play(
+            client,
+            track,
+            retry_counts=retry_counts,
+            journal=lambda t, r: journaled.append((t, r)),
+        )
+
+    assert result == PlayAttempt(status="skipped", reason="missing_spotify_id")
+    assert journaled == [(track, "missing_spotify_id")]
+    assert retry_counts == {}
+
+
 # --- #159 AC2: account-state gate ------------------------------------------ #
 
 
