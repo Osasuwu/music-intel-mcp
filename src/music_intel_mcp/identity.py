@@ -437,6 +437,7 @@ class IdentityResolver:
             spotify_id=spotify_id,
             isrc=isrc,
             mbid=mbid,
+            youtube_id=track.youtube_id,
             name=track.name,
             artist=track.artist,
             level=level,
