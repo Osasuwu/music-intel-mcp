@@ -128,8 +128,11 @@ def resolve_data_root(root: str | Path | None) -> Path:
 class UserStore:
     """Read history, read/write RootProfile snapshots for one user."""
 
-    def __init__(self, root: str | Path | None = None) -> None:
+    def __init__(
+        self, root: str | Path | None = None, *, pool_root: str | Path | None = None
+    ) -> None:
         self.root = resolve_data_root(root)
+        self.pool_root = Path(pool_root) if pool_root is not None else None
 
     @property
     def history_path(self) -> Path:
@@ -232,9 +235,35 @@ class UserStore:
     def audio_analysis_path(self, track_id: str) -> Path:
         return self.audio_analysis_dir / f"{self._safe_name(track_id)}.json"
 
+    # --- node-level anonymous pool (#161) ---------------------------------- #
+    #
+    # Pilot topology (decision 1fe8e95f): the participant root is transient
+    # (deleted after delivery), the pool is the only thing that persists
+    # (decision 92241497). A pool record is deliberately a narrower shape than
+    # a root record -- key + embedding + tags + model_version, no provenance
+    # (decision 446d7d0a) -- because provenance (raw title/artist, source app
+    # id, capture timestamp) would make a shared multi-participant pool a
+    # re-identifiable copy of one participant's play list.
+
+    @property
+    def pool_audio_analysis_dir(self) -> Path | None:
+        return self.pool_root / "audio_analysis" if self.pool_root is not None else None
+
+    def pool_audio_analysis_path(self, track_id: str) -> Path | None:
+        pool_dir = self.pool_audio_analysis_dir
+        return pool_dir / f"{self._safe_name(track_id)}.json" if pool_dir is not None else None
+
     def has_audio_analysis(self, track_id: str) -> bool:
         """#126 AC1/AC4: dedup check the live pipeline runs via the identity
-        waterfall's resolved ``track_id`` before paying for inference."""
+        waterfall's resolved ``track_id`` before paying for inference.
+
+        #161 AC2: when a pool is configured, the pool is consulted first --
+        an already-analyzed track (from any participant) dedupes even if this
+        participant's own transient root never saw it -- falling back to the
+        participant root for pre-pool or root-only data."""
+        pool_path = self.pool_audio_analysis_path(track_id)
+        if pool_path is not None and pool_path.exists():
+            return True
         return self.audio_analysis_path(track_id).exists()
 
     def write_audio_analysis(
@@ -244,6 +273,7 @@ class UserStore:
         embedding: Any,
         tags: dict[str, float],
         provenance: Any | None = None,
+        model_version: str | None = None,
     ) -> Path:
         """Write one live-capture inference result under the LOCAL store only
         (#124 AC5). MTG-Jamendo outputs are licensing-gated local-only
@@ -262,7 +292,20 @@ class UserStore:
         ``track_id`` (e.g. two overlapping capture sessions) must not average
         or clobber each other's embedding — the file is claimed atomically via
         ``O_CREAT | O_EXCL`` at the OS level; a losing writer's payload is
-        silently discarded and the winner's path is returned either way."""
+        silently discarded and the winner's path is returned either way.
+
+        #161 AC2: when a pool is configured, the analysis is written
+        exclusively to the pool, never to the participant root -- and the
+        pool record excludes ``provenance`` entirely (not even as a ``null``
+        key) in favor of ``model_version``. Without a pool this is the
+        original #124/#139 root write, unchanged."""
+        pool_path = self.pool_audio_analysis_path(track_id)
+        if pool_path is not None:
+            pool_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = self._audio_analysis_payload(track_id, embedding, tags)
+            payload["model_version"] = model_version
+            return self._atomic_write(pool_path, payload)
+
         self.audio_analysis_dir.mkdir(parents=True, exist_ok=True)
         path = self.audio_analysis_path(track_id)
         if provenance is None:
@@ -271,12 +314,27 @@ class UserStore:
             provenance_payload = provenance.model_dump()
         else:
             provenance_payload = dict(provenance)
-        payload = {
+        payload = self._audio_analysis_payload(track_id, embedding, tags)
+        payload["provenance"] = provenance_payload
+        return self._atomic_write(path, payload)
+
+    @staticmethod
+    def _audio_analysis_payload(
+        track_id: str, embedding: Any, tags: dict[str, float]
+    ) -> dict[str, Any]:
+        """Fields common to both the root and pool record shapes -- the two
+        writers diverge only on ``provenance`` vs. ``model_version`` (#161)."""
+        return {
             "track_id": track_id,
             "embedding": [float(x) for x in embedding],
             "tags": {label: float(score) for label, score in tags.items()},
-            "provenance": provenance_payload,
         }
+
+    @staticmethod
+    def _atomic_write(path: Path, payload: dict[str, Any]) -> Path:
+        """First-write-wins: claim ``path`` atomically via ``O_CREAT |
+        O_EXCL``; a losing writer's payload is discarded, winner's path
+        returned either way (#126 AC2, shared by root and pool writes)."""
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
