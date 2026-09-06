@@ -335,6 +335,83 @@ def test_migrate_audio_analysis_keys_missing_dir_returns_empty_report(tmp_path):
     assert report.conflicts == []
 
 
+# #161 AC1: pool records hold exactly key + embedding + tags + model_version --
+# no provenance field at all (not even null), since a pool is shared across
+# participants and provenance (raw_title/app_id/captured_at) would make it a
+# re-identifiable copy of one participant's play list.
+def test_write_audio_analysis_with_pool_writes_exact_schema_no_provenance(tmp_path):
+    store = UserStore(root=tmp_path / "participant", pool_root=tmp_path / "pool")
+    path = store.write_audio_analysis(
+        track_id="mbid-1",
+        embedding=[0.1, 0.2],
+        tags={"genre---rock": 0.9},
+        model_version="discogs-effnet-bsdynamic-1",
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert set(payload.keys()) == {"track_id", "embedding", "tags", "model_version"}
+    assert payload["model_version"] == "discogs-effnet-bsdynamic-1"
+
+
+# #161 AC2: with a pool configured, new analyses land in the pool -- not the
+# participant root -- and has_audio_analysis reports a hit off the pool write.
+def test_write_audio_analysis_with_pool_never_touches_participant_root(tmp_path):
+    participant_root = tmp_path / "participant"
+    pool_root = tmp_path / "pool"
+    store = UserStore(root=participant_root, pool_root=pool_root)
+
+    assert store.has_audio_analysis("mbid-1") is False
+    store.write_audio_analysis(track_id="mbid-1", embedding=[0.1], tags={})
+
+    assert store.has_audio_analysis("mbid-1") is True
+    assert (pool_root / "audio_analysis" / "mbid-1.json").exists()
+    assert not (participant_root / "audio_analysis").exists()
+
+
+# #161 AC2: pool-first lookup -- a track analyzed via one participant's store
+# dedupes for a second participant's store sharing the same pool, even though
+# it never touched that second participant's own (transient) root.
+def test_has_audio_analysis_consults_pool_first_across_participants(tmp_path):
+    pool_root = tmp_path / "pool"
+    store_a = UserStore(root=tmp_path / "participant-a", pool_root=pool_root)
+    store_b = UserStore(root=tmp_path / "participant-b", pool_root=pool_root)
+
+    store_a.write_audio_analysis(track_id="mbid-shared", embedding=[0.1], tags={})
+
+    assert store_b.has_audio_analysis("mbid-shared") is True
+
+
+# #161 AC4: pool writes keep first-write-wins semantics -- same guarantee as
+# root writes (#126 AC2), now shared via UserStore._atomic_write.
+def test_write_audio_analysis_pool_first_write_wins_on_duplicate_track_id(tmp_path):
+    store = UserStore(root=tmp_path / "participant", pool_root=tmp_path / "pool")
+    first_path = store.write_audio_analysis(
+        track_id="mbid-dup", embedding=[0.1], tags={"genre---rock": 1.0}
+    )
+    second_path = store.write_audio_analysis(
+        track_id="mbid-dup", embedding=[0.9], tags={"genre---jazz": 1.0}
+    )
+
+    assert first_path == second_path
+    payload = json.loads(first_path.read_text(encoding="utf-8"))
+    assert payload["tags"] == {"genre---rock": 1.0}
+    assert payload["embedding"] == [0.1]
+
+
+# #161 AC4: pool file mtimes must not be used by any reader -- a pool record
+# written long ago (simulated via os.utime) must still be reported as present.
+def test_has_audio_analysis_pool_hit_ignores_file_mtime(tmp_path):
+    import os
+    import time
+
+    store = UserStore(root=tmp_path / "participant", pool_root=tmp_path / "pool")
+    path = store.write_audio_analysis(track_id="mbid-old", embedding=[0.1], tags={})
+    ancient = time.time() - 60 * 60 * 24 * 365 * 5  # 5 years ago
+    os.utime(path, (ancient, ancient))
+
+    assert store.has_audio_analysis("mbid-old") is True
+
+
 # #128 AC1: automated-playback mode is off by default; enabling it requires an
 # explicit, separately-recorded consent action distinct from #127's
 # MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED env-var opt-in.
