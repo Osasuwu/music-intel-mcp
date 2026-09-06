@@ -242,6 +242,16 @@ class SpotifyApiIsrcSource:
         self._append_cache(results)
         return results.get(sid)
 
+    def lookup_cached(self, spotify_id: str) -> str | None:
+        """ISRC for ``spotify_id`` from the persistent cache only -- never makes
+        a network call, unlike :meth:`lookup`. Returns ``None`` both for a
+        cached miss and for an id that was never warmed (#178: the metadata
+        crosswalk step runs index-based, no live API calls at run time)."""
+        sid = _bare_id(spotify_id)
+        if not sid:
+            return None
+        return self._load_cache().get(sid)
+
 
 class SpotifySearchApiSource:
     """Live-capture "Spotify search" waterfall leg (#139 AC2): title/artist ->

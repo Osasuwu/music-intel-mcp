@@ -640,6 +640,30 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_crosswalk(args: argparse.Namespace) -> int:
+    """#178: re-run the spotify->ISRC->MBID resolution over history-only keys
+    using only already-materialized indexes (MusicBrainz ISRC dump + the local
+    Spotify ISRC cache) -- no live API call at run time."""
+    from .metadata_crosswalk import run_metadata_crosswalk
+    from .spotify_api import SpotifyApiIsrcSource
+
+    index = MusicBrainzIsrcIndex(path=args.mb_index)
+    spotify_source = SpotifyApiIsrcSource(data_root=args.data_dir)
+
+    result = run_metadata_crosswalk(
+        args.data_dir,
+        isrc_index=index,
+        spotify_isrc_lookup=spotify_source.lookup_cached,
+    )
+
+    print(f"crosswalk: wrote {len(result.aliases_written)} alias(es)")
+    if result.ambiguous:
+        print(f"  ambiguous (not aliased): {len(result.ambiguous)}")
+        for match in result.ambiguous:
+            print(f"    spotify:{match.spotify_id} isrc={match.isrc} mbids={match.mbids}")
+    return 0
+
+
 def _cmd_capture_spike(args: argparse.Namespace) -> int:
     """Run one pass of the WASAPI per-process loopback capture spike (#124):
     now-playing -> identity -> capture -> librosa/onnxruntime inference ->
@@ -1294,6 +1318,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_resolve.set_defaults(func=_cmd_resolve)
+
+    p_crosswalk = sub.add_parser(
+        "crosswalk",
+        help="metadata cross-walk: alias history-only keys to MBIDs via the ISRC index (#178)",
+    )
+    p_crosswalk.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_crosswalk.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV (default: $MUSICBRAINZ_ISRC_INDEX)",
+    )
+    p_crosswalk.set_defaults(func=_cmd_crosswalk)
 
     p_import = sub.add_parser("import-ifttt", help="import IFTTT .xlsx history exports")
     p_import.add_argument(

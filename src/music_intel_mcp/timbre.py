@@ -158,8 +158,15 @@ def derive_timbre_roots(
     participant-history intersection — never the whole pool, which would
     surface other participants' tracks in this profile. A profile with no
     history and/or no matching pool analyses derives no timbre roots at
-    all (same honest-empty shape as before this issue existed)."""
-    history_ids = {canonical_track_id(event.track) for event in store.load_history()}
+    all (same honest-empty shape as before this issue existed).
+
+    History ids are resolved through recorded aliases (#178) before the
+    intersection, so a history-only key aliased to an ``mbid:`` winner (via
+    the #140 near-dup merge or the #178 metadata crosswalk) still matches
+    its pool-analyzed record."""
+    history_ids = {
+        store.resolve_track_key(canonical_track_id(event.track)) for event in store.load_history()
+    }
     if not history_ids:
         return []
 
