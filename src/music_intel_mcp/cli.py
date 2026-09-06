@@ -1004,7 +1004,8 @@ def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     if not counts:
         print("replay journal: no attempts recorded yet")
         return 0
-    print(f"replay journal: {sum(counts.values())} attempts")
+    attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
+    print(f"replay journal: {attempts} attempts")
     for outcome, count in sorted(counts.items()):
         print(f"  {outcome}: {count}")
     return 0
