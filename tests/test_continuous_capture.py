@@ -75,6 +75,7 @@ def test_same_track_polled_twice_captures_once(tmp_path) -> None:
         store=store,
         capture_duration_s=0.05,
         stop_event=stop_event,
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=3),
     )
 
@@ -101,6 +102,7 @@ def test_track_change_captures_each_track(tmp_path) -> None:
         store=store,
         capture_duration_s=0.05,
         stop_event=stop_event,
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=2),
     )
 
@@ -165,6 +167,7 @@ def test_capture_failure_is_isolated_and_loop_continues(tmp_path) -> None:
         stop_event=stop_event,
         on_error=lambda info, exc: errors.append((info, exc)),
         on_result=lambda info, result: results.append((info, result)),
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=2),
     )
 
@@ -232,6 +235,7 @@ def test_new_track_is_analyzed_and_stored_with_no_manual_trigger(tmp_path) -> No
         store=store,
         capture_duration_s=0.05,
         stop_event=stop_event,
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=1),
     )
 
