@@ -954,7 +954,10 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
         return 2
 
     from .automated_playback import (
+        DeviceNotFoundError,
         SpotifyPlaybackClient,
+        TrackSkipped,
+        attempt_play,
         build_automated_play_event,
         run_automated_playback,
     )
@@ -980,20 +983,51 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
         return 0
 
     playback_client = SpotifyPlaybackClient(access_token=get_token)
+    try:
+        playback_client.resolve_device_id(args.device_name)
+    except DeviceNotFoundError:
+        print(f"automated playback: device '{args.device_name}' not found")
+        return 3
 
     def on_play(track) -> None:
         store.append_events([build_automated_play_event(track, played_at=datetime.now(UTC))])
 
+    # #159 AC2/AC3: gate + bounded-retry each play through attempt_play().
+    # ``queue`` is a live list mutated by the wrapper below (not just read),
+    # so a "requeued"/"deferred" track re-appears later in the same
+    # ``for track in queue`` iteration run_automated_playback is doing.
+    retry_counts: dict[str, int] = {}
+    defer_counts: dict[str, int] = {}
+    max_defers = 3
+
+    def journal(track, reason: str) -> None:
+        print(f"automated playback: {track.name} -- {reason}")
+
+    queue_len = len(queue)
+
+    def play_track(track) -> None:
+        attempt = attempt_play(playback_client, track, retry_counts=retry_counts, journal=journal)
+        if attempt.status == "played":
+            return
+        if attempt.status == "requeued":
+            queue.append(track)
+        elif attempt.status == "deferred":
+            count = defer_counts.get(track.spotify_id, 0) + 1
+            defer_counts[track.spotify_id] = count
+            if count <= max_defers:
+                queue.append(track)
+        raise TrackSkipped()
+
     result = run_automated_playback(
         queue=queue,
-        play_track=lambda t: playback_client.play(canonical_track_id(t)),
+        play_track=play_track,
         track_duration_s=lambda t: playback_client.track_duration_s(canonical_track_id(t)),
         has_consent=store.has_automated_playback_consent,
         on_play=on_play,
         pause=playback_client.pause,
         sleep=time.sleep,
     )
-    print(f"automated playback: played {len(result.played)}/{len(queue)}")
+    print(f"automated playback: played {len(result.played)}/{queue_len}")
     return 0
 
 
@@ -1385,6 +1419,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--shared-store-path",
         default=None,
         help="path to the local shared-store JSONL",
+    )
+    p_playback.add_argument(
+        "--device-name",
+        required=True,
+        help="exact Spotify device name to replay through (#159 AC1) -- "
+        "see `GET /me/player/devices` on the account, or the device's own UI",
     )
     p_playback.set_defaults(func=_cmd_automated_playback)
     return parser
