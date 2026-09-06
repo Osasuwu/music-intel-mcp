@@ -123,6 +123,13 @@ def select_backfill_tracks(
     for track in candidates:
         if len(selected) >= limit:
             break
+        if track.spotify_id is None:
+            # Spotify returns `id: null` for locally-added/unavailable saved
+            # tracks. Such a track can never be represented by a playlist
+            # uri (spotify_track_uri() requires a `spotify:`-prefixed id),
+            # so it's never a valid backfill candidate -- mirrors the same
+            # guard in automated_playback.attempt_play().
+            continue
         cid = canonical_track_id(track)
         if cid in played_ids or cid in seen:
             continue  # AC4: played (even if unanalyzed) never enters the queue

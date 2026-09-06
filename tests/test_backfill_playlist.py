@@ -107,6 +107,24 @@ def test_default_backfill_limit_is_10000():
     assert MAX_BACKFILL_TRACKS == 10_000
 
 
+def test_select_backfill_tracks_excludes_tracks_with_no_spotify_id():
+    # Spotify returns `id: null` for locally-added/unavailable saved tracks
+    # (fetch_saved_track_refs propagates this as spotify_id=None). Such a
+    # track can never be added to a playlist by uri, so it must never enter
+    # the desired set -- otherwise spotify_track_uri() raises on its
+    # name-keyed canonical id when the playlist sync tries to add it.
+    unavailable = _track("Local Only", spotify_id=None)
+    available = _track("Real Track", spotify_id="r1")
+
+    selected = select_backfill_tracks(
+        [unavailable, available],
+        played_ids=set(),
+        has_audio_analysis=lambda _cid: False,
+    )
+
+    assert selected == [available]
+
+
 def test_select_backfill_tracks_dedupes_repeated_candidates():
     track = _track("Dup", spotify_id="d1")
 
