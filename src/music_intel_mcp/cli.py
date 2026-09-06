@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -541,9 +542,12 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 
     user_store = UserStore(root=args.data_dir)
     events = user_store.load_history()
+    # #165 AC4: node tier never asks a phone-only participant for a separate
+    # identifier -- user_id defaults to the participant root's own name.
+    user_id = args.user_id or user_store.root.name
     profile = analyze(
         events,
-        user_id=args.user_id,
+        user_id=user_id,
         shared_store=shared_store,
         audio_source=audio_source,
         tag_source=tag_source,
@@ -1004,7 +1008,15 @@ def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
         print("automated-playback consent revoked")
         return 0
 
-    store.grant_automated_playback_consent(granted_at=datetime.now(UTC).isoformat())
+    if not args.grantor:
+        print("error: --grantor is required with --grant")
+        return 2
+
+    store.grant_automated_playback_consent(
+        grantor=args.grantor,
+        granted_at=datetime.now(UTC).isoformat(),
+        scope=args.scope,
+    )
     print("automated-playback consent granted")
     return 0
 
@@ -1027,11 +1039,32 @@ def _cmd_migrate_audio_analysis_keys(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_purge(args: argparse.Namespace) -> int:
+    store = UserStore(root=args.data_dir)
+    if store.latest_profile() is None and not args.force:
+        print(
+            "error: no RootProfile has been written for this root -- "
+            "run `analyze` first, or pass --force to purge anyway"
+        )
+        return 2
+
+    root = store.root
+    if root.exists():
+        shutil.rmtree(root)
+    print(f"purged {root}")
+    return 0
+
+
 def _cmd_automated_playback(args: argparse.Namespace) -> int:
-    from .store import UserStore
+    from .store import ConsentFormatError, UserStore
 
     store = UserStore(root=args.data_dir)
-    if not store.has_automated_playback_consent():
+    try:
+        has_consent = store.has_automated_playback_consent()
+    except ConsentFormatError as exc:
+        print(f"error: {exc}")
+        return 2
+    if not has_consent:
         print(
             "automated playback consent not granted — "
             "run `music-intel automated-playback-consent --grant` first"
@@ -1139,7 +1172,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_analyze = sub.add_parser("analyze", help="derive a RootProfile from history")
-    p_analyze.add_argument("--user-id", required=True, help="per-user store identifier")
+    p_analyze.add_argument(
+        "--user-id",
+        required=False,
+        default=None,
+        help="per-user store identifier (default: --data-dir basename, #165 AC4)",
+    )
     p_analyze.add_argument(
         "--data-dir",
         default=None,
@@ -1547,6 +1585,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="revoke consent immediately, stopping any running session (AC3)",
     )
+    p_playback_consent.add_argument(
+        "--grantor",
+        default=None,
+        help="who is granting consent (#165 AC3, required with --grant)",
+    )
+    p_playback_consent.add_argument(
+        "--scope",
+        default="automated-playback",
+        help="what the consent covers (#165 AC3, default: automated-playback)",
+    )
     p_playback_consent.set_defaults(func=_cmd_automated_playback_consent)
 
     p_playback = sub.add_parser(
@@ -1572,6 +1620,24 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: $MUSICBRAINZ_ISRC_INDEX or $MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
     )
     p_playback.set_defaults(func=_cmd_automated_playback)
+
+    p_purge = sub.add_parser(
+        "purge",
+        help="delete a participant data root entirely; never touches the pool "
+        "or SharedStore (#165 AC2)",
+    )
+    p_purge.add_argument(
+        "--data-dir",
+        required=True,
+        help="participant data root to delete (no default -- purge never "
+        "falls back to $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_purge.add_argument(
+        "--force",
+        action="store_true",
+        help="purge even if no RootProfile has been written for this root yet",
+    )
+    p_purge.set_defaults(func=_cmd_purge)
 
     p_migrate_keys = sub.add_parser(
         "migrate-audio-analysis-keys",

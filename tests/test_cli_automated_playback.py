@@ -41,14 +41,34 @@ def _write_token(data_dir: Path) -> None:
 
 
 def test_automated_playback_consent_grant_persists_it(tmp_path, capsys):
-    rc = main(["automated-playback-consent", "--grant", "--data-dir", str(tmp_path)])
+    rc = main(
+        [
+            "automated-playback-consent",
+            "--grant",
+            "--grantor",
+            "alice",
+            "--data-dir",
+            str(tmp_path),
+        ]
+    )
     assert rc == 0
     assert UserStore(root=tmp_path).has_automated_playback_consent() is True
     assert "granted" in capsys.readouterr().out
 
 
+# #165 AC3: --grantor is mandatory with --grant -- a consent record with no
+# grantor is exactly the old, now-rejected shape.
+def test_automated_playback_consent_grant_requires_grantor(tmp_path, capsys):
+    rc = main(["automated-playback-consent", "--grant", "--data-dir", str(tmp_path)])
+    assert rc == 2
+    assert "grantor" in capsys.readouterr().out
+    assert UserStore(root=tmp_path).automated_playback_consent_path.exists() is False
+
+
 def test_automated_playback_consent_revoke_removes_it(tmp_path):
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     rc = main(["automated-playback-consent", "--revoke", "--data-dir", str(tmp_path)])
 
@@ -64,9 +84,30 @@ def test_automated_playback_blocked_without_consent(tmp_path, capsys):
     assert "consent" in capsys.readouterr().out
 
 
+# #165 AC3: an old-format consent file must not crash the CLI with a raw
+# traceback -- it surfaces as a clear, handled error.
+def test_automated_playback_rejects_old_format_consent_file(tmp_path, capsys):
+    import json
+
+    store = UserStore(root=tmp_path)
+    store.automated_playback_consent_path.parent.mkdir(parents=True, exist_ok=True)
+    store.automated_playback_consent_path.write_text(
+        json.dumps({"granted_at": "2026-01-01T00:00:00Z"}), encoding="utf-8"
+    )
+
+    rc = main(
+        ["automated-playback", "--data-dir", str(tmp_path), "--device-name", "replay-browser"]
+    )
+
+    assert rc == 2
+    assert "old" in capsys.readouterr().out.lower()
+
+
 def test_automated_playback_requires_authorization(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     rc = main(
         ["automated-playback", "--data-dir", str(tmp_path), "--device-name", "replay-browser"]
@@ -84,7 +125,9 @@ def test_automated_playback_plays_queue_and_records_agent_originated_history(
 ):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     history_path = tmp_path / "history.jsonl"
     played = TrackRef(name="Played", artist="Artist", spotify_id="played1")
@@ -168,7 +211,9 @@ def test_automated_playback_metadata_only_track_is_not_treated_as_analyzed(
     queued for automated playback."""
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     from datetime import UTC, datetime
 
@@ -246,7 +291,9 @@ def test_automated_playback_metadata_only_track_is_not_treated_as_analyzed(
 def test_automated_playback_reports_error_when_device_name_not_found(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     with respx.mock(assert_all_called=False) as router:
         router.get("https://api.spotify.com/v1/me/tracks").mock(
@@ -295,7 +342,9 @@ def test_automated_playback_reports_error_when_device_name_not_found(tmp_path, c
 def test_automated_playback_requeues_and_plays_after_transient_404(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     from music_intel_mcp import cli
 
@@ -365,7 +414,9 @@ def test_automated_playback_pauses_spotify_device_on_mid_session_revocation(
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
     store = UserStore(root=tmp_path)
-    store.grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    store.grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     from music_intel_mcp import cli
 
@@ -432,7 +483,9 @@ def test_automated_playback_pauses_spotify_device_on_mid_session_revocation(
 def test_automated_playback_stops_early_when_nothing_to_play(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
     _write_token(tmp_path)
-    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    UserStore(root=tmp_path).grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     with respx.mock(assert_all_called=False) as router:
         router.get("https://api.spotify.com/v1/me/tracks").mock(
