@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
@@ -34,19 +35,51 @@ from .inference import AudioEmbeddingModel, ClassifierModel, InferenceResult, ru
 from .live_identity import LiveIdentityResolver, LiveResolvedIdentity, ProvenanceSidecar
 from .models import TrackRef
 from .nowplaying import NowPlayingSource
+from .replay_capture import (
+    RMS_SILENCE_THRESHOLD,
+    ReplayJournalEntry,
+    _rms,
+    append_replay_journal_entry,
+)
 from .shared_store import canonical_track_id
 from .store import UserStore
 
 FingerprintFn = Callable[[np.ndarray, int], tuple[str, float]]
 RawFingerprintFn = Callable[[np.ndarray, int], tuple[list[int], float]]
 
+LiveCaptureOutcome = Literal["ok", "skipped", "silent", "short"]
+
+
+def live_capture_journal_path(store: UserStore) -> Path:
+    return store.root / "live_capture_journal.jsonl"
+
+
+def _journal_live_discard(
+    journal_path: Path | None,
+    *,
+    track_id: str,
+    outcome: LiveCaptureOutcome,
+    reason: str,
+    now: Callable[[], datetime],
+) -> None:
+    if journal_path is None:
+        return
+    ts = now().isoformat()
+    append_replay_journal_entry(
+        journal_path,
+        ReplayJournalEntry(
+            track_id=track_id, outcome=outcome, started_at=ts, ended_at=ts, reason=reason
+        ),
+    )
+
 
 @dataclass
 class LiveCaptureResult:
     identity: LiveResolvedIdentity
     inference: InferenceResult | None
-    analysis_path: Path
+    analysis_path: Path | None
     skipped: bool = False
+    outcome: LiveCaptureOutcome = "ok"
 
 
 def run_live_capture_spike(
@@ -60,6 +93,8 @@ def run_live_capture_spike(
     store: UserStore,
     fingerprint_fn: FingerprintFn = compute_fingerprint,
     raw_fingerprint_fn: RawFingerprintFn = compute_raw_fingerprint,
+    journal_path: Path | None = None,
+    rms_threshold: float = RMS_SILENCE_THRESHOLD,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> LiveCaptureResult | None:
     """Run one capture pass. ``None`` when nothing is currently playing (AC4 —
@@ -123,6 +158,29 @@ def run_live_capture_spike(
         )
         track_id = canonical_track_id(track_ref)
 
+    # #179: same RMS/short gate #166 defines for replay, applied to the organic
+    # path — a capture below the RMS threshold or shorter than the requested
+    # window must not embed and must not write an audio-analysis file (silent,
+    # ad, or spoken-intro captures mean-pool to near-identical vectors and are
+    # never replaced under first-write-wins). Checked here so the gate fires
+    # before the expensive inference/store-write steps below.
+    if sink.duration_s + 1e-9 < duration_s:
+        reason = f"captured {sink.duration_s:.2f}s < window {duration_s:.2f}s"
+        _journal_live_discard(
+            journal_path, track_id=track_id, outcome="short", reason=reason, now=now
+        )
+        return LiveCaptureResult(
+            identity=identity, inference=None, analysis_path=None, outcome="short"
+        )
+    if _rms(pcm) < rms_threshold:
+        reason = f"rms below threshold {rms_threshold}"
+        _journal_live_discard(
+            journal_path, track_id=track_id, outcome="silent", reason=reason, now=now
+        )
+        return LiveCaptureResult(
+            identity=identity, inference=None, analysis_path=None, outcome="silent"
+        )
+
     # #126 AC1/AC4: dedup purely off the identity waterfall + local store — an
     # already-analyzed track is skipped, no re-inference (the expensive step).
     if store.has_audio_analysis(track_id):
@@ -131,6 +189,7 @@ def run_live_capture_spike(
             inference=None,
             analysis_path=store.audio_analysis_path(track_id),
             skipped=True,
+            outcome="skipped",
         )
 
     inference = run_inference(
