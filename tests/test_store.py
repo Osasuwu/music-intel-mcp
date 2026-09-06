@@ -421,18 +421,24 @@ def test_automated_playback_consent_is_off_by_default(tmp_path):
 
 def test_grant_automated_playback_consent_persists_it(tmp_path):
     store = UserStore(root=tmp_path)
-    path = store.grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    path = store.grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     assert path.exists()
     assert store.has_automated_playback_consent() is True
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["granted_at"] == "2026-01-01T00:00:00Z"
+    assert payload["grantor"] == "alice"
+    assert payload["timestamp"] == "2026-01-01T00:00:00Z"
+    assert payload["scope"] == "automated-playback"
 
 
 # #128 AC3: consent is revocable at any time.
 def test_revoke_automated_playback_consent_removes_it(tmp_path):
     store = UserStore(root=tmp_path)
-    store.grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+    store.grant_automated_playback_consent(
+        grantor="alice", granted_at="2026-01-01T00:00:00Z", scope="automated-playback"
+    )
 
     store.revoke_automated_playback_consent()
 
@@ -443,6 +449,26 @@ def test_revoke_automated_playback_consent_is_a_noop_when_never_granted(tmp_path
     store = UserStore(root=tmp_path)
     store.revoke_automated_playback_consent()  # must not raise
     assert store.has_automated_playback_consent() is False
+
+
+# #165 AC3: the pre-#165 bare {"granted_at": ...} shape carries no grantor or
+# scope -- silently treating it as valid consent would let an old file grant
+# a broader authorization than anyone actually recorded, so it must be
+# rejected with a clear message rather than read as if still valid.
+def test_old_format_consent_file_is_rejected_with_clear_message(tmp_path):
+    from music_intel_mcp.store import ConsentFormatError
+
+    store = UserStore(root=tmp_path)
+    store.automated_playback_consent_path.parent.mkdir(parents=True, exist_ok=True)
+    store.automated_playback_consent_path.write_text(
+        json.dumps({"granted_at": "2026-01-01T00:00:00Z"}), encoding="utf-8"
+    )
+
+    try:
+        store.has_automated_playback_consent()
+        raise AssertionError("expected ConsentFormatError")
+    except ConsentFormatError as exc:
+        assert "old" in str(exc).lower() or "format" in str(exc).lower()
 
 
 def test_automated_playback_consent_is_independent_of_backfill_playlist_opt_in(

@@ -14,8 +14,10 @@ imported by the core pipeline, only by its own console-script entry point
 
 from __future__ import annotations
 
+import argparse
 import os
 import threading
+from collections.abc import Sequence
 
 from .continuous_capture import run_continuous_capture
 from .identity import MusicBrainzIsrcIndex
@@ -65,12 +67,11 @@ class _Status:
             return self._text
 
 
-def _run_loop(stop_event: threading.Event, status: _Status) -> None:
+def _run_loop(stop_event: threading.Event, status: _Status, store: UserStore) -> None:
     from .capture import WasapiProcessLoopbackCapture
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
     from .nowplaying import DEFAULT_DROP_LOG_FILENAME, SmtcNowPlayingSource
 
-    store = UserStore()
     live_resolver = _build_live_resolver(store)
     embedding_model = DiscogsEffnetOnnxModel()
     classifier = MtgJamendoClassifier()
@@ -118,14 +119,29 @@ def _build_icon_image(color: str):
     return image
 
 
-def main() -> int:
-    """Console-script entry point (``music-intel-desktop``)."""
+def main(argv: Sequence[str] | None = None) -> int:
+    """Console-script entry point (``music-intel-desktop``).
+
+    ``--data-dir`` (#165 AC1) opens a per-participant :class:`UserStore` rooted
+    there instead of the process-cwd default, so a phone-only participant's
+    transient per-participant root -- history, analyses, Spotify token,
+    consent -- stays separate from any other root on the same machine.
+    """
     import pystray
+
+    parser = argparse.ArgumentParser(prog="music-intel-desktop")
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    args = parser.parse_args(argv)
+    store = UserStore(root=args.data_dir)
 
     stop_event = threading.Event()
     status = _Status()
 
-    worker = threading.Thread(target=_run_loop, args=(stop_event, status), daemon=True)
+    worker = threading.Thread(target=_run_loop, args=(stop_event, status, store), daemon=True)
     worker.start()
 
     def on_quit(icon, _item) -> None:

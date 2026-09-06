@@ -22,6 +22,11 @@ from typing import Any
 from .models import Library, ListenEvent, RootProfile
 
 
+class ConsentFormatError(Exception):
+    """Raised by :meth:`UserStore.has_automated_playback_consent` when the
+    on-disk consent file predates #165's grantor+timestamp+scope schema."""
+
+
 @dataclass(frozen=True)
 class AudioAnalysisRecord:
     """One persisted live-capture inference result, read back from
@@ -376,13 +381,30 @@ class UserStore:
         """#128 AC1: off by default. Deliberately a separate file from any
         env-var opt-in (e.g. #127's ``MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED``)
         — this drives a real playback session, not just a queue, so it needs
-        its own, separately-recorded consent action."""
-        return self.automated_playback_consent_path.exists()
+        its own, separately-recorded consent action.
 
-    def grant_automated_playback_consent(self, *, granted_at: str) -> Path:
+        #165 AC3: a pre-#165 file recorded only ``granted_at`` -- no grantor,
+        no scope. Reading that as valid consent would grant an authorization
+        nobody actually recorded, so it is rejected outright rather than
+        silently treated as either granted or not-granted."""
+        if not self.automated_playback_consent_path.exists():
+            return False
+        payload = json.loads(self.automated_playback_consent_path.read_text(encoding="utf-8"))
+        if "grantor" not in payload or "scope" not in payload:
+            raise ConsentFormatError(
+                f"{self.automated_playback_consent_path} is in the old consent "
+                "format (missing grantor/scope) -- revoke it and re-grant with "
+                "`automated-playback-consent --grant --grantor ... --scope ...`"
+            )
+        return True
+
+    def grant_automated_playback_consent(
+        self, *, grantor: str, granted_at: str, scope: str
+    ) -> Path:
         self.automated_playback_consent_path.parent.mkdir(parents=True, exist_ok=True)
         self.automated_playback_consent_path.write_text(
-            json.dumps({"granted_at": granted_at}), encoding="utf-8"
+            json.dumps({"grantor": grantor, "timestamp": granted_at, "scope": scope}),
+            encoding="utf-8",
         )
         return self.automated_playback_consent_path
 

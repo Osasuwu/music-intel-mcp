@@ -67,6 +67,19 @@ def test_cli_analyze_writes_snapshot(tmp_path, history_sample_path, capsys):
     assert profile.roots == []
 
 
+def test_cli_analyze_without_user_id_defaults_to_data_dir_basename(tmp_path):
+    """#165 AC4 (node tier): a participant root's ``user_id`` is the root
+    name itself -- the node CLI surface never asks a phone-only participant
+    for a separate identifier, it derives one from --data-dir."""
+    participant_root = tmp_path / "participants" / "alice"
+    participant_root.mkdir(parents=True)
+    rc = main(["analyze", "--data-dir", str(participant_root)])
+    assert rc == 0
+    profile = UserStore(root=participant_root).latest_profile()
+    assert profile is not None
+    assert profile.user_id == "alice"
+
+
 def test_cli_analyze_empty_history(tmp_path, capsys):
     rc = main(["analyze", "--user-id", "petr", "--data-dir", str(tmp_path)])
     assert rc == 0
