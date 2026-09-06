@@ -35,8 +35,12 @@ user's existing ``spotify_extended`` history. A name/artist pair that maps to
 more than one ``spotify_id`` in that history is dropped from the lookup
 (ambiguous — resolving it either way could misattribute a play) rather than
 guessed. This resolution is deliberately scoped to Spotify-sourced history
-only; generalizing identity resolution across arbitrary sources (YouTube
-Music, Apple Music, ...) is out of scope for this importer.
+only; generalizing this name/artist -> id lookup across arbitrary sources is
+out of scope for this importer. YouTube Music (#164) does not need it: its own
+:mod:`.youtube_music` importer resolves identity directly from the source's
+own video id (``youtube_id``) rather than by matching against another
+source's history. Apple Music and other sources with no such native id remain
+out of scope until one is designed.
 
 **Lossless projection, drop-accounting (same discipline as #89 decisions
 83bd6f76 / 9576bde1):** no validity filtering at import time; every row this

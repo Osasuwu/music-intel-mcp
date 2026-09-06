@@ -158,6 +158,18 @@ def test_cache_reuse_skips_reresolution(tmp_path):
     assert index2.lookups == []  # served from disk cache, dump untouched
 
 
+def test_resolved_identity_carries_youtube_id_through_to_track_ref():
+    """#164: ``youtube_id`` is a carried-through field (not a waterfall level —
+    only terminal/mbid resolutions are cached, so a youtube rung would never be
+    persisted); ``to_track_ref`` must thread it onto the ``TrackRef`` so
+    ``canonical_track_id`` can use it."""
+    ident = ResolvedIdentity(
+        input_key="youtube:Y-1", youtube_id="Y-1", name="n", artist="a", level="name"
+    )
+    ref = ident.to_track_ref()
+    assert ref.youtube_id == "Y-1"
+
+
 def test_cache_put_get_roundtrip(tmp_path):
     cache = IdentityCache(root=tmp_path)
     ident = ResolvedIdentity(
