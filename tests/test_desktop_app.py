@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 import music_intel_mcp.desktop_app as desktop_app
 from music_intel_mcp.store import UserStore
+
+# desktop_app.main() imports pystray internally; it ships in the Windows-only
+# `desktop` extra (pyproject.toml), deliberately excluded from CI's `dev`
+# install the same way live-capture's winsdk/onnxruntime are. Skip rather than
+# fail where it isn't installed.
+pytest.importorskip("pystray")
 
 
 class _FakeIcon:
