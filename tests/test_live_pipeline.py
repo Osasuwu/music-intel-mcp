@@ -128,7 +128,7 @@ def test_run_live_capture_spike_skips_inference_when_already_analyzed(tmp_path) 
     embedding_model = InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32))
     classifier = InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9}))
     store = UserStore(root=tmp_path)
-    store.write_audio_analysis(track_id="M-1", embedding=[0.5], tags={"genre---rock": 1.0})
+    store.write_audio_analysis(track_id="mbid:M-1", embedding=[0.5], tags={"genre---rock": 1.0})
 
     result = run_live_capture_spike(
         duration_s=0.05,
@@ -147,6 +147,85 @@ def test_run_live_capture_spike_skips_inference_when_already_analyzed(tmp_path) 
     assert result.skipped is True
     assert result.identity.mbid == "M-1"
     assert result.inference is None
+
+
+def test_run_live_capture_spike_key_recognized_by_backfill_selector(tmp_path) -> None:
+    """#158 AC1: one function produces the key everywhere — a track captured
+    live must be reported as already-analyzed by the backfill selector, i.e.
+    the key ``run_live_capture_spike`` writes under and the key
+    ``select_backfill_tracks`` computes from a candidate ``TrackRef`` for the
+    same identity must be identical."""
+    from music_intel_mcp.backfill_playlist import select_backfill_tracks
+    from music_intel_mcp.models import TrackRef
+
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="Spotify.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    live_resolver = LiveIdentityResolver(acoustid_source=acoustid)
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+    assert result is not None
+    assert result.skipped is False
+
+    candidate = TrackRef(mbid="M-1", name="Around the World", artist="Daft Punk")
+    selected = select_backfill_tracks(
+        [candidate], played_ids=set(), has_audio_analysis=store.has_audio_analysis
+    )
+    assert selected == []
+
+
+def test_run_live_capture_spike_name_level_key_uses_normalized_name(tmp_path) -> None:
+    """#158 AC1 must not regress the #139 AC4 normalization invariant
+    (CONTEXT.md 'Normalization (AC4)'): when the waterfall bottoms out at the
+    name rung, the stored key has to be built from the *normalized* name_key
+    (feat./official-video/lyrics/remaster noise stripped), not the raw OS
+    media-session title -- otherwise two plays of the same track with a
+    cosmetically different title (e.g. an "(Official Video)" suffix) get
+    different keys and are re-analyzed instead of deduped."""
+    store = UserStore(root=tmp_path)
+    live_resolver = LiveIdentityResolver()  # no sources -> always bottoms out at name key
+
+    first = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=InMemoryNowPlayingSource(
+            NowPlayingInfo(title="Strobe (Official Video)", artist="deadmau5", app_id="Spotify.exe")
+        ),
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+    assert first is not None
+    assert first.skipped is False
+
+    second = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=InMemoryNowPlayingSource(
+            NowPlayingInfo(title="Strobe", artist="deadmau5", app_id="Spotify.exe")
+        ),
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+    assert second is not None
+    assert second.skipped is True
+    assert second.analysis_path == first.analysis_path
 
 
 def test_run_live_capture_spike_none_when_nothing_playing(tmp_path) -> None:

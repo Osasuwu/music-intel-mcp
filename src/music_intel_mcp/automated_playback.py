@@ -278,7 +278,11 @@ def attempt_play(
         return PlayAttempt(status="skipped", reason="missing_spotify_id")
 
     try:
-        client.play(track.spotify_id)
+        # #158 AC3: play() takes a canonical `spotify:`-prefixed uri, not the
+        # bare Spotify id -- build it directly rather than via
+        # canonical_track_id(), which would prefer an mbid/isrc key when the
+        # track has one and break the Spotify-specific play call.
+        client.play(f"spotify:{track.spotify_id}")
     except SpotifyPlayRejected as exc:
         reason = f"http_{exc.status_code}"
         if journal is not None:

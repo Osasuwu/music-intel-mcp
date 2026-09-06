@@ -107,6 +107,88 @@ def test_default_backfill_limit_is_10000():
     assert MAX_BACKFILL_TRACKS == 10_000
 
 
+def test_select_backfill_tracks_excludes_tracks_with_no_spotify_id():
+    # Spotify returns `id: null` for locally-added/unavailable saved tracks
+    # (fetch_saved_track_refs propagates this as spotify_id=None). Such a
+    # track can never be added to a playlist by uri, so it must never enter
+    # the desired set -- otherwise spotify_track_uri() raises on its
+    # name-keyed canonical id when the playlist sync tries to add it.
+    unavailable = _track("Local Only", spotify_id=None)
+    available = _track("Real Track", spotify_id="r1")
+
+    selected = select_backfill_tracks(
+        [unavailable, available],
+        played_ids=set(),
+        has_audio_analysis=lambda _cid: False,
+    )
+
+    assert selected == [available]
+
+
+def test_select_backfill_tracks_resolve_mbid_bridges_isrc_to_analyzed_mbid():
+    # fetch_saved_track_refs only ever knows spotify_id (+ now isrc, from
+    # external_ids) for a saved-library candidate -- it never has the mbid
+    # the live AcoustID pipeline writes its audio-analysis files under. If
+    # nothing bridges isrc -> mbid, canonical_track_id(candidate) always
+    # bottoms out at spotify:<id>, which never matches an mbid:-keyed
+    # analysis file for the *same* recording (the bug the reviewer flagged).
+    # resolve_mbid is that bridge, used only to compute the membership key
+    # -- checked here via has_audio_analysis.
+    candidate = _track("Around the World", spotify_id="s1", isrc="FR-Z03-97-00212")
+
+    def has_analysis(cid: str) -> bool:
+        return cid == "mbid:M-1"
+
+    selected = select_backfill_tracks(
+        [candidate],
+        played_ids=set(),
+        has_audio_analysis=has_analysis,
+        resolve_mbid=lambda t: "M-1" if t.isrc == "FR-Z03-97-00212" else None,
+    )
+
+    assert selected == []
+
+
+def test_select_backfill_tracks_resolve_mbid_does_not_mutate_returned_track():
+    # The bridged mbid must only affect the membership check, never the
+    # returned TrackRef -- resolve_mbid is consulted purely to compute the
+    # membership key and must not be written back onto the track. Note that
+    # canonical_track_id(selected_track) is NOT a safe way to build a Spotify
+    # playlist uri here: the candidate's own isrc (set independently by
+    # fetch_saved_track_refs) already makes canonical_track_id prefer
+    # isrc:... over spotify:... per the identity waterfall (#158). Callers
+    # that need a playlist uri must build it from track.spotify_id directly
+    # (cli.py does this), never from canonical_track_id(track).
+    candidate = _track("Around the World", spotify_id="s1", isrc="FR-Z03-97-00212")
+
+    selected = select_backfill_tracks(
+        [candidate],
+        played_ids=set(),
+        has_audio_analysis=lambda _cid: False,
+        resolve_mbid=lambda t: "M-1" if t.isrc == "FR-Z03-97-00212" else None,
+    )
+
+    assert selected == [candidate]
+    assert selected[0].mbid is None
+    assert selected[0].spotify_id == "s1"
+
+
+def test_select_backfill_tracks_resolve_mbid_excludes_already_played():
+    # The same bridge must feed the AC4 played-ids check too: a track played
+    # live (history event carries mbid) must exclude the matching backfill
+    # candidate even though the candidate itself only has isrc/spotify_id.
+    candidate = _track("Around the World", spotify_id="s1", isrc="FR-Z03-97-00212")
+
+    selected = select_backfill_tracks(
+        [candidate],
+        played_ids={"mbid:M-1"},
+        has_audio_analysis=lambda _cid: False,
+        resolve_mbid=lambda t: "M-1" if t.isrc == "FR-Z03-97-00212" else None,
+    )
+
+    assert selected == []
+
+
 def test_select_backfill_tracks_dedupes_repeated_candidates():
     track = _track("Dup", spotify_id="d1")
 

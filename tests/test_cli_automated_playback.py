@@ -144,8 +144,6 @@ def test_automated_playback_plays_queue_and_records_agent_originated_history(
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -159,6 +157,87 @@ def test_automated_playback_plays_queue_and_records_agent_originated_history(
     agent_events = [e for e in events if e.source == "agent_automated_playback"]
     assert len(agent_events) == 1
     assert agent_events[0].track.spotify_id == "fresh1"
+
+
+def test_automated_playback_metadata_only_track_is_not_treated_as_analyzed(
+    tmp_path, capsys, monkeypatch
+):
+    """#158 AC2: the "already analyzed" check must consult audio-analysis
+    presence (UserStore), not SharedStore metadata presence — a track with
+    only anonymous metadata cached (no audio_analysis file) must still be
+    queued for automated playback."""
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
+    _write_token(tmp_path)
+    UserStore(root=tmp_path).grant_automated_playback_consent(granted_at="2026-01-01T00:00:00Z")
+
+    from datetime import UTC, datetime
+
+    from music_intel_mcp.shared_store import LocalSharedStore, TrackMetadataRecord
+
+    shared_path = tmp_path / "shared_cache.jsonl"
+    LocalSharedStore(path=shared_path).upsert_tracks(
+        [
+            TrackMetadataRecord(
+                track_id="spotify:fresh1",
+                spotify_id="fresh1",
+                name="Fresh",
+                artist="Artist",
+                fetched_at=datetime.now(UTC),
+            )
+        ]
+    )
+
+    from music_intel_mcp import cli
+
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://api.spotify.com/v1/me/tracks").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "track": {
+                                "id": "fresh1",
+                                "name": "Fresh",
+                                "artists": [{"name": "Artist"}],
+                                "album": {"name": "Album"},
+                            }
+                        },
+                    ],
+                    "next": None,
+                },
+            )
+        )
+        router.get("https://api.spotify.com/v1/me/player/devices").mock(
+            return_value=httpx.Response(
+                200, json={"devices": [{"id": "dev1", "name": "replay-browser"}]}
+            )
+        )
+        router.get("https://api.spotify.com/v1/me/player").mock(
+            return_value=httpx.Response(200, json={"is_playing": False})
+        )
+        router.put("https://api.spotify.com/v1/me/player/play").mock(
+            return_value=httpx.Response(204)
+        )
+        router.get("https://api.spotify.com/v1/tracks/fresh1").mock(
+            return_value=httpx.Response(200, json={"duration_ms": 1000})
+        )
+
+        rc = main(
+            [
+                "automated-playback",
+                "--data-dir",
+                str(tmp_path),
+                "--device-name",
+                "replay-browser",
+            ]
+        )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "played 1/1" in out
 
 
 # #159 AC1: device_id is mandatory -- a name that doesn't match any device on
@@ -199,8 +278,6 @@ def test_automated_playback_reports_error_when_device_name_not_found(tmp_path, c
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -263,8 +340,6 @@ def test_automated_playback_requeues_and_plays_after_transient_404(tmp_path, cap
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -345,8 +420,6 @@ def test_automated_playback_pauses_spotify_device_on_mid_session_revocation(
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]
@@ -371,8 +444,6 @@ def test_automated_playback_stops_early_when_nothing_to_play(tmp_path, capsys, m
                 "automated-playback",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--device-name",
                 "replay-browser",
             ]

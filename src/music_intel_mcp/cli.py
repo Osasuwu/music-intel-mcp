@@ -873,24 +873,31 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
         select_backfill_tracks,
         sync_backfill_playlist,
     )
-    from .shared_store import canonical_track_id
+    from .identity import MusicBrainzIsrcIndex
 
     get_token = lambda: auth.access_token()  # noqa: E731
-    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
     fetched_user_id = fetch_current_user_id(access_token=get_token)
     playlist_client = SpotifyPlaylistClient(access_token=get_token, user_id=fetched_user_id)
+    mb_index = MusicBrainzIsrcIndex(path=getattr(args, "mb_index", None))
 
     def sync_once() -> PlaylistDiff:
         events = store.load_history()
         played_ids = played_track_ids(events)
         candidates = fetch_saved_track_refs(access_token=get_token)
-        analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+        # #158 AC2: "already analyzed" consults audio-analysis presence
+        # (UserStore), not SharedStore metadata presence.
         selected = select_backfill_tracks(
             candidates,
             played_ids=played_ids,
-            has_audio_analysis=lambda cid: cid in analyzed,
+            has_audio_analysis=store.has_audio_analysis,
+            resolve_mbid=lambda t: mb_index.lookup(t.isrc) if t.isrc else None,
         )
-        desired_ids = [canonical_track_id(t) for t in selected]
+        # Built from spotify_id directly, NOT canonical_track_id(t): a selected
+        # track may carry an isrc (fetch_saved_track_refs populates it), which
+        # would make canonical_track_id prefer isrc:... over spotify:... per
+        # the identity waterfall -- spotify_track_uri() requires a
+        # spotify:-prefixed id and raises on anything else.
+        desired_ids = [f"spotify:{t.spotify_id}" for t in selected]
         diff = sync_backfill_playlist(
             playlist_client, desired_ids=desired_ids, playlist_name=DEFAULT_PLAYLIST_NAME
         )
@@ -930,6 +937,24 @@ def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_migrate_audio_analysis_keys(args: argparse.Namespace) -> int:
+    from .store import UserStore, migrate_audio_analysis_keys
+
+    store = UserStore(root=args.data_dir)
+    report = migrate_audio_analysis_keys(store)
+    print(f"migrated {len(report.migrated)}")
+    print(f"conflicts {len(report.conflicts)}")
+    for old_id, new_id in report.conflicts:
+        if new_id == "<unclassifiable>":
+            print(
+                f"  conflict: {old_id} -> {new_id} "
+                "(no MBID/ISRC/Spotify format match and no usable provenance, left untouched)"
+            )
+        else:
+            print(f"  conflict: {old_id} -> {new_id} (target already exists, left untouched)")
+    return 0
+
+
 def _cmd_automated_playback(args: argparse.Namespace) -> int:
     from .store import UserStore
 
@@ -966,17 +991,19 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
         played_track_ids,
         select_backfill_tracks,
     )
-    from .shared_store import canonical_track_id
+    from .identity import MusicBrainzIsrcIndex
 
     get_token = lambda: auth.access_token()  # noqa: E731
-    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
     played_ids = played_track_ids(store.load_history())
     candidates = fetch_saved_track_refs(access_token=get_token)
-    analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+    mb_index = MusicBrainzIsrcIndex(path=getattr(args, "mb_index", None))
+    # #158 AC2: "already analyzed" consults audio-analysis presence
+    # (UserStore), not SharedStore metadata presence.
     queue = select_backfill_tracks(
         candidates,
         played_ids=played_ids,
-        has_audio_analysis=lambda cid: cid in analyzed,
+        has_audio_analysis=store.has_audio_analysis,
+        resolve_mbid=lambda t: mb_index.lookup(t.isrc) if t.isrc else None,
     )
     if not queue:
         print("automated playback: nothing to play")
@@ -1021,7 +1048,11 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
     result = run_automated_playback(
         queue=queue,
         play_track=play_track,
-        track_duration_s=lambda t: playback_client.track_duration_s(canonical_track_id(t)),
+        # track_duration_s() strips the id's prefix and sends the remainder
+        # to Spotify's GET /tracks/{id} -- it must stay spotify_id-based, not
+        # canonical_track_id(t), which would send an isrc/mbid value where
+        # Spotify expects its own track id (#158 identity waterfall).
+        track_duration_s=lambda t: playback_client.track_duration_s(f"spotify:{t.spotify_id}"),
         has_consent=store.has_automated_playback_consent,
         on_play=on_play,
         pause=playback_client.pause,
@@ -1331,17 +1362,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_backfill.add_argument(
-        "--shared-store",
-        choices=["local", "supabase", "memory"],
-        default="local",
-        help="metadata store for the AC3 analyzed-check (default: local)",
-    )
-    p_backfill.add_argument(
-        "--shared-store-path",
-        default=None,
-        help="path to the local shared-store JSONL",
-    )
-    p_backfill.add_argument(
         "--loop",
         action="store_true",
         help="keep re-syncing on --interval-hours until Ctrl+C, instead of a single run (AC2)",
@@ -1352,6 +1372,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=24.0,
         help="hours between refreshes in --loop mode (default: 24.0, AC2's daily cadence)",
+    )
+    p_backfill.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV, bridging a saved-track candidate's ISRC "
+        "to the MBID the live pipeline keys audio-analysis by, for cross-pipeline dedup "
+        "(default: $MUSICBRAINZ_ISRC_INDEX or $MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
     )
     p_backfill.set_defaults(func=_cmd_backfill_playlist)
 
@@ -1410,23 +1437,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_playback.add_argument(
-        "--shared-store",
-        choices=["local", "supabase", "memory"],
-        default="local",
-        help="metadata store for the already-analyzed check (default: local)",
-    )
-    p_playback.add_argument(
-        "--shared-store-path",
-        default=None,
-        help="path to the local shared-store JSONL",
-    )
-    p_playback.add_argument(
         "--device-name",
         required=True,
         help="exact Spotify device name to replay through (#159 AC1) -- "
         "see `GET /me/player/devices` on the account, or the device's own UI",
     )
+    p_playback.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV, bridging a saved-track candidate's ISRC "
+        "to the MBID the live pipeline keys audio-analysis by, for cross-pipeline dedup "
+        "(default: $MUSICBRAINZ_ISRC_INDEX or $MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
+    )
     p_playback.set_defaults(func=_cmd_automated_playback)
+
+    p_migrate_keys = sub.add_parser(
+        "migrate-audio-analysis-keys",
+        help=(
+            "one-shot rename of bare-key audio-analysis files to the prefixed "
+            "canonical_track_id form (#158 AC4)"
+        ),
+    )
+    p_migrate_keys.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_migrate_keys.set_defaults(func=_cmd_migrate_audio_analysis_keys)
     return parser
 
 

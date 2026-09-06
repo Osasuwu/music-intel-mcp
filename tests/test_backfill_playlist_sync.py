@@ -112,6 +112,47 @@ def test_fetch_saved_track_refs_paginates_and_maps_fields():
     assert refs[0].album == "Album A"
 
 
+def test_fetch_saved_track_refs_maps_isrc_from_external_ids():
+    # Spotify's saved-track response includes external_ids.isrc on the
+    # standard track object at no extra cost/credentials. Populating it here
+    # is what lets select_backfill_tracks's resolve_mbid bridge a Spotify
+    # library candidate to the MBID the live AcoustID pipeline keys its
+    # audio-analysis files by (#158 cross-pipeline dedup).
+    with respx.mock(assert_all_called=True) as router:
+        router.get(SPOTIFY_SAVED_TRACKS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "track": {
+                                "id": "a1",
+                                "name": "Song A",
+                                "artists": [{"name": "Artist A"}],
+                                "album": {"name": "Album A"},
+                                "external_ids": {"isrc": "US-ABC-12-34567"},
+                            }
+                        },
+                        {
+                            "track": {
+                                "id": "b2",
+                                "name": "Song B",
+                                "artists": [{"name": "Artist B"}],
+                                "album": {"name": "Album B"},
+                            }
+                        },
+                    ],
+                    "next": None,
+                },
+            )
+        )
+
+        refs = fetch_saved_track_refs(access_token=lambda: _BEARER)
+
+    assert refs[0].isrc == "US-ABC-12-34567"
+    assert refs[1].isrc is None
+
+
 def test_fetch_saved_track_refs_uses_saved_tracks_url():
     assert SPOTIFY_SAVED_TRACKS_URL == "https://api.spotify.com/v1/me/tracks"
 

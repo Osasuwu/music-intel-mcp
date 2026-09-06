@@ -41,6 +41,81 @@ _DATA_DIR_ENV = "MUSIC_INTEL_DATA_DIR"
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+# #158 AC4: pre-#158 audio-analysis files carry a *bare* key -- whichever of
+# mbid/isrc/spotify_id/name_key the live waterfall picked first, written
+# without our current ``mbid:``/``isrc:``/``spotify:``/``name:`` prefix. The
+# bare string itself carries no type tag, so the one-shot migration below
+# classifies it back by format (lengths/alphabets don't overlap between the
+# three id kinds) and falls back to rebuilding the ``name:`` form from the
+# provenance sidecar's raw title/artist when nothing matches.
+_CANONICAL_PREFIXES = ("mbid:", "isrc:", "spotify:", "name:")
+_MBID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_ISRC_RE = re.compile(r"^[A-Za-z]{2}[A-Za-z0-9]{3}\d{7}$")
+_SPOTIFY_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
+
+
+@dataclass(frozen=True)
+class KeyMigrationReport:
+    """Outcome of one :func:`migrate_audio_analysis_keys` run. ``migrated``
+    and ``conflicts`` are ``(old_bare_id, new_prefixed_id)`` pairs -- a
+    conflict means the prefixed target already existed (first-write-wins:
+    the pre-existing file is kept, the bare file is left untouched)."""
+
+    migrated: list[tuple[str, str]]
+    conflicts: list[tuple[str, str]]
+
+
+def _infer_canonical_key(bare_id: str, provenance: dict[str, Any] | None) -> str | None:
+    if _MBID_RE.match(bare_id):
+        return f"mbid:{bare_id}"
+    if _ISRC_RE.match(bare_id):
+        return f"isrc:{bare_id}"
+    if _SPOTIFY_ID_RE.match(bare_id):
+        return f"spotify:{bare_id}"
+    if provenance and provenance.get("raw_title") and provenance.get("raw_artist"):
+        # Local import: live_identity imports from this module (resolve_data_root),
+        # so a module-level import here would be circular.
+        from .live_identity import normalize_track_name
+
+        name_key = normalize_track_name(provenance["raw_title"], provenance["raw_artist"])
+        return f"name:{name_key}"
+    return None
+
+
+def migrate_audio_analysis_keys(store: UserStore) -> KeyMigrationReport:
+    """One-shot #158 AC4 migration: rename bare-key ``audio_analysis/*.json``
+    files to the canonical prefixed ``canonical_track_id`` form so file
+    names, dedup lookups and clustering all key off the same identity waterfall.
+    Idempotent -- an already-prefixed ``track_id`` is left alone, so a second
+    run over already-migrated data is a no-op."""
+    migrated: list[tuple[str, str]] = []
+    conflicts: list[tuple[str, str]] = []
+    if not store.audio_analysis_dir.exists():
+        return KeyMigrationReport(migrated=migrated, conflicts=conflicts)
+
+    for path in sorted(store.audio_analysis_dir.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        old_id = payload["track_id"]
+        if old_id.startswith(_CANONICAL_PREFIXES):
+            continue
+        new_id = _infer_canonical_key(old_id, payload.get("provenance"))
+        if new_id is None:
+            conflicts.append((old_id, "<unclassifiable>"))
+            continue
+        new_path = store.audio_analysis_path(new_id)
+        if new_path.exists() and new_path != path:
+            conflicts.append((old_id, new_id))
+            continue
+        payload["track_id"] = new_id
+        new_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        if new_path != path:
+            path.unlink()
+        migrated.append((old_id, new_id))
+
+    return KeyMigrationReport(migrated=migrated, conflicts=conflicts)
+
 
 def resolve_data_root(root: str | Path | None) -> Path:
     """Resolve the data root: explicit arg > ``MUSIC_INTEL_DATA_DIR`` > default.

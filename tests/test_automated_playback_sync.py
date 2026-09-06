@@ -38,11 +38,19 @@ def test_play_calls_player_play_endpoint_with_track_uri():
     client = _client()
     with respx.mock(assert_all_called=True) as router:
         route = router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(204))
-        client.play("AAA")
+        client.play("spotify:AAA")
 
     assert route.calls[0].request.headers["Authorization"] == f"Bearer {_BEARER}"
     body = route.calls[0].request.content.decode()
     assert '"spotify:track:AAA"' in body
+
+
+def test_play_raises_on_non_spotify_prefixed_track_id():
+    """#158 AC3: a bare/non-prefixed id was never resolved to a Spotify id --
+    ``play`` must raise rather than silently guessing a uri."""
+    client = _client()
+    with pytest.raises(ValueError):
+        client.play("AAA")
 
 
 def test_play_normalizes_canonical_track_id_prefix():
@@ -69,7 +77,7 @@ def test_play_includes_device_id_query_param():
     client = _client(device_id="dev1")
     with respx.mock(assert_all_called=True) as router:
         route = router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(204))
-        client.play("AAA")
+        client.play("spotify:AAA")
 
     assert route.calls[0].request.url.params["device_id"] == "dev1"
 
@@ -94,7 +102,7 @@ def test_resolve_device_id_finds_device_by_name():
 
     with respx.mock(assert_all_called=True) as router:
         route = router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(204))
-        client.play("AAA")
+        client.play("spotify:AAA")
 
     assert route.calls[0].request.url.params["device_id"] == "dev-abc"
 
@@ -117,7 +125,7 @@ def test_play_raises_rejected_on_404():
     with respx.mock(assert_all_called=True) as router:
         router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(404))
         with pytest.raises(SpotifyPlayRejected) as excinfo:
-            client.play("AAA")
+            client.play("spotify:AAA")
 
     assert excinfo.value.status_code == 404
 
@@ -127,7 +135,7 @@ def test_play_raises_rejected_on_403():
     with respx.mock(assert_all_called=True) as router:
         router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(403))
         with pytest.raises(SpotifyPlayRejected) as excinfo:
-            client.play("AAA")
+            client.play("spotify:AAA")
 
     assert excinfo.value.status_code == 403
 

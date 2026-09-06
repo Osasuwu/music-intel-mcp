@@ -87,6 +87,7 @@ def fetch_saved_track_refs(
             refs.append(
                 TrackRef(
                     spotify_id=track.get("id"),
+                    isrc=(track.get("external_ids") or {}).get("isrc"),
                     name=track.get("name", ""),
                     artist=artists[0].get("name", ""),
                     album=album.get("name"),
@@ -115,15 +116,34 @@ def select_backfill_tracks(
     played_ids: set[str],
     has_audio_analysis: Callable[[str], bool],
     limit: int = MAX_BACKFILL_TRACKS,
+    resolve_mbid: Callable[[TrackRef], str | None] | None = None,
 ) -> list[TrackRef]:
     """The desired backfill set: unplayed, unanalyzed candidates, deduped by
-    canonical id and capped at ``limit`` (AC2/AC3/AC4)."""
+    canonical id and capped at ``limit`` (AC2/AC3/AC4).
+
+    ``resolve_mbid`` bridges a Spotify-library candidate (mbid unset --
+    ``fetch_saved_track_refs`` only ever knows spotify_id/isrc) to the MBID
+    the live AcoustID-based pipeline keys its audio-analysis files by, so the
+    played/analyzed membership checks below actually match cross-pipeline
+    instead of always bottoming out at ``spotify:<id>``. It is consulted only
+    to compute the membership key here -- the returned ``TrackRef`` is
+    unchanged, so a caller building a Spotify playlist uri from it via
+    ``canonical_track_id`` downstream still gets ``spotify:<id>``, not an
+    MBID no playlist uri exists for (``spotify_track_uri()`` would raise)."""
     selected: list[TrackRef] = []
     seen: set[str] = set()
     for track in candidates:
         if len(selected) >= limit:
             break
-        cid = canonical_track_id(track)
+        if track.spotify_id is None:
+            # Spotify returns `id: null` for locally-added/unavailable saved
+            # tracks. Such a track can never be represented by a playlist
+            # uri (spotify_track_uri() requires a `spotify:`-prefixed id),
+            # so it's never a valid backfill candidate -- mirrors the same
+            # guard in automated_playback.attempt_play().
+            continue
+        mbid = track.mbid or (resolve_mbid(track) if resolve_mbid else None)
+        cid = f"mbid:{mbid}" if mbid else canonical_track_id(track)
         if cid in played_ids or cid in seen:
             continue  # AC4: played (even if unanalyzed) never enters the queue
         if has_audio_analysis(cid):
