@@ -1071,9 +1071,11 @@ def _cmd_near_dup_apply(args: argparse.Namespace) -> int:
     from .near_dup import apply
 
     aliases_path = apply(Path(args.report))
-    written = [
-        line for line in aliases_path.read_text(encoding="utf-8").splitlines() if line.strip()
-    ]
+    written = (
+        [line for line in aliases_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if aliases_path.exists()
+        else []
+    )
     print(f"wrote {len(written)} alias(es) to {aliases_path}")
     return 0
 
