@@ -13,9 +13,17 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from music_intel_mcp.analyzer import analyze
+from music_intel_mcp.audio import InMemoryAudioFeatureSource
+from music_intel_mcp.automated_playback import AUTOMATED_PLAYBACK_SOURCE
 from music_intel_mcp.cli import main
 from music_intel_mcp.models import ListenEvent, PlayContext, TrackRef
-from music_intel_mcp.shared_store import canonical_track_id
+from music_intel_mcp.replay_capture import (
+    ReplayLedgerEntry,
+    append_replay_ledger_entry,
+    replay_ledger_path,
+)
+from music_intel_mcp.shared_store import InMemorySharedStore, canonical_track_id
 from music_intel_mcp.spotify_extended import (
     SpotifyExtendedStats,
     load_spotify_extended_dir,
@@ -348,6 +356,115 @@ def test_cli_import_spotify_warns_when_new_export_is_not_a_superset(tmp_path, ca
     rc = main(["import-spotify", "--from", str(export_bad), "--data-dir", str(tmp_path)])
     assert rc == 0
     assert "WARNING" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# replay-window ledger tagging (#167 AC2)
+# --------------------------------------------------------------------------- #
+
+
+def test_row_inside_ledger_window_is_tagged_agent_originated(tmp_path):
+    """A row whose ``played_at`` falls inside a replay-loop window (#167 AC1) is
+    tagged as agent-originated on import; a row outside any window keeps the
+    normal ``spotify_extended`` source untouched."""
+    rows = [
+        _audio_row("2023-08-01T12:00:00Z", "Replayed", "Artist", "trackREPLAY"),
+        _audio_row("2023-08-01T09:00:00Z", "Organic", "Artist", "trackORGANIC"),
+    ]
+    path = _write_export(tmp_path / "Streaming_History_Audio_2023.json", rows)
+    windows = [
+        (datetime(2023, 8, 1, 11, 55, tzinfo=UTC), datetime(2023, 8, 1, 12, 5, tzinfo=UTC)),
+    ]
+    stats = SpotifyExtendedStats()
+    events = load_spotify_extended_file(path, stats=stats, ledger_windows=windows)
+
+    by_name = {e.track.name: e for e in events}
+    assert by_name["Replayed"].source == AUTOMATED_PLAYBACK_SOURCE
+    assert by_name["Organic"].source == "spotify_extended"
+    assert stats.tagged_agent_originated == 1
+
+
+def test_analyze_default_excludes_ledger_tagged_import_from_audio_evidence(tmp_path):
+    """End-to-end: a ledger-tagged import row is invisible to audio evidence under
+    ``analyze()``'s default ``exclude_agent_originated=True`` (#129), while still
+    counting toward the raw ``generated_from`` play total — mirrors
+    ``test_analyzer.py::test_analyze_default_excludes_agent_originated_from_audio_evidence``,
+    but sourced through the real importer instead of a hand-built event."""
+    rows = [_audio_row("2023-09-01T12:00:00Z", "Replayed", "Artist", "trackREPLAY2")]
+    path = _write_export(tmp_path / "Streaming_History_Audio_2023.json", rows)
+    windows = [
+        (datetime(2023, 9, 1, 11, 55, tzinfo=UTC), datetime(2023, 9, 1, 12, 5, tzinfo=UTC)),
+    ]
+    events = load_spotify_extended_file(path, ledger_windows=windows)
+    assert events[0].source == AUTOMATED_PLAYBACK_SOURCE
+
+    tid = canonical_track_id(events[0].track)
+    shared_store = InMemorySharedStore()
+    profile = analyze(
+        events,
+        user_id="u1",
+        shared_store=shared_store,
+        audio_source=InMemoryAudioFeatureSource({}),
+    )
+    assert profile.generated_from.n_unique_tracks == 1  # raw ingest count unaffected
+    assert shared_store.get_tracks([tid]) == {}  # never seeded -- zero evidence
+
+
+def test_ledger_windows_from_replay_ledger_file(tmp_path):
+    """The ledger-window loader reads back exactly what
+    :func:`append_replay_ledger_entry` wrote (#167 AC1 -> AC2 bridge)."""
+    from music_intel_mcp.spotify_extended import load_replay_ledger_windows
+
+    store = UserStore(root=tmp_path)
+    ledger_path = replay_ledger_path(store)
+    append_replay_ledger_entry(
+        ledger_path,
+        ReplayLedgerEntry(
+            account="acct1",
+            data_root=str(store.root),
+            started_at="2023-08-01T11:55:00+00:00",
+            ended_at="2023-08-01T12:05:00+00:00",
+        ),
+    )
+    windows = load_replay_ledger_windows(ledger_path)
+    assert windows == [
+        (datetime(2023, 8, 1, 11, 55, tzinfo=UTC), datetime(2023, 8, 1, 12, 5, tzinfo=UTC))
+    ]
+
+
+def test_cli_import_spotify_prints_ledger_tagged_count(tmp_path, capsys):
+    """#167 AC3: when a replay-window ledger is present at the data root, the
+    importer's printed summary surfaces the ledger-tagged count alongside the
+    existing imported/skip counts."""
+    store = UserStore(root=tmp_path)
+    append_replay_ledger_entry(
+        replay_ledger_path(store),
+        ReplayLedgerEntry(
+            account="acct1",
+            data_root=str(store.root),
+            started_at="2023-10-01T11:55:00+00:00",
+            ended_at="2023-10-01T12:05:00+00:00",
+        ),
+    )
+    export = tmp_path / "export"
+    export.mkdir()
+    _write_export(
+        export / "Streaming_History_Audio_2023.json",
+        [
+            _audio_row("2023-10-01T12:00:00Z", "Replayed", "Artist", "trackREPLAY3"),
+            _audio_row("2023-10-01T09:00:00Z", "Organic", "Artist", "trackORGANIC3"),
+        ],
+    )
+
+    rc = main(["import-spotify", "--from", str(export), "--data-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ledger-tagged 1" in out
+
+    history = UserStore(root=tmp_path).load_history()
+    tagged = {e.track.name: e.source for e in history}
+    assert tagged["Replayed"] == AUTOMATED_PLAYBACK_SOURCE
+    assert tagged["Organic"] == "spotify_extended"
 
 
 # --------------------------------------------------------------------------- #

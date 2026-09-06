@@ -20,6 +20,7 @@ from music_intel_mcp.live_identity import LiveIdentityResolver
 from music_intel_mcp.models import TrackRef
 from music_intel_mcp.replay_capture import (
     process_replay_queue,
+    replay_ledger_path,
     run_replay_capture,
     summarize_replay_journal,
 )
@@ -331,6 +332,78 @@ def test_process_replay_queue_does_not_requeue_sample_rate_mismatch(tmp_path) ->
 
     assert queue == []
     assert [r.outcome for r in results] == ["sample_rate_mismatch"]
+
+
+def test_process_replay_queue_appends_window_to_ledger_per_data_root(tmp_path) -> None:
+    """#167 AC1: one call to the replay loop appends a single window
+    (start/end) to a ledger file keyed by the data root -- calling the loop
+    again (a fresh process, i.e. "restart") appends a second window rather
+    than overwriting the first, so windows survive restarts."""
+    capture = _ScriptedCapture([_tone_frame(800), _tone_frame(800)])
+    driver = _ScriptedDriver()
+    store = UserStore(root=tmp_path)
+    ledger_path = replay_ledger_path(store)
+    track = _track()
+
+    process_replay_queue(
+        queue=[track],
+        track_duration_s=lambda t: 0.05,
+        capture=capture,
+        driver=driver,
+        store=store,
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        max_window_s=0.05,
+        account="participant-1",
+        ledger_path=ledger_path,
+    )
+
+    lines = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["account"] == "participant-1"
+    assert lines[0]["data_root"] == str(store.root)
+    assert lines[0]["started_at"] < lines[0]["ended_at"]
+
+    # second invocation ("restart") appends rather than overwrites
+    capture2 = _ScriptedCapture([_tone_frame(800), _tone_frame(800)])
+    process_replay_queue(
+        queue=[track],
+        track_duration_s=lambda t: 0.05,
+        capture=capture2,
+        driver=_ScriptedDriver(),
+        store=store,
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        max_window_s=0.05,
+        account="participant-1",
+        ledger_path=ledger_path,
+    )
+
+    lines = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2
+
+
+def test_process_replay_queue_without_ledger_path_writes_no_ledger(tmp_path) -> None:
+    """#167 AC1: the ledger is opt-in via ``ledger_path`` -- omitting it (the
+    existing call sites in this file all do) must not create a ledger file,
+    preserving the pre-#167 behavior of every other test here."""
+    capture = _ScriptedCapture([_tone_frame(800), _tone_frame(800)])
+    driver = _ScriptedDriver()
+    store = UserStore(root=tmp_path)
+    track = _track()
+
+    process_replay_queue(
+        queue=[track],
+        track_duration_s=lambda t: 0.05,
+        capture=capture,
+        driver=driver,
+        store=store,
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        max_window_s=0.05,
+    )
+
+    assert not replay_ledger_path(store).exists()
 
 
 def test_run_replay_capture_play_failure_is_journaled_as_play_failed(tmp_path) -> None:

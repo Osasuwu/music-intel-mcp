@@ -72,6 +72,20 @@ class ReplayJournalEntry(BaseModel):
     reason: str | None = None
 
 
+class ReplayLedgerEntry(BaseModel):
+    """One JSONL line per replay-loop invocation (#167 AC1) — a coarser,
+    per-session window distinct from :class:`ReplayJournalEntry`'s per-track
+    granularity. The ESH importer (#167 AC2) reads these windows to tag
+    export rows falling inside one as agent-originated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account: str
+    data_root: str
+    started_at: str
+    ended_at: str
+
+
 @dataclass(frozen=True)
 class ReplayCaptureOutcome:
     track_id: str
@@ -110,6 +124,16 @@ def summarize_replay_journal(path: Path) -> dict[str, int]:
 
 def replay_journal_path(store: UserStore) -> Path:
     return store.root / "replay_journal.jsonl"
+
+
+def replay_ledger_path(store: UserStore) -> Path:
+    return store.root / "replay_ledger.jsonl"
+
+
+def append_replay_ledger_entry(path: Path, entry: ReplayLedgerEntry) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(entry.model_dump_json() + "\n")
 
 
 def _journal(
@@ -247,13 +271,21 @@ def process_replay_queue(
     journal_path: Path | None = None,
     requeue_limit: int = 1,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    account: str | None = None,
+    ledger_path: Path | None = None,
     **run_kwargs,
 ) -> list[ReplayCaptureOutcome]:
     """Drive ``queue`` (mutable, drained in place -- mirrors the CLI's
     existing ``_cmd_automated_playback`` requeue-via-append idiom) through
-    :func:`run_replay_capture`, re-queuing a silent/short track once (AC3)."""
+    :func:`run_replay_capture`, re-queuing a silent/short track once (AC3).
+
+    When ``ledger_path`` is given, the whole invocation's wall-clock span is
+    appended as one window to the replay-window ledger (#167 AC1) -- coarser
+    than the per-track journal, and appended (never overwritten) so windows
+    survive restarts across separate process invocations."""
     results: list[ReplayCaptureOutcome] = []
     requeue_counts: dict[str, int] = {}
+    loop_started_at = now()
 
     while queue:
         track = queue.pop(0)
@@ -285,5 +317,17 @@ def process_replay_queue(
                     ended_at=ts,
                     reason=outcome.outcome,
                 )
+
+    if ledger_path is not None:
+        loop_ended_at = now()
+        append_replay_ledger_entry(
+            ledger_path,
+            ReplayLedgerEntry(
+                account=account or "",
+                data_root=str(store.root),
+                started_at=loop_started_at.isoformat(),
+                ended_at=loop_ended_at.isoformat(),
+            ),
+        )
 
     return results

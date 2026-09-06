@@ -35,12 +35,16 @@ local-wall-clock conversion for temporal day-part/season buckets is deferred to
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .automated_playback import AUTOMATED_PLAYBACK_SOURCE
 from .ingest import dedup_events
 from .models import ListenEvent, PlayContext, TrackRef
+
+LedgerWindows = Sequence[tuple[datetime, datetime]]
 
 SOURCE = "spotify_extended"
 # import-spotify rebuilds history from scratch for these sources only — a Spotify
@@ -68,6 +72,7 @@ class SpotifyExtendedStats:
     skipped_no_identity: int = 0
     skipped_unparseable: int = 0
     unparseable_samples: list[str] = field(default_factory=list)
+    tagged_agent_originated: int = 0
 
     def _note_unparseable(self, raw: str) -> None:
         self.skipped_unparseable += 1
@@ -105,13 +110,27 @@ def _str(value: object) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _row_to_event(row: dict, stats: SpotifyExtendedStats) -> ListenEvent | None:
+def _in_any_window(played_at: datetime, ledger_windows: LedgerWindows | None) -> bool:
+    if not ledger_windows:
+        return False
+    return any(start <= played_at <= end for start, end in ledger_windows)
+
+
+def _row_to_event(
+    row: dict, stats: SpotifyExtendedStats, ledger_windows: LedgerWindows | None = None
+) -> ListenEvent | None:
     """Map one export row to a ``ListenEvent``; return ``None`` (and tally the
     reason on ``stats``) to skip it.
 
     Skipped: podcast/video episode rows, audiobook rows (non-audio-track types),
     rows carrying neither a track uri nor a track name (no identity), and rows
     whose ``ts`` does not parse (unplaceable in time — never fabricated).
+
+    A row whose ``played_at`` falls inside a replay-window ledger window (#167
+    AC1/AC2) is **not dropped** -- it stays imported, only its ``source`` is
+    overridden to :data:`AUTOMATED_PLAYBACK_SOURCE` so ``analyze()``'s default
+    exclusion (#129) ignores it, and the tag is counted (never silent, same
+    stance as the drop counts above).
     """
     if _str(row.get("spotify_episode_uri")):
         stats.skipped_episode += 1
@@ -137,10 +156,14 @@ def _row_to_event(row: dict, stats: SpotifyExtendedStats) -> ListenEvent | None:
         track_uri[len(_TRACK_URI_PREFIX) :] if track_uri.startswith(_TRACK_URI_PREFIX) else None
     )
     ms_played = row.get("ms_played")
+    source = SOURCE
+    if _in_any_window(played_at, ledger_windows):
+        source = AUTOMATED_PLAYBACK_SOURCE
+        stats.tagged_agent_originated += 1
     return ListenEvent(
         track=TrackRef(spotify_id=spotify_id or None, name=name, artist=artist),
         played_at=played_at,
-        source=SOURCE,
+        source=source,
         context=PlayContext(
             ms_played=ms_played if isinstance(ms_played, int) else None,
             skipped=row.get("skipped"),
@@ -151,14 +174,18 @@ def _row_to_event(row: dict, stats: SpotifyExtendedStats) -> ListenEvent | None:
 
 
 def load_spotify_extended_file(
-    path: str | Path, *, stats: SpotifyExtendedStats | None = None
+    path: str | Path,
+    *,
+    stats: SpotifyExtendedStats | None = None,
+    ledger_windows: LedgerWindows | None = None,
 ) -> list[ListenEvent]:
     """Convert every element of one ``Streaming_History_Audio_*.json`` array to a
     ``ListenEvent``. Pass a shared ``stats`` to accumulate skip counts across many
-    files."""
+    files. Pass ``ledger_windows`` (#167 AC2) to tag rows falling inside a replay
+    loop's window as agent-originated."""
     stats = stats if stats is not None else SpotifyExtendedStats()
     rows = json.loads(Path(path).read_text(encoding="utf-8"))
-    return [event for row in rows if (event := _row_to_event(row, stats))]
+    return [event for row in rows if (event := _row_to_event(row, stats, ledger_windows))]
 
 
 def load_spotify_extended_dir(
@@ -166,13 +193,42 @@ def load_spotify_extended_dir(
     *,
     pattern: str = _FILE_GLOB,
     stats: SpotifyExtendedStats | None = None,
+    ledger_windows: LedgerWindows | None = None,
 ) -> list[ListenEvent]:
     """Load and merge every audio-history JSON under ``directory`` into one
     deduped, time-sorted history. Idempotent: re-running yields the same list.
-    Pass a ``stats`` to receive skip counts across the whole directory."""
+    Pass a ``stats`` to receive skip counts across the whole directory. Pass
+    ``ledger_windows`` (#167 AC2) to tag rows falling inside a replay loop's
+    window as agent-originated."""
     root = Path(directory)
     stats = stats if stats is not None else SpotifyExtendedStats()
     events: list[ListenEvent] = []
     for jsonfile in sorted(root.glob(pattern)):
-        events.extend(load_spotify_extended_file(jsonfile, stats=stats))
+        events.extend(
+            load_spotify_extended_file(jsonfile, stats=stats, ledger_windows=ledger_windows)
+        )
     return dedup_events(events)
+
+
+def load_replay_ledger_windows(path: Path) -> list[tuple[datetime, datetime]]:
+    """Read back the replay-window ledger (#167 AC1, written by
+    :func:`~.replay_capture.append_replay_ledger_entry`) as plain
+    ``(start, end)`` datetime tuples for :func:`load_spotify_extended_dir` --
+    deliberately not importing :class:`~.replay_capture.ReplayLedgerEntry`'s
+    pydantic schema here, to keep this importer decoupled from the replay
+    module's internals."""
+    if not path.exists():
+        return []
+    windows: list[tuple[datetime, datetime]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        windows.append(
+            (
+                datetime.fromisoformat(entry["started_at"]),
+                datetime.fromisoformat(entry["ended_at"]),
+            )
+        )
+    return windows
