@@ -65,9 +65,12 @@ def test_honest_empty_profile_is_valid():
     assert profile.tendencies == []
     assert profile.epochs == []
     assert profile.quality_log == []
-    # category_weights inert-default: audio/temporal/scene=1, others null
+    # category_weights inert-default: audio/temporal/scene=1, others null.
+    # timbre=0.5 (#162): half-trust default since no validator/floor system
+    # exists for it yet, unlike audio/temporal/scene.
     assert profile.category_weights.audio == 1.0
-    assert profile.category_weights.timbre is None
+    assert profile.category_weights.timbre == 0.5
+    assert profile.category_weights.career_phase is None
 
 
 def test_root_requires_structural_descriptor_and_evidence():
@@ -86,6 +89,24 @@ def test_root_requires_structural_descriptor_and_evidence():
     )
     assert root.curator_prose is None
     assert root.caveats == []
+
+
+def test_root_category_accepts_timbre():
+    """#162 AC1: timbre is a valid Root category alongside audio/scene/temporal."""
+    root = Root(
+        id="r-timbre-1",
+        category="timbre",
+        classification="root",
+        structural_descriptor={"label": "Dark Electronic"},
+        evidence=Evidence(cluster_size=5, cluster_share=0.5, evidence_count=5, coverage=0.5),
+        validation_scores=ValidationScores(
+            confidence=0.7,
+            temporal_stability=TemporalStability(status="not_evaluated", score=None),
+            coverage_pass=True,
+            confidence_pass=True,
+        ),
+    )
+    assert root.category == "timbre"
 
 
 def test_track_ref_ids_all_optional_but_name_artist_required():

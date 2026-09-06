@@ -23,7 +23,7 @@
     "audio": 1.0,
     "temporal": 1.0,
     "scene": 1.0,
-    "timbre": null,
+    "timbre": 0.5,
     "career_phase": null,
     "lyrics": null,
     "structural": null,
