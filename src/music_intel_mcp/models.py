@@ -228,14 +228,18 @@ class GeneratedFrom(BaseModel):
 
 class CategoryWeights(BaseModel):
     """Per-category 0..1 driver weight. Inert in V0 (recorded, unused —
-    decision 7b3adb41). V0 default = {audio,temporal,scene}=1, others null."""
+    decision 7b3adb41). V0 default = {audio,temporal,scene}=1, others null.
+
+    ``timbre`` defaults to 0.5, not 1.0 or null (#162): unlike audio/scene/
+    temporal it has no confidence/coverage floor system or ``Validator`` yet,
+    so it is recorded as live but half-trusted until one exists."""
 
     model_config = ConfigDict(extra="forbid")
 
     audio: float | None = 1.0
     temporal: float | None = 1.0
     scene: float | None = 1.0
-    timbre: float | None = None
+    timbre: float | None = 0.5
     career_phase: float | None = None
     lyrics: float | None = None
     structural: float | None = None
@@ -276,7 +280,7 @@ class Root(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    category: Literal["audio", "scene", "temporal"]
+    category: Literal["audio", "scene", "temporal", "timbre"]
     classification: Literal["root", "tendency"]
     structural_descriptor: dict[str, Any]
     evidence: Evidence

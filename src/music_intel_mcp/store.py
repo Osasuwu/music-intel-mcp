@@ -366,6 +366,29 @@ class UserStore:
         records.sort(key=lambda r: r.track_id)
         return records
 
+    def list_pool_audio_analyses(self) -> list[AudioAnalysisRecord]:
+        """Read every persisted record from the node-level pool (#161), for
+        #162's pool ∩ participant-history timbre derivation. Mirrors
+        ``list_audio_analyses`` but reads ``pool_audio_analysis_dir`` instead
+        of the participant root. No pool configured, or pool dir not yet
+        created -> empty list (honest-empty), same idiom as the root reader."""
+        pool_dir = self.pool_audio_analysis_dir
+        if pool_dir is None or not pool_dir.exists():
+            return []
+        records: list[AudioAnalysisRecord] = []
+        for path in pool_dir.glob("*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            records.append(
+                AudioAnalysisRecord(
+                    track_id=payload["track_id"],
+                    embedding=[float(x) for x in payload["embedding"]],
+                    tags={k: float(v) for k, v in payload.get("tags", {}).items()},
+                    provenance=payload.get("provenance"),
+                )
+            )
+        records.sort(key=lambda r: r.track_id)
+        return records
+
     # --- automated playback consent (#128 AC1/AC3) ------------------------ #
 
     @property

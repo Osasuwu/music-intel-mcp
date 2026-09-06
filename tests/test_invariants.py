@@ -191,11 +191,12 @@ def test_category_weights_are_inert_regardless_of_derivation():
 
     # identical whether or not roots were produced → recorded, not used.
     assert empty.category_weights == derived.category_weights
-    # and equal to the locked V0 default (active categories 1.0, rest inert).
+    # and equal to the locked V0 default (active categories 1.0, timbre half-
+    # trusted at 0.5 pending a floor system (#162), rest inert).
     assert derived.category_weights.audio == 1.0
     assert derived.category_weights.temporal == 1.0
     assert derived.category_weights.scene == 1.0
-    assert derived.category_weights.timbre is None
+    assert derived.category_weights.timbre == 0.5
     assert derived.category_weights.career_phase is None
     # matches the committed schema example exactly.
     assert derived.category_weights.model_dump() == _example()["category_weights"]
