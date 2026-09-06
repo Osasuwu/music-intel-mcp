@@ -412,6 +412,73 @@ def test_has_audio_analysis_pool_hit_ignores_file_mtime(tmp_path):
     assert store.has_audio_analysis("mbid-old") is True
 
 
+# #140 AC1: raw chromaprint arrays live in a sidecar directory beside
+# whichever audio_analysis/ the record actually landed in (root or pool) --
+# never inside the AudioAnalysisRecord/pool-record schema itself
+# (CONTEXT.md "Post-CRITIC refinements" -- #161's exact schema stays untouched).
+def test_write_fingerprint_writes_sidecar_under_local_root(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.write_fingerprint(track_id="mbid-1", fingerprint=[1, 2, 3], duration_s=12.0)
+
+    assert path.exists()
+    assert path.is_relative_to(tmp_path)
+    assert path.parent.name == "fingerprints"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {"track_id": "mbid-1", "fingerprint": [1, 2, 3], "duration_s": 12.0}
+
+
+def test_write_fingerprint_sanitizes_track_id(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.write_fingerprint(track_id="mbid:abc/def", fingerprint=[1], duration_s=1.0)
+
+    assert "/" not in path.name
+
+
+def test_read_fingerprint_round_trips(tmp_path):
+    store = UserStore(root=tmp_path)
+    store.write_fingerprint(track_id="mbid-1", fingerprint=[1, 2, 3], duration_s=12.0)
+
+    assert store.read_fingerprint("mbid-1") == [1, 2, 3]
+
+
+def test_read_fingerprint_missing_returns_none(tmp_path):
+    store = UserStore(root=tmp_path)
+    assert store.read_fingerprint("mbid-missing") is None
+
+
+def test_write_fingerprint_first_write_wins_on_duplicate_track_id(tmp_path):
+    store = UserStore(root=tmp_path)
+    first = store.write_fingerprint(track_id="mbid-dup", fingerprint=[1], duration_s=1.0)
+    second = store.write_fingerprint(track_id="mbid-dup", fingerprint=[9, 9], duration_s=9.0)
+
+    assert first == second
+    assert store.read_fingerprint("mbid-dup") == [1]
+
+
+# #140: with a pool configured, the fingerprint sidecar follows the analysis
+# to the pool -- never the (transient) participant root -- mirroring
+# write_audio_analysis's #161 AC2 pool-exclusive-write behavior.
+def test_write_fingerprint_with_pool_never_touches_participant_root(tmp_path):
+    participant_root = tmp_path / "participant"
+    pool_root = tmp_path / "pool"
+    store = UserStore(root=participant_root, pool_root=pool_root)
+
+    store.write_fingerprint(track_id="mbid-1", fingerprint=[1, 2], duration_s=5.0)
+
+    assert (pool_root / "fingerprints" / "mbid-1.json").exists()
+    assert not (participant_root / "fingerprints").exists()
+
+
+def test_read_fingerprint_consults_pool_first_across_participants(tmp_path):
+    pool_root = tmp_path / "pool"
+    store_a = UserStore(root=tmp_path / "participant-a", pool_root=pool_root)
+    store_b = UserStore(root=tmp_path / "participant-b", pool_root=pool_root)
+
+    store_a.write_fingerprint(track_id="mbid-shared", fingerprint=[7], duration_s=3.0)
+
+    assert store_b.read_fingerprint("mbid-shared") == [7]
+
+
 # #128 AC1: automated-playback mode is off by default; enabling it requires an
 # explicit, separately-recorded consent action distinct from #127's
 # MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED env-var opt-in.
@@ -478,3 +545,100 @@ def test_automated_playback_consent_is_independent_of_backfill_playlist_opt_in(
     # unrelated #127 env flag must not itself grant automated-playback consent.
     monkeypatch.setenv("MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED", "true")
     assert UserStore(root=tmp_path).has_automated_playback_consent() is False
+
+
+# --- #140 AC5: resolve_key / has_audio_analysis alias-awareness --------- #
+# Narrowed scope (decision ce94e03c-acf1-4533-99cf-2fbbca36b3c4): resolve_key
+# is wired only into has_audio_analysis for this issue -- the replay queue
+# selector and pool-history intersection are deferred.
+
+
+def _write_alias_line(
+    path, *, loser: str, winner: str, tier: str = "fingerprint+embedding"
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"loser": loser, "winner": winner, "tier": tier}) + "\n")
+
+
+def test_resolve_key_returns_key_unchanged_when_no_alias():
+    from music_intel_mcp.store import resolve_key
+
+    assert resolve_key("spotify:solo", pool_aliases={}, root_aliases={}) == "spotify:solo"
+
+
+def test_resolve_key_follows_root_alias_chain():
+    from music_intel_mcp.store import resolve_key
+
+    root_aliases = {"name:dup|artist": "spotify:dup"}
+    resolved = resolve_key("name:dup|artist", pool_aliases={}, root_aliases=root_aliases)
+    assert resolved == "spotify:dup"
+
+
+def test_resolve_key_pool_alias_takes_precedence_over_root_alias():
+    from music_intel_mcp.store import resolve_key
+
+    pool_aliases = {"name:dup|artist": "mbid:pool-winner"}
+    root_aliases = {"name:dup|artist": "spotify:root-winner"}
+    resolved = resolve_key("name:dup|artist", pool_aliases=pool_aliases, root_aliases=root_aliases)
+    assert resolved == "mbid:pool-winner"
+
+
+def test_resolve_key_guards_against_cycles():
+    from music_intel_mcp.store import resolve_key
+
+    root_aliases = {"a": "b", "b": "a"}
+    # Must terminate and return one of the chain's keys, not loop forever.
+    assert resolve_key("a", pool_aliases={}, root_aliases=root_aliases) in {"a", "b"}
+
+
+def test_resolve_key_cycle_guard_stops_at_first_revisit_not_just_max_chain():
+    """A 3-key cycle discriminates the seen-set guard from bare max_chain
+    exhaustion: stopping on the first revisited key lands on "c" here, while
+    merely looping until max_chain runs out (parity of 64 hops mod 3) would
+    land on "b" instead."""
+    from music_intel_mcp.store import resolve_key
+
+    root_aliases = {"a": "b", "b": "c", "c": "a"}
+    assert resolve_key("a", pool_aliases={}, root_aliases=root_aliases) == "c"
+
+
+def test_load_aliases_missing_file_is_empty(tmp_path):
+    from music_intel_mcp.store import load_aliases
+
+    assert load_aliases(tmp_path / "aliases.jsonl") == {}
+
+
+def test_load_aliases_reads_loser_to_winner_map(tmp_path):
+    from music_intel_mcp.store import load_aliases
+
+    path = tmp_path / "aliases.jsonl"
+    _write_alias_line(path, loser="name:dup|artist", winner="spotify:dup")
+
+    assert load_aliases(path) == {"name:dup|artist": "spotify:dup"}
+
+
+def test_has_audio_analysis_true_for_aliased_loser_key(tmp_path):
+    """AC5: the loser side of a recorded alias counts as analysed even though
+    only the winner key has an audio_analysis sidecar on disk."""
+    store = UserStore(root=tmp_path)
+    store.write_audio_analysis(track_id="spotify:dup", embedding=[1.0, 0.0], tags={})
+    _write_alias_line(store.aliases_path, loser="name:dup|artist", winner="spotify:dup")
+
+    assert store.has_audio_analysis("name:dup|artist") is True
+
+
+def test_has_audio_analysis_pool_alias_resolves_across_participants(tmp_path):
+    pool_root = tmp_path / "pool"
+    store = UserStore(root=tmp_path / "participant", pool_root=pool_root)
+    store.write_audio_analysis(track_id="spotify:dup", embedding=[1.0, 0.0], tags={})
+    _write_alias_line(store.pool_aliases_path, loser="name:dup|artist", winner="spotify:dup")
+
+    assert store.has_audio_analysis("name:dup|artist") is True
+
+
+def test_has_audio_analysis_false_when_alias_winner_never_analysed(tmp_path):
+    store = UserStore(root=tmp_path)
+    _write_alias_line(store.aliases_path, loser="name:dup|artist", winner="spotify:never-written")
+
+    assert store.has_audio_analysis("name:dup|artist") is False
