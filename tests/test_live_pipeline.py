@@ -185,6 +185,49 @@ def test_run_live_capture_spike_key_recognized_by_backfill_selector(tmp_path) ->
     assert selected == []
 
 
+def test_run_live_capture_spike_name_level_key_uses_normalized_name(tmp_path) -> None:
+    """#158 AC1 must not regress the #139 AC4 normalization invariant
+    (CONTEXT.md 'Normalization (AC4)'): when the waterfall bottoms out at the
+    name rung, the stored key has to be built from the *normalized* name_key
+    (feat./official-video/lyrics/remaster noise stripped), not the raw OS
+    media-session title -- otherwise two plays of the same track with a
+    cosmetically different title (e.g. an "(Official Video)" suffix) get
+    different keys and are re-analyzed instead of deduped."""
+    store = UserStore(root=tmp_path)
+    live_resolver = LiveIdentityResolver()  # no sources -> always bottoms out at name key
+
+    first = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=InMemoryNowPlayingSource(
+            NowPlayingInfo(title="Strobe (Official Video)", artist="deadmau5", app_id="Spotify.exe")
+        ),
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+    assert first is not None
+    assert first.skipped is False
+
+    second = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=InMemoryNowPlayingSource(
+            NowPlayingInfo(title="Strobe", artist="deadmau5", app_id="Spotify.exe")
+        ),
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+    assert second is not None
+    assert second.skipped is True
+    assert second.analysis_path == first.analysis_path
+
+
 def test_run_live_capture_spike_none_when_nothing_playing(tmp_path) -> None:
     result = run_live_capture_spike(
         duration_s=0.1,

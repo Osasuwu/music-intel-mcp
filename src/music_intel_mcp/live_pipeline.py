@@ -101,14 +101,25 @@ def run_live_capture_spike(
     # TrackRef shape the backfill/history paths use and derive the key via
     # canonical_track_id, so a live-captured key and a batch-computed key for
     # the same identity are always identical.
-    track_ref = TrackRef(
-        spotify_id=identity.spotify_id,
-        isrc=identity.isrc,
-        mbid=identity.mbid,
-        name=identity.name,
-        artist=identity.artist,
-    )
-    track_id = canonical_track_id(track_ref)
+    #
+    # Exception: a name-only resolution (``identity.name_key`` set) must keep
+    # using the live waterfall's *normalized* name key, not canonical_track_id's
+    # plain-casefold name rung over the raw OS media-session title —
+    # canonical_track_id() doesn't strip feat./"(Official Video)"/remaster
+    # noise the way normalize_track_name() does (CONTEXT.md "Normalization
+    # (AC4)"), so re-deriving through TrackRef would silently re-fragment
+    # cosmetically-different titles of the same recording.
+    if identity.name_key is not None:
+        track_id = f"name:{identity.name_key}"
+    else:
+        track_ref = TrackRef(
+            spotify_id=identity.spotify_id,
+            isrc=identity.isrc,
+            mbid=identity.mbid,
+            name=identity.name,
+            artist=identity.artist,
+        )
+        track_id = canonical_track_id(track_ref)
 
     # #126 AC1/AC4: dedup purely off the identity waterfall + local store — an
     # already-analyzed track is skipped, no re-inference (the expensive step).
