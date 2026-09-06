@@ -111,6 +111,7 @@ from .spotify_extended import (
 )
 from .spotify_extended import (
     SpotifyExtendedStats,
+    load_replay_ledger_windows,
     load_spotify_extended_dir,
 )
 from .store import UserStore
@@ -283,7 +284,12 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
     store = UserStore(root=args.data_dir)
     before = store.load_history()
     stats = SpotifyExtendedStats()
-    imported = load_spotify_extended_dir(args.source, stats=stats)
+    # #167 AC2: rows falling inside a replay-loop window are tagged
+    # agent-originated (not dropped) rather than imported as organic history.
+    from .replay_capture import replay_ledger_path
+
+    ledger_windows = load_replay_ledger_windows(replay_ledger_path(store))
+    imported = load_spotify_extended_dir(args.source, stats=stats, ledger_windows=ledger_windows)
     # Source-scoped supersede (decision 23fcf92c): the authoritative Spotify export
     # replaces the thin IFTTT rows and any prior run of this importer — a play
     # logged by both is the *same* play — while events from every other source are
@@ -332,6 +338,10 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
         )
         if stats.unparseable_samples:
             print(f"    unparseable e.g.: {stats.unparseable_samples}")
+    if stats.tagged_agent_originated:
+        # #167 AC3: rows inside a replay-loop window (#167 AC1/AC2) were tagged
+        # agent-originated, not dropped -- surfaced separately from the skip counts.
+        print(f"  ledger-tagged {stats.tagged_agent_originated} rows as agent-originated")
     return 0
 
 
