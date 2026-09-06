@@ -192,6 +192,62 @@ def test_backfill_playlist_metadata_only_track_is_not_treated_as_analyzed(
     assert add_body["uris"] == ["spotify:track:fresh1"]
 
 
+def test_backfill_playlist_adds_by_spotify_id_even_when_isrc_known(tmp_path, capsys, monkeypatch):
+    # fetch_saved_track_refs now populates isrc from external_ids.isrc. The
+    # desired-ids list fed to the Spotify playlist-add call must still be
+    # spotify_id-based -- canonical_track_id(track) would prefer isrc: over
+    # spotify: (the identity waterfall, #158), and spotify_track_uri() raises
+    # on anything not spotify-prefixed. This is the regression the reviewer's
+    # cross-pipeline-dedup finding would introduce if desired_ids were built
+    # from canonical_track_id instead of the track's own spotify_id.
+    monkeypatch.setenv("MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED", "true")
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
+    _write_token(tmp_path)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://api.spotify.com/v1/me/tracks").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "track": {
+                                "id": "fresh1",
+                                "name": "Fresh",
+                                "artists": [{"name": "Artist"}],
+                                "album": {"name": "Album"},
+                                "external_ids": {"isrc": "US-ABC-12-34567"},
+                            }
+                        },
+                    ],
+                    "next": None,
+                },
+            )
+        )
+        router.get("https://api.spotify.com/v1/me").mock(
+            return_value=httpx.Response(200, json={"id": "the_user"})
+        )
+        router.get("https://api.spotify.com/v1/me/playlists").mock(
+            return_value=httpx.Response(
+                200,
+                json={"items": [{"id": "pl1", "name": "music-intel: to-analyze"}], "next": None},
+            )
+        )
+        router.get("https://api.spotify.com/v1/playlists/pl1/tracks").mock(
+            return_value=httpx.Response(200, json={"items": [], "next": None})
+        )
+        add_route = router.post("https://api.spotify.com/v1/playlists/pl1/tracks").mock(
+            return_value=httpx.Response(201, json={})
+        )
+
+        rc = main(["backfill-playlist", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    assert add_route.called
+    add_body = json.loads(add_route.calls[0].request.content)
+    assert add_body["uris"] == ["spotify:track:fresh1"]
+
+
 def test_backfill_playlist_loop_runs_until_stopped(tmp_path, capsys, monkeypatch):
     # AC2's daily-cadence half: --loop wires run_continuous_backfill in so a
     # single invocation keeps refreshing instead of running once and exiting.
