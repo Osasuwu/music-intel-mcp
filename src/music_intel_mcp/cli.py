@@ -974,11 +974,18 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
 
     store = UserStore(root=args.data_dir)
     events = store.load_history()
+    # History-import TrackRefs never carry mbid/isrc (only spotify_id/youtube_id/
+    # name+artist), while has_audio_analysis is keyed on the mbid-prefixed id the
+    # live capture pipeline resolved to -- bridge via the same resolve_mbid seam
+    # PR #177 used for select_backfill_tracks, reusing the existing _build_resolver
+    # helper (no live Spotify calls: no spotify_source is wired here).
+    resolver = _build_resolver(args)
     stats = replay_queue_coverage(
         events,
         has_audio_analysis=store.has_audio_analysis,
         min_valid_plays=args.min_valid_plays,
         cap=args.cap,
+        resolve_mbid=lambda t: resolver.resolve(t).mbid,
     )
     print(
         f"replay queue: {stats.queued_count} tracks queued "
@@ -1486,6 +1493,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_REPLAY_QUEUE_CAP,
         help=f"max tracks in the stratified queue (default: {DEFAULT_REPLAY_QUEUE_CAP})",
+    )
+    p_replay_queue.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV, bridging a history-import candidate's "
+        "resolved ISRC to the MBID the live pipeline keys audio-analysis by, for "
+        "cross-pipeline dedup (default: $MUSICBRAINZ_ISRC_INDEX or "
+        "$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
     )
     p_replay_queue.set_defaults(func=_cmd_replay_queue)
 

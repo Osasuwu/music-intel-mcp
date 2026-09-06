@@ -81,6 +81,44 @@ def test_track_already_analyzed_on_the_slice0_key_is_excluded():
     assert queue == []
 
 
+def test_history_import_track_resolved_to_an_analyzed_mbid_is_excluded():
+    # History-import TrackRefs (spotify_extended/ingest/youtube_music) never
+    # carry mbid/isrc -- only spotify_id/youtube_id/name+artist -- so their
+    # canonical id bottoms out at "spotify:<id>", while has_audio_analysis is
+    # keyed on the mbid-prefixed id the live/AcoustID capture pipeline wrote
+    # the analysis file under. Without the resolve_mbid bridge (mirroring
+    # backfill_playlist.select_backfill_tracks, #177) this track would never
+    # be recognized as already analyzed.
+    track = _track("History Import Track", spotify_id="s5")
+    assert canonical_track_id(track) == "spotify:s5"
+    events = [
+        _event(track, played_at=f"2026-01-0{i}T00:00:00Z", ms_played=180_000) for i in range(1, 4)
+    ]
+
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=lambda cid: cid == "mbid:mb-999",
+        resolve_mbid=lambda t: "mb-999" if t.spotify_id == "s5" else None,
+    )
+
+    assert queue == []
+
+
+def test_history_import_track_resolved_to_an_unanalyzed_mbid_is_still_queued():
+    track = _track("Not Yet Analyzed", spotify_id="s6")
+    events = [
+        _event(track, played_at=f"2026-01-0{i}T00:00:00Z", ms_played=180_000) for i in range(1, 4)
+    ]
+
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=lambda cid: cid == "mbid:mb-999",
+        resolve_mbid=lambda t: "mb-other",
+    )
+
+    assert queue == [track]
+
+
 # --- AC3: artist/year stratification with a cap --------------------------- #
 
 
@@ -152,3 +190,20 @@ def test_coverage_counts_valid_play_share_not_track_share():
     assert stats.queued_count == 1
     # 6 valid plays covered (queued + analyzed, 3 each) out of 8 total valid plays
     assert stats.valid_play_coverage == 6 / 8
+
+
+def test_coverage_counts_a_history_import_track_via_resolve_mbid_bridge():
+    # Same identity-mismatch gap as the queue-selection bridge tests above,
+    # but for the AC5.1 coverage stat's already_analyzed_count/coverage share.
+    analyzed_track = _track("History Analyzed", artist="Artist D", spotify_id="d2")
+    events = _eligible_events(analyzed_track, year=2020)
+
+    stats = replay_queue_coverage(
+        events,
+        has_audio_analysis=lambda cid: cid == "mbid:mb-888",
+        resolve_mbid=lambda t: "mb-888" if t.spotify_id == "d2" else None,
+    )
+
+    assert stats.already_analyzed_count == 1
+    assert stats.queued_count == 0
+    assert stats.valid_play_coverage == 1.0

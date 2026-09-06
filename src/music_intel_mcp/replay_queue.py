@@ -33,17 +33,6 @@ MIN_VALID_PLAYS = 3
 DEFAULT_REPLAY_QUEUE_CAP = 200
 
 
-def valid_play_counts(events: Iterable[ListenEvent]) -> dict[str, int]:
-    """Count of *valid* (``_is_valid``) plays per canonical track key."""
-    counts: dict[str, int] = {}
-    for event in events:
-        if not _is_valid(event.context):
-            continue
-        cid = canonical_track_id(event.track)
-        counts[cid] = counts.get(cid, 0) + 1
-    return counts
-
-
 @dataclass(frozen=True)
 class _Candidate:
     cid: str
@@ -52,12 +41,12 @@ class _Candidate:
     year: int
 
 
-def _candidates(
-    events: list[ListenEvent],
-    *,
-    min_valid_plays: int,
-    has_audio_analysis: Callable[[str], bool],
-) -> list[_Candidate]:
+def _index_events(
+    events: Iterable[ListenEvent],
+) -> tuple[dict[str, int], dict[str, TrackRef], dict[str, int]]:
+    """Valid-play counts, one representative ``TrackRef``, and earliest valid-
+    play year -- all keyed by canonical id. Shared by ``_candidates`` and
+    ``replay_queue_coverage`` so both see the same grouping."""
     counts: dict[str, int] = {}
     reps: dict[str, TrackRef] = {}
     earliest_year: dict[str, int] = {}
@@ -70,15 +59,48 @@ def _candidates(
         year = event.played_at.year
         if cid not in earliest_year or year < earliest_year[cid]:
             earliest_year[cid] = year
+    return counts, reps, earliest_year
+
+
+def _analysis_key(
+    track: TrackRef, cid: str, resolve_mbid: Callable[[TrackRef], str | None] | None
+) -> str:
+    """The key to check ``has_audio_analysis`` against.
+
+    History-import ``TrackRef``s (``spotify_extended.py``/``ingest.py``/
+    ``youtube_music.py``) never carry ``mbid``/``isrc``, so their canonical id
+    is ``spotify:<id>``/``youtube:<id>``/a name key -- while the live/AcoustID
+    capture pipeline writes audio-analysis files keyed by the *resolved*
+    ``mbid:<id>``. Without a bridge, a track analyzed via live capture is
+    never recognized as "already analyzed" when it later shows up in
+    ``history.jsonl`` (the same mismatch class PR #177 fixed for
+    ``backfill_playlist.select_backfill_tracks`` via its ``resolve_mbid``
+    param). ``resolve_mbid`` is that same bridge, reused here: when it
+    resolves an MBID for ``track``, the analysis check uses ``mbid:<id>``
+    instead of the raw canonical id; otherwise falls back to ``cid``
+    unchanged (an absent/``None`` ``resolve_mbid`` is a no-op)."""
+    mbid = resolve_mbid(track) if resolve_mbid else None
+    return f"mbid:{mbid}" if mbid else cid
+
+
+def _candidates(
+    events: list[ListenEvent],
+    *,
+    min_valid_plays: int,
+    has_audio_analysis: Callable[[str], bool],
+    resolve_mbid: Callable[[TrackRef], str | None] | None = None,
+) -> list[_Candidate]:
+    counts, reps, earliest_year = _index_events(events)
 
     candidates: list[_Candidate] = []
     for cid, count in counts.items():
         if count < min_valid_plays:
             continue
-        if has_audio_analysis(cid):
+        track = reps[cid]
+        if has_audio_analysis(_analysis_key(track, cid, resolve_mbid)):
             continue
         candidates.append(
-            _Candidate(cid=cid, track=reps[cid], valid_plays=count, year=earliest_year[cid])
+            _Candidate(cid=cid, track=track, valid_plays=count, year=earliest_year[cid])
         )
     return candidates
 
@@ -113,12 +135,18 @@ def select_replay_queue(
     has_audio_analysis: Callable[[str], bool],
     min_valid_plays: int = MIN_VALID_PLAYS,
     cap: int = DEFAULT_REPLAY_QUEUE_CAP,
+    resolve_mbid: Callable[[TrackRef], str | None] | None = None,
 ) -> list[TrackRef]:
     """The pilot replay queue: >=``min_valid_plays`` valid plays on the
     canonical key, minus tracks already analyzed (pool or root), stratified
-    by artist/year-proxy and capped at ``cap`` (#163)."""
+    by artist/year-proxy and capped at ``cap`` (#163). ``resolve_mbid`` bridges
+    history-import tracks (see ``_analysis_key``) to the mbid-keyed analysis
+    store when supplied."""
     candidates = _candidates(
-        list(events), min_valid_plays=min_valid_plays, has_audio_analysis=has_audio_analysis
+        list(events),
+        min_valid_plays=min_valid_plays,
+        has_audio_analysis=has_audio_analysis,
+        resolve_mbid=resolve_mbid,
     )
     selected = _stratify_and_cap(candidates, cap=cap)
     return [candidate.track for candidate in selected]
@@ -142,15 +170,24 @@ def replay_queue_coverage(
     has_audio_analysis: Callable[[str], bool],
     min_valid_plays: int = MIN_VALID_PLAYS,
     cap: int = DEFAULT_REPLAY_QUEUE_CAP,
+    resolve_mbid: Callable[[TrackRef], str | None] | None = None,
 ) -> ReplayQueueStats:
     events = list(events)
-    counts = valid_play_counts(events)
+    counts, reps, _earliest_year = _index_events(events)
     total_valid_plays = sum(counts.values())
 
     eligible_cids = {cid for cid, count in counts.items() if count >= min_valid_plays}
-    analyzed_cids = {cid for cid in eligible_cids if has_audio_analysis(cid)}
+    analyzed_cids = {
+        cid
+        for cid in eligible_cids
+        if has_audio_analysis(_analysis_key(reps[cid], cid, resolve_mbid))
+    }
     queue = select_replay_queue(
-        events, has_audio_analysis=has_audio_analysis, min_valid_plays=min_valid_plays, cap=cap
+        events,
+        has_audio_analysis=has_audio_analysis,
+        min_valid_plays=min_valid_plays,
+        cap=cap,
+        resolve_mbid=resolve_mbid,
     )
     queued_cids = {canonical_track_id(track) for track in queue}
 
