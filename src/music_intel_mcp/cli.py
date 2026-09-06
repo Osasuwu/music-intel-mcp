@@ -87,6 +87,7 @@ from .ingest import IngestStats, dedup_events, load_ifttt_dir
 from .live_identity import AcoustIdApiSource, LiveIdentityResolver, LiveNegativeCache
 from .live_pipeline import run_live_capture_spike
 from .mb_dump import build_artist_mbid_tsv, build_isrc_mbid_tsv
+from .replay_queue import DEFAULT_REPLAY_QUEUE_CAP, MIN_VALID_PLAYS
 from .scene import (
     CompositeTagSource,
     DiscogsStyleSource,
@@ -967,6 +968,33 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_replay_queue(args: argparse.Namespace) -> int:
+    from .replay_queue import replay_queue_coverage
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    events = store.load_history()
+    # History-import TrackRefs never carry mbid/isrc (only spotify_id/youtube_id/
+    # name+artist), while has_audio_analysis is keyed on the mbid-prefixed id the
+    # live capture pipeline resolved to -- bridge via the same resolve_mbid seam
+    # PR #177 used for select_backfill_tracks, reusing the existing _build_resolver
+    # helper (no live Spotify calls: no spotify_source is wired here).
+    resolver = _build_resolver(args)
+    stats = replay_queue_coverage(
+        events,
+        has_audio_analysis=store.has_audio_analysis,
+        min_valid_plays=args.min_valid_plays,
+        cap=args.cap,
+        resolve_mbid=lambda t: resolver.resolve(t).mbid,
+    )
+    print(
+        f"replay queue: {stats.queued_count} tracks queued "
+        f"({stats.eligible_track_count} eligible, {stats.already_analyzed_count} already analyzed)"
+    )
+    print(f"  valid-play coverage: {stats.valid_play_coverage:.1%}")
+    return 0
+
+
 def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
     from .store import UserStore
 
@@ -1441,6 +1469,40 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: $MUSICBRAINZ_ISRC_INDEX or $MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
     )
     p_backfill.set_defaults(func=_cmd_backfill_playlist)
+
+    p_replay_queue = sub.add_parser(
+        "replay-queue",
+        help="pilot slice 1 (#163): select+cap the replay-queue from local "
+        "history and print the AC5.1 valid-play coverage stat",
+    )
+    p_replay_queue.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_replay_queue.add_argument(
+        "--min-valid-plays",
+        dest="min_valid_plays",
+        type=int,
+        default=MIN_VALID_PLAYS,
+        help=f"valid plays (>=30s, AC1) a canonical key needs to be eligible "
+        f"(default: {MIN_VALID_PLAYS})",
+    )
+    p_replay_queue.add_argument(
+        "--cap",
+        type=int,
+        default=DEFAULT_REPLAY_QUEUE_CAP,
+        help=f"max tracks in the stratified queue (default: {DEFAULT_REPLAY_QUEUE_CAP})",
+    )
+    p_replay_queue.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV, bridging a history-import candidate's "
+        "resolved ISRC to the MBID the live pipeline keys audio-analysis by, for "
+        "cross-pipeline dedup (default: $MUSICBRAINZ_ISRC_INDEX or "
+        "$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
+    )
+    p_replay_queue.set_defaults(func=_cmd_replay_queue)
 
     p_login = sub.add_parser(
         "spotify-login",
