@@ -9,6 +9,10 @@ from music_intel_mcp.inference import (
     ClassifierResult,
     InMemoryClassifier,
     InMemoryEmbeddingModel,
+    ModelFileNotFoundError,
+    RssCeilingExceededError,
+    _resolve_model_path,
+    check_rss_ceiling,
     run_inference,
 )
 
@@ -37,3 +41,55 @@ def test_run_inference_produces_embedding_and_tags() -> None:
     assert result.tags["genre---electronic"] == pytest.approx(0.9)
     assert embedding_model.calls == 1
     assert classifier.calls == 1
+
+
+# #160 AC1: an explicit model_path that does not exist must fail loudly and
+# name both the missing path and how to configure it — previously this branch
+# of _resolve_model_path had no existence check at all (silent fallback risk).
+def test_resolve_model_path_raises_when_explicit_path_missing(tmp_path) -> None:
+    missing = tmp_path / "does-not-exist.onnx"
+
+    with pytest.raises(ModelFileNotFoundError) as exc_info:
+        _resolve_model_path(missing, "SOME_MODEL_PATH_ENV")
+
+    message = str(exc_info.value)
+    assert str(missing) in message
+    assert "SOME_MODEL_PATH_ENV" in message
+
+
+def test_resolve_model_path_raises_when_env_path_missing(monkeypatch, tmp_path) -> None:
+    missing = tmp_path / "does-not-exist.onnx"
+    monkeypatch.setenv("SOME_MODEL_PATH_ENV", str(missing))
+
+    with pytest.raises(ModelFileNotFoundError) as exc_info:
+        _resolve_model_path(None, "SOME_MODEL_PATH_ENV")
+
+    message = str(exc_info.value)
+    assert str(missing) in message
+    assert "SOME_MODEL_PATH_ENV" in message
+
+
+def test_resolve_model_path_raises_when_unconfigured_and_no_default(monkeypatch) -> None:
+    monkeypatch.delenv("SOME_MODEL_PATH_ENV", raising=False)
+
+    with pytest.raises(ModelFileNotFoundError) as exc_info:
+        _resolve_model_path(None, "SOME_MODEL_PATH_ENV")
+
+    assert "SOME_MODEL_PATH_ENV" in str(exc_info.value)
+
+
+# #160 AC2: a configurable RSS ceiling checked after each inference — exceeding
+# it must raise a specific, catchable error so the capture loop can stop and
+# journal the reason. Testable via an injectable rss_reader (this codebase's
+# Protocol+fake DI idiom), not by monkeypatching psutil internals.
+def test_check_rss_ceiling_raises_when_reader_exceeds_ceiling() -> None:
+    with pytest.raises(RssCeilingExceededError) as exc_info:
+        check_rss_ceiling(ceiling_mb=100.0, rss_reader=lambda: 250.0)
+
+    message = str(exc_info.value)
+    assert "250" in message
+    assert "100" in message
+
+
+def test_check_rss_ceiling_does_not_raise_when_under_ceiling() -> None:
+    check_rss_ceiling(ceiling_mb=100.0, rss_reader=lambda: 50.0)
