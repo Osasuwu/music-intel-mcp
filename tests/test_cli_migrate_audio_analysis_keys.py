@@ -41,3 +41,24 @@ def test_migrate_audio_analysis_keys_reports_conflicts_in_output(tmp_path, capsy
     assert "migrated 0" in out
     assert "conflicts 1" in out
     assert bare in out
+
+
+def test_migrate_audio_analysis_keys_reports_unclassifiable_distinctly(tmp_path, capsys):
+    """An entry that can't be format-classified and has no usable provenance
+    (raw_title/raw_artist) is not a naming *conflict* -- nothing else claims
+    that target key. Reporting it as "target already exists" would mislead an
+    operator into thinking a collision happened when the real issue is
+    unrecoverable provenance."""
+    store = UserStore(root=tmp_path)
+    bare = "totally-unclassifiable-bare-id"
+    store.write_audio_analysis(track_id=bare, embedding=[0.1], tags={})
+
+    rc = main(["migrate-audio-analysis-keys", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "migrated 0" in out
+    assert "conflicts 1" in out
+    assert "target already exists" not in out
+    assert "unclassifiable" in out
+    assert bare in out

@@ -938,7 +938,13 @@ def _cmd_migrate_audio_analysis_keys(args: argparse.Namespace) -> int:
     print(f"migrated {len(report.migrated)}")
     print(f"conflicts {len(report.conflicts)}")
     for old_id, new_id in report.conflicts:
-        print(f"  conflict: {old_id} -> {new_id} (target already exists, left untouched)")
+        if new_id == "<unclassifiable>":
+            print(
+                f"  conflict: {old_id} -> {new_id} "
+                "(no MBID/ISRC/Spotify format match and no usable provenance, left untouched)"
+            )
+        else:
+            print(f"  conflict: {old_id} -> {new_id} (target already exists, left untouched)")
     return 0
 
 
