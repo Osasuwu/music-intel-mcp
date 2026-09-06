@@ -12,7 +12,11 @@ import subprocess
 import numpy as np
 import pytest
 
-from music_intel_mcp.chromaprint_fpcalc import FpcalcNotFoundError, compute_fingerprint
+from music_intel_mcp.chromaprint_fpcalc import (
+    FpcalcNotFoundError,
+    compute_fingerprint,
+    compute_raw_fingerprint,
+)
 
 
 def _sine_pcm(seconds: float = 1.0, sample_rate: int = 44100) -> np.ndarray:
@@ -72,3 +76,61 @@ def test_compute_fingerprint_raises_on_unparseable_output(monkeypatch):
 
     with pytest.raises(RuntimeError, match="unparseable"):
         compute_fingerprint(_sine_pcm(), 44100)
+
+
+def test_compute_raw_fingerprint_parses_fpcalc_raw_json(monkeypatch):
+    """AC1: the raw uint32 array is fetched with a *second*, separate fpcalc
+    invocation (``-raw -json``), never reused from the compressed-string call
+    (#140 CONTEXT.md "Offline fingerprint comparison" — evidence-only, never
+    identity, so it must not share the AcoustID-facing compressed encoding)."""
+    monkeypatch.setattr(
+        "music_intel_mcp.chromaprint_fpcalc.shutil.which", lambda _name: "/usr/bin/fpcalc"
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[0] == "fpcalc"
+        assert cmd[1] == "-raw"
+        assert cmd[2] == "-json"
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout='{"duration": 12, "fingerprint": [1, 2, 3, 4]}', stderr=""
+        )
+
+    monkeypatch.setattr("music_intel_mcp.chromaprint_fpcalc.subprocess.run", fake_run)
+
+    fingerprint, duration = compute_raw_fingerprint(_sine_pcm(), 44100)
+
+    assert fingerprint == [1, 2, 3, 4]
+    assert duration == 12.0
+
+
+def test_compute_raw_fingerprint_raises_when_fpcalc_missing(monkeypatch):
+    monkeypatch.setattr("music_intel_mcp.chromaprint_fpcalc.shutil.which", lambda _name: None)
+
+    with pytest.raises(FpcalcNotFoundError):
+        compute_raw_fingerprint(_sine_pcm(), 44100)
+
+
+def test_compute_raw_fingerprint_raises_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(
+        "music_intel_mcp.chromaprint_fpcalc.shutil.which", lambda _name: "/usr/bin/fpcalc"
+    )
+    monkeypatch.setattr(
+        "music_intel_mcp.chromaprint_fpcalc.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom"),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        compute_raw_fingerprint(_sine_pcm(), 44100)
+
+
+def test_compute_raw_fingerprint_raises_on_unparseable_output(monkeypatch):
+    monkeypatch.setattr(
+        "music_intel_mcp.chromaprint_fpcalc.shutil.which", lambda _name: "/usr/bin/fpcalc"
+    )
+    monkeypatch.setattr(
+        "music_intel_mcp.chromaprint_fpcalc.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="not json", stderr=""),
+    )
+
+    with pytest.raises(RuntimeError, match="unparseable"):
+        compute_raw_fingerprint(_sine_pcm(), 44100)

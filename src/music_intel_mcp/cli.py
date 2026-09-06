@@ -1055,6 +1055,31 @@ def _cmd_purge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_near_dup_scan(args: argparse.Namespace) -> int:
+    from .near_dup import scan
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    json_path = scan(store)
+    print(f"wrote report {json_path}")
+    return 0
+
+
+def _cmd_near_dup_apply(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .near_dup import apply
+
+    aliases_path = apply(Path(args.report))
+    written = (
+        [line for line in aliases_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if aliases_path.exists()
+        else []
+    )
+    print(f"wrote {len(written)} alias(es) to {aliases_path}")
+    return 0
+
+
 def _cmd_automated_playback(args: argparse.Namespace) -> int:
     from .store import ConsentFormatError, UserStore
 
@@ -1652,6 +1677,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_migrate_keys.set_defaults(func=_cmd_migrate_audio_analysis_keys)
+
+    p_near_dup = sub.add_parser(
+        "near-dup",
+        help="offline embedding-space near-duplicate batch merge (#140)",
+    )
+    near_dup_sub = p_near_dup.add_subparsers(dest="near_dup_command", required=True)
+
+    p_near_dup_scan = near_dup_sub.add_parser(
+        "scan", help="scan one data root and write a transparent report (#140 AC2)"
+    )
+    p_near_dup_scan.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_near_dup_scan.set_defaults(func=_cmd_near_dup_scan)
+
+    p_near_dup_apply = near_dup_sub.add_parser(
+        "apply", help="apply a reviewed scan report, writing aliases.jsonl (#140 AC4)"
+    )
+    p_near_dup_apply.add_argument("report", help="path to a reviewed scan report JSON file")
+    p_near_dup_apply.set_defaults(func=_cmd_near_dup_apply)
+
     return parser
 
 

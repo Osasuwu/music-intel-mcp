@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from .capture import LoopbackSource, RingBufferSink
-from .chromaprint_fpcalc import compute_fingerprint
+from .chromaprint_fpcalc import compute_fingerprint, compute_raw_fingerprint
 from .inference import AudioEmbeddingModel, ClassifierModel, InferenceResult, run_inference
 from .live_identity import LiveIdentityResolver, LiveResolvedIdentity, ProvenanceSidecar
 from .models import TrackRef
@@ -38,6 +38,7 @@ from .shared_store import canonical_track_id
 from .store import UserStore
 
 FingerprintFn = Callable[[np.ndarray, int], tuple[str, float]]
+RawFingerprintFn = Callable[[np.ndarray, int], tuple[list[int], float]]
 
 
 @dataclass
@@ -58,6 +59,7 @@ def run_live_capture_spike(
     classifier: ClassifierModel,
     store: UserStore,
     fingerprint_fn: FingerprintFn = compute_fingerprint,
+    raw_fingerprint_fn: RawFingerprintFn = compute_raw_fingerprint,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> LiveCaptureResult | None:
     """Run one capture pass. ``None`` when nothing is currently playing (AC4 —
@@ -134,6 +136,18 @@ def run_live_capture_spike(
     inference = run_inference(
         pcm, sample_rate=sink.sample_rate, embedding_model=embedding_model, classifier=classifier
     )
+
+    # #140 AC1: a second, separate fpcalc call against the same captured PCM
+    # ("one temp wav, two calls") -- evidence for offline near-duplicate
+    # comparison only, never an identity lookup, so failure here is exactly
+    # as non-fatal as the compressed-fingerprint call above.
+    try:
+        raw_fingerprint, raw_fp_duration_s = raw_fingerprint_fn(pcm, sink.sample_rate)
+        store.write_fingerprint(
+            track_id=track_id, fingerprint=raw_fingerprint, duration_s=raw_fp_duration_s
+        )
+    except Exception:
+        pass
 
     provenance = ProvenanceSidecar(
         raw_title=now_playing.title,

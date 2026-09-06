@@ -228,6 +228,103 @@ def test_run_live_capture_spike_name_level_key_uses_normalized_name(tmp_path) ->
     assert second.analysis_path == first.analysis_path
 
 
+def test_run_live_capture_spike_writes_raw_fingerprint_sidecar(tmp_path) -> None:
+    """#140 AC1: a *second*, separate fpcalc call (raw uint32 array, evidence-
+    only) runs against the same captured PCM as the existing compressed-
+    string fingerprint call ("one temp wav, two calls"), and is persisted to
+    the ``fingerprints/<key>.json`` sidecar UserStore now exposes -- never
+    into the AudioAnalysisRecord schema itself."""
+    events: list[str] = []
+
+    def _raw_fingerprint_fn(pcm, sample_rate):
+        events.append("raw_fingerprint")
+        return [1, 2, 3], 0.25
+
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="Spotify.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    live_resolver = LiveIdentityResolver(acoustid_source=acoustid)
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn(events),
+        raw_fingerprint_fn=_raw_fingerprint_fn,
+    )
+
+    assert result is not None
+    assert events == ["fingerprint", "raw_fingerprint"]
+    assert store.read_fingerprint("mbid:M-1") == [1, 2, 3]
+
+
+def test_run_live_capture_spike_raw_fingerprint_failure_is_non_fatal(tmp_path) -> None:
+    """Mirrors the existing compressed-fingerprint fallback (fpcalc missing
+    must not kill capture): a raw-fingerprint failure just skips the sidecar."""
+
+    def _failing_raw_fingerprint_fn(pcm, sample_rate):
+        raise RuntimeError("fpcalc not found")
+
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="Spotify.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    live_resolver = LiveIdentityResolver(acoustid_source=acoustid)
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+        raw_fingerprint_fn=_failing_raw_fingerprint_fn,
+    )
+
+    assert result is not None
+    assert store.read_fingerprint("mbid:M-1") is None
+
+
+def test_run_live_capture_spike_skips_raw_fingerprint_when_already_analyzed(tmp_path) -> None:
+    """No point re-fingerprinting a track that was deduped -- no fresh PCM
+    worth attaching evidence to, mirrors the inference-skip behavior."""
+
+    def _raw_fingerprint_fn(pcm, sample_rate):
+        raise AssertionError("must not be called when dedup skips the capture")
+
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="Spotify.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    live_resolver = LiveIdentityResolver(acoustid_source=acoustid)
+    store = UserStore(root=tmp_path)
+    store.write_audio_analysis(track_id="mbid:M-1", embedding=[0.5], tags={"genre---rock": 1.0})
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+        raw_fingerprint_fn=_raw_fingerprint_fn,
+    )
+
+    assert result is not None
+    assert result.skipped is True
+
+
 def test_run_live_capture_spike_none_when_nothing_playing(tmp_path) -> None:
     result = run_live_capture_spike(
         duration_s=0.1,

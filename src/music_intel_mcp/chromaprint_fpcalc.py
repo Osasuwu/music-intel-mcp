@@ -74,3 +74,42 @@ def compute_fingerprint(
         return payload["fingerprint"], float(payload["duration"])
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise RuntimeError(f"fpcalc produced unparseable output: {result.stdout!r}") from exc
+
+
+def compute_raw_fingerprint(
+    pcm: np.ndarray, sample_rate: int, *, fpcalc_path: str = "fpcalc"
+) -> tuple[list[int], float]:
+    """Raw uint32 chromaprint array + duration (seconds) for captured PCM (#140 AC1).
+
+    A second, separate ``fpcalc`` call (``-raw -json``) from
+    :func:`compute_fingerprint`'s compressed-string call — the raw array is
+    evidence for offline near-duplicate comparison only, never an AcoustID
+    identity lookup key (CONTEXT.md "Offline fingerprint comparison").
+
+    Raises :class:`FpcalcNotFoundError` if ``fpcalc`` isn't installed, and
+    ``RuntimeError`` if it exits non-zero or emits unparseable output.
+    """
+    if shutil.which(fpcalc_path) is None:
+        raise FpcalcNotFoundError(
+            f"'{fpcalc_path}' not found on PATH — run the collector setup script "
+            "to fetch it (#139 AC7)."
+        )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        wav_path = Path(tmp_dir) / "capture.wav"
+        _write_wav(wav_path, pcm, sample_rate)
+        result = subprocess.run(
+            [fpcalc_path, "-raw", "-json", str(wav_path)],
+            capture_output=True,
+            text=True,
+            timeout=_FPCALC_TIMEOUT_S,
+            check=False,
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"fpcalc exited {result.returncode}: {result.stderr.strip()}")
+    try:
+        payload = json.loads(result.stdout)
+        return list(payload["fingerprint"]), float(payload["duration"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"fpcalc produced unparseable output: {result.stdout!r}") from exc

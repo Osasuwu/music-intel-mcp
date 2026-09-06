@@ -122,6 +122,51 @@ def migrate_audio_analysis_keys(store: UserStore) -> KeyMigrationReport:
     return KeyMigrationReport(migrated=migrated, conflicts=conflicts)
 
 
+def load_aliases(path: Path) -> dict[str, str]:
+    """#140 AC4/AC5: read an ``aliases.jsonl`` sidecar into a ``loser ->
+    winner`` map. Honest-empty when the file has never been written --
+    ``apply`` may never have run yet."""
+    if not path.exists():
+        return {}
+    aliases: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            record = json.loads(line)
+            aliases[record["loser"]] = record["winner"]
+    return aliases
+
+
+def resolve_key(
+    key: str,
+    *,
+    pool_aliases: dict[str, str] | None = None,
+    root_aliases: dict[str, str] | None = None,
+    max_chain: int = 64,
+) -> str:
+    """#140 AC5: follow an alias chain to its winner, checking the pool map
+    before the root map at every hop (pool precedence). A cycle guard --
+    bounded hop count plus a seen-set -- stops the walk and returns the last
+    key reached rather than looping forever; a genuine cycle should never
+    occur (``apply`` only ever points loser -> winner by rank), but this
+    function does not trust that invariant blindly."""
+    pool_aliases = pool_aliases or {}
+    root_aliases = root_aliases or {}
+    current = key
+    seen = {current}
+    for _ in range(max_chain):
+        if current in pool_aliases:
+            next_key = pool_aliases[current]
+        elif current in root_aliases:
+            next_key = root_aliases[current]
+        else:
+            break
+        if next_key in seen:
+            break
+        seen.add(next_key)
+        current = next_key
+    return current
+
+
 def resolve_data_root(root: str | Path | None) -> Path:
     """Resolve the data root: explicit arg > ``MUSIC_INTEL_DATA_DIR`` > default.
     Shared by the per-user store and the (local) shared-metadata cache."""
@@ -265,7 +310,14 @@ class UserStore:
         #161 AC2: when a pool is configured, the pool is consulted first --
         an already-analyzed track (from any participant) dedupes even if this
         participant's own transient root never saw it -- falling back to the
-        participant root for pre-pool or root-only data."""
+        participant root for pre-pool or root-only data.
+
+        #140 AC5: the key is resolved through recorded aliases first -- the
+        loser side of an accepted near-dup merge counts as analysed once its
+        winner has been. Scope is deliberately narrow to this call site
+        (decision ce94e03c-acf1-4533-99cf-2fbbca36b3c4); the replay queue
+        selector and pool-history intersection are not wired here."""
+        track_id = self.resolve_track_key(track_id)
         pool_path = self.pool_audio_analysis_path(track_id)
         if pool_path is not None and pool_path.exists():
             return True
@@ -393,6 +445,77 @@ class UserStore:
             )
         records.sort(key=lambda r: r.track_id)
         return records
+
+    # --- raw fingerprint sidecar (#140 AC1) -------------------------------- #
+    #
+    # Raw uint32 chromaprint arrays (evidence for offline near-duplicate
+    # comparison, never an identity key) live in their own sidecar directory
+    # beside wherever the corresponding audio_analysis record actually landed
+    # (root or pool) -- the #161 AudioAnalysisRecord/pool-record schema is
+    # deliberately left untouched (CONTEXT.md "Post-CRITIC refinements").
+
+    @property
+    def fingerprints_dir(self) -> Path:
+        return self.root / "fingerprints"
+
+    def fingerprint_path(self, track_id: str) -> Path:
+        return self.fingerprints_dir / f"{self._safe_name(track_id)}.json"
+
+    @property
+    def pool_fingerprints_dir(self) -> Path | None:
+        return self.pool_root / "fingerprints" if self.pool_root is not None else None
+
+    def pool_fingerprint_path(self, track_id: str) -> Path | None:
+        pool_dir = self.pool_fingerprints_dir
+        return pool_dir / f"{self._safe_name(track_id)}.json" if pool_dir is not None else None
+
+    def write_fingerprint(
+        self, *, track_id: str, fingerprint: list[int], duration_s: float
+    ) -> Path:
+        """Write one raw chromaprint array sidecar. Mirrors
+        ``write_audio_analysis``'s pool-exclusive-write-when-configured and
+        first-write-wins (``_atomic_write``) semantics."""
+        payload = {
+            "track_id": track_id,
+            "fingerprint": [int(x) for x in fingerprint],
+            "duration_s": float(duration_s),
+        }
+        pool_path = self.pool_fingerprint_path(track_id)
+        if pool_path is not None:
+            pool_path.parent.mkdir(parents=True, exist_ok=True)
+            return self._atomic_write(pool_path, payload)
+
+        self.fingerprints_dir.mkdir(parents=True, exist_ok=True)
+        return self._atomic_write(self.fingerprint_path(track_id), payload)
+
+    # --- #140 AC4/AC5: near-dup aliases ------------------------------------ #
+
+    @property
+    def aliases_path(self) -> Path:
+        return self.root / "aliases.jsonl"
+
+    @property
+    def pool_aliases_path(self) -> Path | None:
+        return self.pool_root / "aliases.jsonl" if self.pool_root is not None else None
+
+    def resolve_track_key(self, track_id: str) -> str:
+        """#140 AC5: follow recorded aliases to the winner key, pool aliases
+        taking precedence over root aliases at each hop."""
+        pool_aliases = load_aliases(self.pool_aliases_path) if self.pool_aliases_path else {}
+        root_aliases = load_aliases(self.aliases_path)
+        return resolve_key(track_id, pool_aliases=pool_aliases, root_aliases=root_aliases)
+
+    def read_fingerprint(self, track_id: str) -> list[int] | None:
+        """Pool-first-then-root read, mirroring ``has_audio_analysis``.
+        Missing sidecar -> ``None`` (honest-empty: fingerprinting is
+        best-effort and may have been skipped, e.g. ``fpcalc`` unavailable)."""
+        pool_path = self.pool_fingerprint_path(track_id)
+        if pool_path is not None and pool_path.exists():
+            return json.loads(pool_path.read_text(encoding="utf-8"))["fingerprint"]
+        path = self.fingerprint_path(track_id)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))["fingerprint"]
+        return None
 
     # --- automated playback consent (#128 AC1/AC3) ------------------------ #
 
