@@ -9,7 +9,12 @@ import numpy as np
 
 from music_intel_mcp.capture import FakeLoopbackCapture
 from music_intel_mcp.continuous_capture import run_continuous_capture
-from music_intel_mcp.inference import ClassifierResult, InMemoryClassifier, InMemoryEmbeddingModel
+from music_intel_mcp.inference import (
+    ClassifierResult,
+    InMemoryClassifier,
+    InMemoryEmbeddingModel,
+    RssCeilingExceededError,
+)
 from music_intel_mcp.live_identity import LiveIdentityResolver
 from music_intel_mcp.nowplaying import NowPlayingInfo
 from music_intel_mcp.store import UserStore
@@ -70,6 +75,7 @@ def test_same_track_polled_twice_captures_once(tmp_path) -> None:
         store=store,
         capture_duration_s=0.05,
         stop_event=stop_event,
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=3),
     )
 
@@ -96,6 +102,7 @@ def test_track_change_captures_each_track(tmp_path) -> None:
         store=store,
         capture_duration_s=0.05,
         stop_event=stop_event,
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=2),
     )
 
@@ -160,6 +167,7 @@ def test_capture_failure_is_isolated_and_loop_continues(tmp_path) -> None:
         stop_event=stop_event,
         on_error=lambda info, exc: errors.append((info, exc)),
         on_result=lambda info, result: results.append((info, result)),
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=2),
     )
 
@@ -167,6 +175,42 @@ def test_capture_failure_is_isolated_and_loop_continues(tmp_path) -> None:
     assert errors[0][0] is _TRACK_A
     assert len(results) == 1
     assert results[0][0] is _TRACK_B
+
+
+def test_rss_ceiling_exceeded_stops_the_loop(tmp_path) -> None:
+    """#160 AC2: exceeding the RSS ceiling after a successful inference must
+    stop the loop (unlike a generic per-track error, which is isolated and
+    the loop keeps polling — see test_capture_failure_is_isolated above)."""
+    resolver, embedding_model, classifier, store = _make_deps(tmp_path)
+    source = _SequenceNowPlayingSource([_TRACK_A, _TRACK_B])
+    stop_event = threading.Event()
+    errors: list[tuple[NowPlayingInfo, Exception]] = []
+    captures: list[FakeLoopbackCapture] = []
+
+    def capture_factory(_info: NowPlayingInfo) -> FakeLoopbackCapture:
+        c = FakeLoopbackCapture(sample_rate=16000, channels=1)
+        captures.append(c)
+        return c
+
+    run_continuous_capture(
+        now_playing_source=source,
+        live_identity_resolver=resolver,
+        capture_factory=capture_factory,
+        embedding_model=embedding_model,
+        classifier=classifier,
+        store=store,
+        capture_duration_s=0.05,
+        stop_event=stop_event,
+        rss_ceiling_mb=100.0,
+        rss_reader=lambda: 9999.0,
+        on_error=lambda info, exc: errors.append((info, exc)),
+        sleep=_stopping_sleep(stop_event, after=5),
+    )
+
+    assert len(captures) == 1, "loop must stop after the first ceiling breach, not poll track B"
+    assert len(errors) == 1
+    assert errors[0][0] is _TRACK_A
+    assert isinstance(errors[0][1], RssCeilingExceededError)
 
 
 def test_new_track_is_analyzed_and_stored_with_no_manual_trigger(tmp_path) -> None:
@@ -191,6 +235,7 @@ def test_new_track_is_analyzed_and_stored_with_no_manual_trigger(tmp_path) -> No
         store=store,
         capture_duration_s=0.05,
         stop_event=stop_event,
+        rss_reader=lambda: 0.0,
         sleep=_stopping_sleep(stop_event, after=1),
     )
 

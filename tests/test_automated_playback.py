@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 from music_intel_mcp.automated_playback import (
     AUTOMATED_PLAYBACK_SOURCE,
+    TrackSkipped,
     build_automated_play_event,
     run_automated_playback,
 )
@@ -164,6 +165,36 @@ def test_run_automated_playback_does_not_pause_when_queue_completes_normally():
 
     assert result.stopped_early is False
     assert pause_calls["n"] == 0
+
+
+# #159 AC2/AC3: a device-gated/retry-orchestrated play_track (attempt_play,
+# via the CLI) signals a not-actually-played track by raising TrackSkipped --
+# the loop must not count it as played or pace its (nonexistent) duration,
+# but must keep going rather than stopping the whole run.
+def test_run_automated_playback_skips_track_without_counting_or_pacing_on_track_skipped():
+    tracks = [_track("a"), _track("b")]
+    played: list[TrackRef] = []
+    slept: list[float] = []
+
+    def play_track(track: TrackRef) -> None:
+        if track.name == "a":
+            raise TrackSkipped()
+        played.append(track)
+
+    result = run_automated_playback(
+        queue=tracks,
+        play_track=play_track,
+        track_duration_s=lambda t: 20.0,
+        has_consent=lambda: True,
+        sleep=slept.append,
+        poll_interval_s=5.0,
+    )
+
+    assert [t.name for t in played] == ["b"]
+    assert result.played == played
+    assert result.stopped_early is False
+    # only "b"'s 20s duration is paced -- "a" contributed no sleep at all
+    assert sum(slept) == 20.0
 
 
 def test_run_automated_playback_completes_full_queue_without_revocation():

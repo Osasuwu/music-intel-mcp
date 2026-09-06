@@ -13,6 +13,7 @@ immediately: inference cannot proceed without it, there is no partial result.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -32,6 +33,45 @@ _DISCOGS_EFFNET_DEFAULT_FILENAME = "discogs-effnet-bsdynamic-1.onnx"
 _MTG_JAMENDO_DEFAULT_FILENAME = "mtg_jamendo_top50tags-discogs-effnet-1.onnx"
 
 DISCOGS_EFFNET_SAMPLE_RATE = 16000
+
+
+class ModelFileNotFoundError(RuntimeError):
+    """Raised when a required ONNX model file cannot be found on disk. Inference
+    must refuse to start rather than silently falling back (#160 AC1)."""
+
+
+class RssCeilingExceededError(RuntimeError):
+    """Raised when process RSS exceeds the configured ceiling after an
+    inference pass (#160 AC2) — the caller (the live capture loop) must stop
+    rather than continue."""
+
+
+# Shared with scripts/benchmark_onnx_engine.py (#160 AC3) — one ceiling, not
+# two independently-maintained copies.
+PEAK_RSS_CEILING_MB = 1500.0
+
+
+def _default_rss_reader() -> float:
+    import psutil
+
+    return psutil.Process().memory_info().rss / (1024 * 1024)
+
+
+def check_rss_ceiling(
+    *,
+    ceiling_mb: float = PEAK_RSS_CEILING_MB,
+    rss_reader: Callable[[], float] | None = None,
+) -> None:
+    """Raise :class:`RssCeilingExceededError` if current RSS exceeds
+    ``ceiling_mb``. ``rss_reader`` is injectable so callers/tests never need
+    to monkeypatch ``psutil`` internals (#160 AC2)."""
+    reader = rss_reader if rss_reader is not None else _default_rss_reader
+    rss_mb = reader()
+    if rss_mb > ceiling_mb:
+        raise RssCeilingExceededError(
+            f"RSS {rss_mb:.1f} MB exceeded ceiling {ceiling_mb:.1f} MB after "
+            "inference — stopping the capture loop."
+        )
 
 
 @dataclass
@@ -98,21 +138,30 @@ def _resolve_model_path(
     explicit: str | Path | None, env_var: str, *, default_filename: str | None = None
 ) -> Path:
     if explicit is not None:
-        return Path(explicit)
+        path = Path(explicit)
+        if not path.exists():
+            raise ModelFileNotFoundError(
+                f"Model file not found: {path} — pass an existing path explicitly, "
+                f"or unset it and configure {env_var} instead."
+            )
+        return path
     env = os.environ.get(env_var)
     if env:
         path = Path(env)
         if not path.exists():
-            raise RuntimeError(f"{env_var} points at a missing file: {path}")
+            raise ModelFileNotFoundError(
+                f"{env_var} points at a missing file: {path} — fix the env var to "
+                "point at an existing ONNX model file."
+            )
         return path
     if default_filename is not None:
         fallback = _SCRATCH_MODELS_DIR / default_filename
         if fallback.exists():
             return fallback
-    raise RuntimeError(
+    raise ModelFileNotFoundError(
         f"{env_var} is not set, no explicit path was given, and no default "
         f"model file was found under {_SCRATCH_MODELS_DIR} — inference cannot "
-        "run without the ONNX model file."
+        f"run without the ONNX model file. Configure {env_var} to point at it."
     )
 
 

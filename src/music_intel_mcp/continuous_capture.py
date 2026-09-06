@@ -8,6 +8,12 @@ any per-track failure (capture/inference/store) behind ``on_error`` so one bad
 track never kills an unattended session — the loop logs and keeps
 polling rather than raising. ``stop_event`` (a plain ``threading.Event``) is
 the cooperative shutdown seam a tray "Quit" action or a test drives.
+
+The one exception to "isolate and keep polling": a
+:class:`~music_intel_mcp.inference.RssCeilingExceededError` after a successful
+inference is journaled via ``on_error`` like any other failure, but then stops
+the loop rather than continuing (#160 AC2) — memory growth past the configured
+ceiling is a signal to stop, not a per-track fluke to shrug off.
 """
 
 from __future__ import annotations
@@ -17,7 +23,13 @@ import time
 from collections.abc import Callable
 
 from .capture import LoopbackSource
-from .inference import AudioEmbeddingModel, ClassifierModel
+from .inference import (
+    PEAK_RSS_CEILING_MB,
+    AudioEmbeddingModel,
+    ClassifierModel,
+    RssCeilingExceededError,
+    check_rss_ceiling,
+)
 from .live_identity import LiveIdentityResolver
 from .live_pipeline import LiveCaptureResult, run_live_capture_spike
 from .nowplaying import InMemoryNowPlayingSource, NowPlayingInfo, NowPlayingSource
@@ -46,6 +58,8 @@ def run_continuous_capture(
     on_result: Callable[[NowPlayingInfo, LiveCaptureResult | None], None] | None = None,
     on_error: Callable[[NowPlayingInfo, Exception], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    rss_ceiling_mb: float = PEAK_RSS_CEILING_MB,
+    rss_reader: Callable[[], float] | None = None,
 ) -> None:
     """Poll forever (until ``stop_event`` is set) capturing each new track once.
 
@@ -77,6 +91,13 @@ def run_continuous_capture(
                         classifier=classifier,
                         store=store,
                     )
+                    check_rss_ceiling(ceiling_mb=rss_ceiling_mb, rss_reader=rss_reader)
+                except RssCeilingExceededError as exc:
+                    # unlike a generic per-track error, a ceiling breach must stop
+                    # the loop, not just be isolated and continue (#160 AC2).
+                    if on_error is not None:
+                        on_error(now_playing, exc)
+                    return
                 except Exception as exc:  # must survive to keep polling (#136) — an
                     # unattended session shouldn't die on one bad track.
                     if on_error is not None:

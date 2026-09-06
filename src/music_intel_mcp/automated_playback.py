@@ -25,6 +25,11 @@ touching half is :class:`SpotifyPlaybackClient`.
 - **AC4** (traceable as agent-originated): :data:`AUTOMATED_PLAYBACK_SOURCE`
   is a distinct :attr:`~music_intel_mcp.models.ListenEvent.source` value,
   built by :func:`build_automated_play_event`.
+
+Pilot slice 1 (#159) hardens the real-device play path on top of the above:
+mandatory ``device_id`` resolution, an account-busy gate, and bounded
+404/403 retry -- see :meth:`SpotifyPlaybackClient.resolve_device_id`,
+:meth:`SpotifyPlaybackClient.account_is_busy`, and :func:`attempt_play`.
 """
 
 from __future__ import annotations
@@ -43,6 +48,39 @@ DEFAULT_CONSENT_POLL_INTERVAL_S = 5.0
 SPOTIFY_PLAYER_PLAY_URL = "https://api.spotify.com/v1/me/player/play"
 SPOTIFY_PLAYER_PAUSE_URL = "https://api.spotify.com/v1/me/player/pause"
 SPOTIFY_TRACKS_URL = "https://api.spotify.com/v1/tracks"
+SPOTIFY_PLAYER_URL = "https://api.spotify.com/v1/me/player"
+SPOTIFY_PLAYER_DEVICES_URL = "https://api.spotify.com/v1/me/player/devices"
+
+
+class TrackSkipped(Exception):
+    """Raised by a ``play_track`` callable to signal that a track was not
+    actually played -- e.g. deferred by :func:`attempt_play`'s account-busy
+    gate, or abandoned after exhausting retries (#159 AC2/AC3). Distinct from
+    consent revocation: the run keeps going with the next track, the skipped
+    one is neither counted as played nor paced by its duration."""
+
+
+class DeviceNotResolvedError(RuntimeError):
+    """Raised by :meth:`SpotifyPlaybackClient.play` when no ``device_id`` has
+    been resolved yet (#159 AC1) -- a play must never land on whatever device
+    Spotify considers active by default."""
+
+
+class DeviceNotFoundError(RuntimeError):
+    """Raised by :meth:`SpotifyPlaybackClient.resolve_device_id` when no
+    device on the account matches the requested name (#159 AC1)."""
+
+
+class SpotifyPlayRejected(RuntimeError):
+    """Raised by :meth:`SpotifyPlaybackClient.play` when Spotify rejects the
+    play with 404 (device gone) or 403 (premium-required / restricted) (#159
+    AC3) -- distinct from other HTTP errors so :func:`attempt_play` can
+    re-queue specifically on these two, rather than treating every failure
+    as retryable."""
+
+    def __init__(self, status_code: int, message: str | None = None) -> None:
+        super().__init__(message or f"play rejected with status {status_code}")
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -78,7 +116,10 @@ def run_automated_playback(
     for track in queue:
         if not has_consent():
             return AutomatedPlaybackResult(played=played, stopped_early=True)
-        play_track(track)
+        try:
+            play_track(track)
+        except TrackSkipped:
+            continue
         played.append(track)
         if on_play is not None:
             on_play(track)
@@ -111,22 +152,66 @@ class SpotifyPlaybackClient:
     at construction (mirrors :class:`~music_intel_mcp.backfill_playlist.
     SpotifyPlaylistClient`)."""
 
-    def __init__(self, *, access_token: Callable[[], str], timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        *,
+        access_token: Callable[[], str],
+        timeout: float = 15.0,
+        device_id: str | None = None,
+    ) -> None:
         self._access_token = access_token
         self._timeout = timeout
+        self._device_id = device_id
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._access_token()}"}
 
+    def resolve_device_id(self, device_name: str) -> str:
+        """Look up the device named ``device_name`` via ``GET /me/player/devices``
+        and remember its id for subsequent :meth:`play` calls (#159 AC1) --
+        replay must target the browser tab the driver launched, never
+        whatever device Spotify considers active."""
+        import httpx
+
+        resp = httpx.get(SPOTIFY_PLAYER_DEVICES_URL, headers=self._headers(), timeout=self._timeout)
+        resp.raise_for_status()
+        for device in resp.json().get("devices", []):
+            if device.get("name") == device_name:
+                self._device_id = device["id"]
+                return self._device_id
+        raise DeviceNotFoundError(device_name)
+
+    def account_is_busy(self) -> bool:
+        """True iff ``GET /me/player`` reports playback already in progress on
+        *any* device (#159 AC2) -- a play must defer rather than interrupt
+        whatever the account is already doing. Spotify returns 204 with an
+        empty body for a quiet account, so that case (and ``is_playing``
+        missing/false) reads as not-busy."""
+        import httpx
+
+        resp = httpx.get(SPOTIFY_PLAYER_URL, headers=self._headers(), timeout=self._timeout)
+        resp.raise_for_status()
+        if resp.status_code == 204 or not resp.content:
+            return False
+        return bool(resp.json().get("is_playing", False))
+
     def play(self, track_id: str) -> None:
         import httpx
+
+        if self._device_id is None:
+            raise DeviceNotResolvedError(
+                "play() requires a resolved device_id -- call resolve_device_id() first"
+            )
 
         resp = httpx.put(
             SPOTIFY_PLAYER_PLAY_URL,
             headers=self._headers(),
+            params={"device_id": self._device_id},
             json={"uris": [spotify_track_uri(track_id)]},
             timeout=self._timeout,
         )
+        if resp.status_code in (404, 403):
+            raise SpotifyPlayRejected(resp.status_code)
         resp.raise_for_status()
 
     def pause(self) -> None:
@@ -149,3 +234,62 @@ class SpotifyPlaybackClient:
         )
         resp.raise_for_status()
         return resp.json()["duration_ms"] / 1000.0
+
+
+@dataclass(frozen=True)
+class PlayAttempt:
+    """Outcome of one :func:`attempt_play` call (#159 AC2/AC3):
+
+    - ``"played"`` -- the track played; ``reason`` is ``None``.
+    - ``"deferred"`` -- the account was already busy (AC2); not counted
+      against the track's retry budget, since it isn't the track's fault.
+    - ``"requeued"`` -- Spotify rejected the play (404/403) and the track's
+      retry count is still within ``max_retries``; the caller should
+      re-queue it (AC3).
+    - ``"abandoned"`` -- rejected again after exhausting ``max_retries``.
+    - ``"skipped"`` -- the track has no usable Spotify id (e.g. a
+      locally-added/unavailable saved track); never retriable, since there
+      is no id to retry with.
+    """
+
+    status: str
+    reason: str | None
+
+
+def attempt_play(
+    client: SpotifyPlaybackClient,
+    track: TrackRef,
+    *,
+    retry_counts: dict[str, int],
+    max_retries: int = 3,
+    journal: Callable[[TrackRef, str], None] | None = None,
+) -> PlayAttempt:
+    """Gate + play one track, journaling and bounding retries on rejection
+    (#159 AC2/AC3) so a busy account or a 404/403 never crashes the run --
+    the caller re-queues on ``"requeued"`` and moves on either way."""
+    if client.account_is_busy():
+        if journal is not None:
+            journal(track, "account_busy")
+        return PlayAttempt(status="deferred", reason="account_busy")
+
+    if track.spotify_id is None:
+        if journal is not None:
+            journal(track, "missing_spotify_id")
+        return PlayAttempt(status="skipped", reason="missing_spotify_id")
+
+    try:
+        # #158 AC3: play() takes a canonical `spotify:`-prefixed uri, not the
+        # bare Spotify id -- build it directly rather than via
+        # canonical_track_id(), which would prefer an mbid/isrc key when the
+        # track has one and break the Spotify-specific play call.
+        client.play(f"spotify:{track.spotify_id}")
+    except SpotifyPlayRejected as exc:
+        reason = f"http_{exc.status_code}"
+        if journal is not None:
+            journal(track, reason)
+        count = retry_counts.get(track.spotify_id, 0) + 1
+        retry_counts[track.spotify_id] = count
+        status = "abandoned" if count > max_retries else "requeued"
+        return PlayAttempt(status=status, reason=reason)
+
+    return PlayAttempt(status="played", reason=None)
