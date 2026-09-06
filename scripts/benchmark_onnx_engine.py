@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from music_intel_mcp.inference import PEAK_RSS_CEILING_MB
+
 SAMPLE_RATE = 16_000  # required by both ONNX graphs (models' "inference.sample_rate")
 N_MELS = 96
 PATCH_FRAMES = 128
@@ -318,7 +320,6 @@ class BenchmarkReport:
 # Memory: kept well under what's realistically "spare" during normal desktop
 # use (browser + player + background apps) on typical consumer hardware.
 REALTIME_RATIO_CEILING = 0.5
-PEAK_RSS_CEILING_MB = 1500.0
 
 
 def percentile(values: list[float], pct: float) -> float:

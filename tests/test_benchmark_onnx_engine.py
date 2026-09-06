@@ -163,6 +163,16 @@ def test_build_report_computes_p50_p95_mean():
     assert report.mean_latency_s == pytest.approx(0.25)
 
 
+# #160 AC3: the benchmark and the runtime must share one constant for the RSS
+# ceiling, not two independently-maintained copies. Checked via `is` (identity),
+# not `==` — an independently redefined literal would still be equal in value
+# but is exactly the drift this AC exists to prevent.
+def test_peak_rss_ceiling_mb_is_shared_with_inference_module():
+    from music_intel_mcp.inference import PEAK_RSS_CEILING_MB as inference_ceiling
+
+    assert PEAK_RSS_CEILING_MB is inference_ceiling
+
+
 def test_report_to_dict_round_trips_fields():
     clips = _clips([(0.05, 120.0), (0.06, 90.0)])
     report = build_report(clips, peak_rss_mb=321.0, models={"embedding": {"url": "x"}})
