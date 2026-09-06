@@ -282,7 +282,11 @@ def test_migrate_audio_analysis_keys_renames_bare_name_key_using_provenance(tmp_
 
     report = migrate_audio_analysis_keys(store)
 
-    expected_new_id = "name:song title (official video)\x1fthe artist"
+    # normalize_track_name() strips "(Official Video)" noise -- the migrated
+    # key must match what a fresh live capture of the same track would
+    # compute today (live_pipeline.py's #158 AC1 fix), not a plain casefold
+    # of the raw provenance title (which would reintroduce the noise).
+    expected_new_id = "name:song title\x1fthe artist"
     assert report.migrated == [(old_name_key, expected_new_id)]
     assert store.audio_analysis_path(expected_new_id).exists()
 

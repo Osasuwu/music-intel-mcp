@@ -75,9 +75,12 @@ def _infer_canonical_key(bare_id: str, provenance: dict[str, Any] | None) -> str
     if _SPOTIFY_ID_RE.match(bare_id):
         return f"spotify:{bare_id}"
     if provenance and provenance.get("raw_title") and provenance.get("raw_artist"):
-        title = provenance["raw_title"].casefold()
-        artist = provenance["raw_artist"].casefold()
-        return f"name:{title}\x1f{artist}"
+        # Local import: live_identity imports from this module (resolve_data_root),
+        # so a module-level import here would be circular.
+        from .live_identity import normalize_track_name
+
+        name_key = normalize_track_name(provenance["raw_title"], provenance["raw_artist"])
+        return f"name:{name_key}"
     return None
 
 
