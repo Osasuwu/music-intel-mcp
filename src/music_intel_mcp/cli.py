@@ -999,6 +999,22 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
+    from .replay_capture import replay_journal_path, summarize_replay_journal
+    from .store import UserStore
+
+    store = UserStore(root=args.data_dir)
+    counts = summarize_replay_journal(replay_journal_path(store))
+    if not counts:
+        print("replay journal: no attempts recorded yet")
+        return 0
+    attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
+    print(f"replay journal: {attempts} attempts")
+    for outcome, count in sorted(counts.items()):
+        print(f"  {outcome}: {count}")
+    return 0
+
+
 def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
     from .store import UserStore
 
@@ -1566,6 +1582,18 @@ def build_parser() -> argparse.ArgumentParser:
         "$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
     )
     p_replay_queue.set_defaults(func=_cmd_replay_queue)
+
+    p_replay_journal_summary = sub.add_parser(
+        "replay-journal-summary",
+        help="print per-outcome counts from the replay capture journal "
+        "for the weekly checkpoint (#166 AC5)",
+    )
+    p_replay_journal_summary.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_replay_journal_summary.set_defaults(func=_cmd_replay_journal_summary)
 
     p_login = sub.add_parser(
         "spotify-login",
