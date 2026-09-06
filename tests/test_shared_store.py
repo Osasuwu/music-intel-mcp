@@ -25,6 +25,7 @@ from music_intel_mcp.shared_store import (
     canonical_track_id,
     is_stale,
     pull_and_cache,
+    spotify_track_uri,
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -50,6 +51,26 @@ def test_canonical_track_id_waterfall():
     assert canonical_track_id(TrackRef(name="n", artist="a", spotify_id="S")) == "spotify:S"
     # fallback is case-folded name + artist
     assert canonical_track_id(TrackRef(name="Né", artist="A")) == "name:né\x1fa"
+
+
+def test_spotify_track_uri_accepts_spotify_prefixed_forms():
+    assert spotify_track_uri("spotify:track:X") == "spotify:track:X"
+    assert spotify_track_uri("spotify:X") == "spotify:track:X"
+
+
+@pytest.mark.parametrize("track_id", ["mbid:M-1", "isrc:USABC0000001", "name:song\x1fartist"])
+def test_spotify_track_uri_raises_on_non_spotify_prefixed_key(track_id):
+    """#158 AC3: only a ``spotify:``-prefixed canonical id (or an already-full
+    ``spotify:track:`` uri) can be turned into a Spotify playlist/playback uri
+    -- an mbid/isrc/name-keyed track was never resolved to a Spotify id, so
+    building a uri from it would silently point at the wrong track."""
+    with pytest.raises(ValueError):
+        spotify_track_uri(track_id)
+
+
+def test_spotify_track_uri_raises_on_bare_non_prefixed_id():
+    with pytest.raises(ValueError):
+        spotify_track_uri("bareid123")
 
 
 # --- record contract: no per-user data ------------------------------------- #

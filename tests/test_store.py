@@ -214,6 +214,123 @@ def test_write_audio_analysis_first_write_wins_under_thread_concurrency(tmp_path
     assert payload["embedding"] in ([1.0], [2.0])  # exactly one writer's payload, never a mix
 
 
+# #158 AC4: a one-shot migration renames bare-key audio-analysis files
+# (written before the canonical_track_id prefix contract existed) to their
+# prefixed form. Bare keys carry no type tag of their own, so the migration
+# classifies each by format (MBID uuid / ISRC / 22-char Spotify id / else a
+# name-key rebuilt from the provenance sidecar's raw title+artist).
+def test_migrate_audio_analysis_keys_renames_bare_mbid_key(tmp_path):
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    bare = "5b11f4ce-a62d-471e-81fc-a69a8278c7da"
+    old_path = store.write_audio_analysis(track_id=bare, embedding=[0.1], tags={})
+
+    report = migrate_audio_analysis_keys(store)
+
+    assert report.migrated == [(bare, f"mbid:{bare}")]
+    assert not old_path.exists()
+    new_path = store.audio_analysis_path(f"mbid:{bare}")
+    assert new_path.exists()
+    assert json.loads(new_path.read_text(encoding="utf-8"))["track_id"] == f"mbid:{bare}"
+
+
+def test_migrate_audio_analysis_keys_renames_bare_isrc_key(tmp_path):
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    bare = "USRC17607839"
+    store.write_audio_analysis(track_id=bare, embedding=[0.1], tags={})
+
+    report = migrate_audio_analysis_keys(store)
+
+    assert report.migrated == [(bare, f"isrc:{bare}")]
+    assert store.audio_analysis_path(f"isrc:{bare}").exists()
+
+
+def test_migrate_audio_analysis_keys_renames_bare_spotify_id_key(tmp_path):
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    bare = "AbCdEfGhIj1234567890AB"  # 22-char base62 spotify id shape
+    assert len(bare) == 22
+    store.write_audio_analysis(track_id=bare, embedding=[0.1], tags={})
+
+    report = migrate_audio_analysis_keys(store)
+
+    assert report.migrated == [(bare, f"spotify:{bare}")]
+    assert store.audio_analysis_path(f"spotify:{bare}").exists()
+
+
+def test_migrate_audio_analysis_keys_renames_bare_name_key_using_provenance(tmp_path):
+    from music_intel_mcp.live_identity import ProvenanceSidecar
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    old_name_key = "song title\x1fthe artist"  # pre-#158 name_key normalization
+    store.write_audio_analysis(
+        track_id=old_name_key,
+        embedding=[0.1],
+        tags={},
+        provenance=ProvenanceSidecar(
+            raw_title="Song Title (Official Video)",
+            raw_artist="The Artist",
+            app_id="Spotify.exe",
+            captured_at="2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+    report = migrate_audio_analysis_keys(store)
+
+    expected_new_id = "name:song title (official video)\x1fthe artist"
+    assert report.migrated == [(old_name_key, expected_new_id)]
+    assert store.audio_analysis_path(expected_new_id).exists()
+
+
+def test_migrate_audio_analysis_keys_is_idempotent(tmp_path):
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    bare = "5b11f4ce-a62d-471e-81fc-a69a8278c7da"
+    store.write_audio_analysis(track_id=bare, embedding=[0.1], tags={})
+
+    first = migrate_audio_analysis_keys(store)
+    second = migrate_audio_analysis_keys(store)
+
+    assert first.migrated == [(bare, f"mbid:{bare}")]
+    assert second.migrated == []
+    assert second.conflicts == []
+
+
+def test_migrate_audio_analysis_keys_reports_conflicts_without_overwriting(tmp_path):
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    bare = "5b11f4ce-a62d-471e-81fc-a69a8278c7da"
+    old_path = store.write_audio_analysis(track_id=bare, embedding=[0.1], tags={"old": 1.0})
+    # A post-#158 write already claimed the canonical prefixed key.
+    store.write_audio_analysis(track_id=f"mbid:{bare}", embedding=[0.9], tags={"new": 1.0})
+
+    report = migrate_audio_analysis_keys(store)
+
+    assert report.migrated == []
+    assert report.conflicts == [(bare, f"mbid:{bare}")]
+    # Neither file was touched -- old bare file preserved, new file untouched.
+    assert old_path.exists()
+    assert json.loads(old_path.read_text(encoding="utf-8"))["tags"] == {"old": 1.0}
+    new_path = store.audio_analysis_path(f"mbid:{bare}")
+    assert json.loads(new_path.read_text(encoding="utf-8"))["tags"] == {"new": 1.0}
+
+
+def test_migrate_audio_analysis_keys_missing_dir_returns_empty_report(tmp_path):
+    from music_intel_mcp.store import migrate_audio_analysis_keys
+
+    store = UserStore(root=tmp_path)
+    report = migrate_audio_analysis_keys(store)
+    assert report.migrated == []
+    assert report.conflicts == []
+
+
 # #128 AC1: automated-playback mode is off by default; enabling it requires an
 # explicit, separately-recorded consent action distinct from #127's
 # MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED env-var opt-in.

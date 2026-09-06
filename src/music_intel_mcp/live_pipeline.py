@@ -32,7 +32,9 @@ from .capture import LoopbackSource, RingBufferSink
 from .chromaprint_fpcalc import compute_fingerprint
 from .inference import AudioEmbeddingModel, ClassifierModel, InferenceResult, run_inference
 from .live_identity import LiveIdentityResolver, LiveResolvedIdentity, ProvenanceSidecar
+from .models import TrackRef
 from .nowplaying import NowPlayingSource
+from .shared_store import canonical_track_id
 from .store import UserStore
 
 FingerprintFn = Callable[[np.ndarray, int], tuple[str, float]]
@@ -95,11 +97,22 @@ def run_live_capture_spike(
         duration_s=fp_duration_s,
     )
 
-    track_id = identity.mbid or identity.spotify_id or identity.isrc or identity.name_key
+    # #158 AC1: one function produces the key everywhere — build the same
+    # TrackRef shape the backfill/history paths use and derive the key via
+    # canonical_track_id, so a live-captured key and a batch-computed key for
+    # the same identity are always identical.
+    track_ref = TrackRef(
+        spotify_id=identity.spotify_id,
+        isrc=identity.isrc,
+        mbid=identity.mbid,
+        name=identity.name,
+        artist=identity.artist,
+    )
+    track_id = canonical_track_id(track_ref)
 
     # #126 AC1/AC4: dedup purely off the identity waterfall + local store — an
     # already-analyzed track is skipped, no re-inference (the expensive step).
-    if track_id is not None and store.has_audio_analysis(track_id):
+    if store.has_audio_analysis(track_id):
         return LiveCaptureResult(
             identity=identity,
             inference=None,

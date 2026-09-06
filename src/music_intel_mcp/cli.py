@@ -876,7 +876,6 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
     from .shared_store import canonical_track_id
 
     get_token = lambda: auth.access_token()  # noqa: E731
-    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
     fetched_user_id = fetch_current_user_id(access_token=get_token)
     playlist_client = SpotifyPlaylistClient(access_token=get_token, user_id=fetched_user_id)
 
@@ -884,11 +883,12 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
         events = store.load_history()
         played_ids = played_track_ids(events)
         candidates = fetch_saved_track_refs(access_token=get_token)
-        analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+        # #158 AC2: "already analyzed" consults audio-analysis presence
+        # (UserStore), not SharedStore metadata presence.
         selected = select_backfill_tracks(
             candidates,
             played_ids=played_ids,
-            has_audio_analysis=lambda cid: cid in analyzed,
+            has_audio_analysis=store.has_audio_analysis,
         )
         desired_ids = [canonical_track_id(t) for t in selected]
         diff = sync_backfill_playlist(
@@ -930,6 +930,18 @@ def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_migrate_audio_analysis_keys(args: argparse.Namespace) -> int:
+    from .store import UserStore, migrate_audio_analysis_keys
+
+    store = UserStore(root=args.data_dir)
+    report = migrate_audio_analysis_keys(store)
+    print(f"migrated {len(report.migrated)}")
+    print(f"conflicts {len(report.conflicts)}")
+    for old_id, new_id in report.conflicts:
+        print(f"  conflict: {old_id} -> {new_id} (target already exists, left untouched)")
+    return 0
+
+
 def _cmd_automated_playback(args: argparse.Namespace) -> int:
     from .store import UserStore
 
@@ -966,14 +978,14 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
     from .shared_store import canonical_track_id
 
     get_token = lambda: auth.access_token()  # noqa: E731
-    shared_store = _build_shared_store(args.shared_store, getattr(args, "shared_store_path", None))
     played_ids = played_track_ids(store.load_history())
     candidates = fetch_saved_track_refs(access_token=get_token)
-    analyzed = shared_store.get_tracks([canonical_track_id(t) for t in candidates])
+    # #158 AC2: "already analyzed" consults audio-analysis presence
+    # (UserStore), not SharedStore metadata presence.
     queue = select_backfill_tracks(
         candidates,
         played_ids=played_ids,
-        has_audio_analysis=lambda cid: cid in analyzed,
+        has_audio_analysis=store.has_audio_analysis,
     )
     if not queue:
         print("automated playback: nothing to play")
@@ -1297,17 +1309,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_backfill.add_argument(
-        "--shared-store",
-        choices=["local", "supabase", "memory"],
-        default="local",
-        help="metadata store for the AC3 analyzed-check (default: local)",
-    )
-    p_backfill.add_argument(
-        "--shared-store-path",
-        default=None,
-        help="path to the local shared-store JSONL",
-    )
-    p_backfill.add_argument(
         "--loop",
         action="store_true",
         help="keep re-syncing on --interval-hours until Ctrl+C, instead of a single run (AC2)",
@@ -1375,18 +1376,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
-    p_playback.add_argument(
-        "--shared-store",
-        choices=["local", "supabase", "memory"],
-        default="local",
-        help="metadata store for the already-analyzed check (default: local)",
-    )
-    p_playback.add_argument(
-        "--shared-store-path",
-        default=None,
-        help="path to the local shared-store JSONL",
-    )
     p_playback.set_defaults(func=_cmd_automated_playback)
+
+    p_migrate_keys = sub.add_parser(
+        "migrate-audio-analysis-keys",
+        help=(
+            "one-shot rename of bare-key audio-analysis files to the prefixed "
+            "canonical_track_id form (#158 AC4)"
+        ),
+    )
+    p_migrate_keys.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_migrate_keys.set_defaults(func=_cmd_migrate_audio_analysis_keys)
     return parser
 
 

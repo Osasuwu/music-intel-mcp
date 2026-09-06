@@ -110,14 +110,83 @@ def test_backfill_playlist_syncs_selected_tracks(tmp_path, capsys, monkeypatch):
                 "backfill-playlist",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
             ]
         )
 
     assert rc == 0
     out = capsys.readouterr().out
     assert "2 saved tracks, 1 selected" in out
+    assert add_route.called
+    add_body = json.loads(add_route.calls[0].request.content)
+    assert add_body["uris"] == ["spotify:track:fresh1"]
+
+
+def test_backfill_playlist_metadata_only_track_is_not_treated_as_analyzed(
+    tmp_path, capsys, monkeypatch
+):
+    """#158 AC2: the "already analyzed" check must consult audio-analysis
+    presence (UserStore), not SharedStore metadata presence — a track with
+    only anonymous metadata cached (no audio_analysis file) must still be
+    selected for backfill."""
+    monkeypatch.setenv("MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED", "true")
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client123")
+    _write_token(tmp_path)
+
+    from datetime import UTC, datetime
+
+    from music_intel_mcp.shared_store import LocalSharedStore, TrackMetadataRecord
+
+    shared_path = tmp_path / "shared_cache.jsonl"
+    LocalSharedStore(path=shared_path).upsert_tracks(
+        [
+            TrackMetadataRecord(
+                track_id="spotify:fresh1",
+                spotify_id="fresh1",
+                name="Fresh",
+                artist="Artist",
+                fetched_at=datetime.now(UTC),
+            )
+        ]
+    )
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://api.spotify.com/v1/me/tracks").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "track": {
+                                "id": "fresh1",
+                                "name": "Fresh",
+                                "artists": [{"name": "Artist"}],
+                                "album": {"name": "Album"},
+                            }
+                        },
+                    ],
+                    "next": None,
+                },
+            )
+        )
+        router.get("https://api.spotify.com/v1/me").mock(
+            return_value=httpx.Response(200, json={"id": "the_user"})
+        )
+        router.get("https://api.spotify.com/v1/me/playlists").mock(
+            return_value=httpx.Response(
+                200,
+                json={"items": [{"id": "pl1", "name": "music-intel: to-analyze"}], "next": None},
+            )
+        )
+        router.get("https://api.spotify.com/v1/playlists/pl1/tracks").mock(
+            return_value=httpx.Response(200, json={"items": [], "next": None})
+        )
+        add_route = router.post("https://api.spotify.com/v1/playlists/pl1/tracks").mock(
+            return_value=httpx.Response(201, json={})
+        )
+
+        rc = main(["backfill-playlist", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
     assert add_route.called
     add_body = json.loads(add_route.calls[0].request.content)
     assert add_body["uris"] == ["spotify:track:fresh1"]
@@ -163,8 +232,6 @@ def test_backfill_playlist_loop_runs_until_stopped(tmp_path, capsys, monkeypatch
                 "backfill-playlist",
                 "--data-dir",
                 str(tmp_path),
-                "--shared-store",
-                "memory",
                 "--loop",
                 "--interval-hours",
                 "2",

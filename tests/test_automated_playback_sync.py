@@ -9,6 +9,7 @@ network-touching play/pause/duration calls, mirroring
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 
 from music_intel_mcp.automated_playback import (
@@ -29,11 +30,19 @@ def test_play_calls_player_play_endpoint_with_track_uri():
     client = _client()
     with respx.mock(assert_all_called=True) as router:
         route = router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(204))
-        client.play("AAA")
+        client.play("spotify:AAA")
 
     assert route.calls[0].request.headers["Authorization"] == f"Bearer {_BEARER}"
     body = route.calls[0].request.content.decode()
     assert '"spotify:track:AAA"' in body
+
+
+def test_play_raises_on_non_spotify_prefixed_track_id():
+    """#158 AC3: a bare/non-prefixed id was never resolved to a Spotify id --
+    ``play`` must raise rather than silently guessing a uri."""
+    client = _client()
+    with pytest.raises(ValueError):
+        client.play("AAA")
 
 
 def test_play_normalizes_canonical_track_id_prefix():
