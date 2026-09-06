@@ -48,9 +48,20 @@ def _record(track_id: str, *, fetched_at: datetime = T0, name: str = "Song") -> 
 def test_canonical_track_id_waterfall():
     assert canonical_track_id(TrackRef(name="n", artist="a", mbid="M", isrc="I")) == "mbid:M"
     assert canonical_track_id(TrackRef(name="n", artist="a", isrc="I", spotify_id="S")) == "isrc:I"
-    assert canonical_track_id(TrackRef(name="n", artist="a", spotify_id="S")) == "spotify:S"
+    assert (
+        canonical_track_id(TrackRef(name="n", artist="a", spotify_id="S", youtube_id="Y"))
+        == "spotify:S"
+    )
+    # youtube rung sits after spotify, before the name/artist fallback (#164)
+    assert canonical_track_id(TrackRef(name="n", artist="a", youtube_id="Y")) == "youtube:Y"
     # fallback is case-folded name + artist
     assert canonical_track_id(TrackRef(name="Né", artist="A")) == "name:né\x1fa"
+
+
+def test_spotify_track_uri_raises_on_youtube_prefixed_key():
+    """#164 AC2: a youtube-keyed track was never resolved to a Spotify id."""
+    with pytest.raises(ValueError):
+        spotify_track_uri("youtube:abc123")
 
 
 def test_spotify_track_uri_accepts_spotify_prefixed_forms():

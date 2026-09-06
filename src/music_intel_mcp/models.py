@@ -40,6 +40,7 @@ class TrackRef(BaseModel):
     spotify_id: str | None = None
     isrc: str | None = None
     mbid: str | None = None
+    youtube_id: str | None = None
     name: str
     artist: str
     # Optional album title. Added for the Account Data explicit-signal layer

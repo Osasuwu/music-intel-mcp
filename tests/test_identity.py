@@ -24,7 +24,7 @@ from music_intel_mcp.identity import (
     to_metadata_records,
 )
 from music_intel_mcp.models import TrackRef
-from music_intel_mcp.shared_store import InMemorySharedStore
+from music_intel_mcp.shared_store import InMemorySharedStore, canonical_track_id
 
 FIXTURE_INDEX = Path(__file__).parent / "fixtures" / "isrc_mbid_index.tsv"
 FIXTURE_MULTI_INDEX = Path(__file__).parent / "fixtures" / "isrc_mbid_index_multi.tsv"
@@ -107,6 +107,33 @@ def test_resolve_name_only():
     assert ident.resolved is False
 
 
+def test_waterfall_forwards_youtube_id_through_resolve():
+    """#164 regression: a YouTube-Music-sourced track (no mbid/isrc/spotify_id)
+    run through the real ``resolve()``/``_waterfall()`` path — not a hand-built
+    ``ResolvedIdentity`` — must still carry ``youtube_id`` so downstream
+    ``to_track_ref()`` -> ``canonical_track_id()`` reaches the ``youtube:<id>``
+    rung instead of falling through to ``name:``."""
+    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    track = TrackRef(name="Maniac", artist="Flower Face", youtube_id="abc123")
+
+    ident = resolver.resolve(track)
+
+    assert ident.level == "name"
+    assert ident.youtube_id == "abc123"
+    assert canonical_track_id(ident.to_track_ref()) == "youtube:abc123"
+
+
+def test_resolve_all_forwards_youtube_id():
+    """Same regression via the ``resolve_all`` batch path used by ``_cmd_resolve``."""
+    resolver = IdentityResolver(InMemoryIsrcMbidIndex())
+    track = TrackRef(name="Maniac", artist="Flower Face", youtube_id="abc123")
+
+    report = resolver.resolve_all([track])
+
+    (ident,) = report.identities.values()
+    assert ident.youtube_id == "abc123"
+
+
 # --- batch report: counts, dedup, coverage, unresolved -------------------- #
 
 
@@ -156,6 +183,18 @@ def test_cache_reuse_skips_reresolution(tmp_path):
 
     assert second == first
     assert index2.lookups == []  # served from disk cache, dump untouched
+
+
+def test_resolved_identity_carries_youtube_id_through_to_track_ref():
+    """#164: ``youtube_id`` is a carried-through field (not a waterfall level —
+    only terminal/mbid resolutions are cached, so a youtube rung would never be
+    persisted); ``to_track_ref`` must thread it onto the ``TrackRef`` so
+    ``canonical_track_id`` can use it."""
+    ident = ResolvedIdentity(
+        input_key="youtube:Y-1", youtube_id="Y-1", name="n", artist="a", level="name"
+    )
+    ref = ident.to_track_ref()
+    assert ref.youtube_id == "Y-1"
 
 
 def test_cache_put_get_roundtrip(tmp_path):

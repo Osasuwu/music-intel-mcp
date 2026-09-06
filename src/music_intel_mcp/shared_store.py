@@ -85,9 +85,9 @@ def spotify_track_uri(track_id: str) -> str:
 def canonical_track_id(track: TrackRef) -> str:
     """Stable string key for a track across the shared store and local cache.
 
-    Mirrors the identity waterfall (mbid > isrc > spotify_id > name/artist).
-    String form (the analyser's ``_track_key`` returns a tuple for counting);
-    #61 unifies the two when identity resolution lands.
+    Mirrors the identity waterfall (mbid > isrc > spotify_id > youtube_id >
+    name/artist). String form (the analyser's ``_track_key`` returns a tuple
+    for counting); #61 unifies the two when identity resolution lands.
     """
     if track.mbid:
         return f"mbid:{track.mbid}"
@@ -95,6 +95,8 @@ def canonical_track_id(track: TrackRef) -> str:
         return f"isrc:{track.isrc}"
     if track.spotify_id:
         return f"spotify:{track.spotify_id}"
+    if track.youtube_id:
+        return f"youtube:{track.youtube_id}"
     return f"name:{track.name.casefold()}\x1f{track.artist.casefold()}"
 
 

@@ -1,9 +1,11 @@
 """CLI surface. V0 exposes ``analyze``, ``resolve``, ``import-ifttt``,
-``import-spotify``, ``import-account``, ``capture-spike``, ``capture-loop``,
-``build-mb-index``, ``build-artist-index``, and ``build-ab-index``.
+``import-spotify``, ``import-youtube``, ``import-account``, ``capture-spike``,
+``capture-loop``, ``build-mb-index``, ``build-artist-index``, and
+``build-ab-index``.
 
     music-intel import-ifttt --from <dir> [--data-dir ./data]
     music-intel import-spotify --from <dir> [--data-dir ./data]
+    music-intel import-youtube --from <watch-history.json> [--data-dir ./data]
     music-intel import-account --from <dir> [--data-dir ./data]
                         [--mb-index PATH] [--artist-index PATH]
     music-intel analyze --user-id petr [--data-dir ./data]
@@ -22,7 +24,11 @@
 per-user ``history.jsonl`` (dedup + idempotent re-import). ``import-spotify``
 merges the official Spotify Extended Streaming History JSON export (#89), a richer
 per-play source that supersedes the thin IFTTT rows (source-scoped, decision
-23fcf92c). ``analyze`` loads that
+23fcf92c). ``import-youtube`` merges a Google Takeout ``watch-history.json``
+export (#164) for pilot participants whose history lives in YouTube Music
+rather than Spotify; it carries no cross-source supersede (self-referential
+only — re-import displaces just a prior run of this importer) since Takeout
+always ships the complete history in one file. ``analyze`` loads that
 history, runs the derivation engine, writes a RootProfile snapshot, and prints
 the path + a one-line summary. ``resolve`` walks the history through the
 spotify_id -> ISRC -> MBID identity waterfall and reports resolution coverage
@@ -106,6 +112,13 @@ from .spotify_extended import (
     load_spotify_extended_dir,
 )
 from .store import UserStore
+from .youtube_music import (
+    SUPERSEDES as YOUTUBE_SUPERSEDES,
+)
+from .youtube_music import (
+    YoutubeMusicStats,
+    load_watch_history_file,
+)
 
 # Canonical env-var names this CLI checks for *presence* (never value) before an
 # enrichment run, so a missing credential fails fast with a clear message rather
@@ -314,6 +327,37 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
             f"  skipped {stats.total_skipped} non-track/unplaceable rows "
             f"(episode={stats.skipped_episode} audiobook={stats.skipped_audiobook} "
             f"no-identity={stats.skipped_no_identity} unparseable-ts={stats.skipped_unparseable})"
+        )
+        if stats.unparseable_samples:
+            print(f"    unparseable e.g.: {stats.unparseable_samples}")
+    return 0
+
+
+def _cmd_import_youtube(args: argparse.Namespace) -> int:
+    store = UserStore(root=args.data_dir)
+    before = store.load_history()
+    stats = YoutubeMusicStats()
+    imported = load_watch_history_file(args.source, stats=stats)
+    # Self-referential supersede (#164): no prior source overlaps YouTube Music
+    # watch history, so this only ever displaces a prior run of this importer —
+    # unlike import-spotify there is no cross-source displacement, so no #93-style
+    # not-a-superset guardrail is needed: Takeout always ships the complete
+    # history in one file, never a partial export.
+    kept = [e for e in before if e.source not in YOUTUBE_SUPERSEDES]
+    merged = dedup_events([*kept, *imported])
+    store.replace_history(merged)
+
+    superseded = len(before) - len(kept)
+    print(f"imported {len(imported)} YouTube Music plays from {args.source}")
+    print(
+        f"  history.jsonl: {len(before)} -> {len(merged)} events "
+        f"(superseded {superseded} from {sorted(YOUTUBE_SUPERSEDES)})"
+    )
+    if stats.total_skipped:
+        print(
+            f"  skipped {stats.total_skipped} non-music/unplaceable rows "
+            f"(non-music={stats.skipped_non_music} removed={stats.skipped_removed} "
+            f"no-video-id={stats.skipped_no_video_id} unparseable-ts={stats.skipped_unparseable})"
         )
         if stats.unparseable_samples:
             print(f"    unparseable e.g.: {stats.unparseable_samples}")
@@ -1173,6 +1217,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_import_spotify.set_defaults(func=_cmd_import_spotify)
+
+    p_import_youtube = sub.add_parser(
+        "import-youtube", help="import a Google Takeout watch-history.json (YouTube Music, #164)"
+    )
+    p_import_youtube.add_argument(
+        "--from",
+        dest="source",
+        required=True,
+        help="path to watch-history.json from a Google Takeout export",
+    )
+    p_import_youtube.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_import_youtube.set_defaults(func=_cmd_import_youtube)
 
     p_import_account = sub.add_parser(
         "import-account",

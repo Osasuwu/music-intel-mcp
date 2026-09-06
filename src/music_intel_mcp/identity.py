@@ -78,6 +78,11 @@ class ResolvedIdentity(BaseModel):
     spotify_id: str | None = None
     isrc: str | None = None
     mbid: str | None = None
+    # Carried through, not a waterfall rung: only terminal/mbid resolutions are
+    # ever cached (see IdentityCache below), so a "youtube" level would never
+    # be persisted. canonical_track_id() owns the youtube: rung for track-key
+    # purposes (#164); this field just lets it survive resolve() -> TrackRef.
+    youtube_id: str | None = None
     name: str
     artist: str
     level: ResolutionLevel
@@ -92,6 +97,7 @@ class ResolvedIdentity(BaseModel):
             spotify_id=self.spotify_id,
             isrc=self.isrc,
             mbid=self.mbid,
+            youtube_id=self.youtube_id,
             name=self.name,
             artist=self.artist,
         )
@@ -431,6 +437,7 @@ class IdentityResolver:
             spotify_id=spotify_id,
             isrc=isrc,
             mbid=mbid,
+            youtube_id=track.youtube_id,
             name=track.name,
             artist=track.artist,
             level=level,
