@@ -13,6 +13,7 @@ from music_intel_mcp.replay_capture import (
     replay_journal_path,
 )
 from music_intel_mcp.store import UserStore
+from music_intel_mcp.stream_decode import stream_decode_journal_path
 
 
 def test_replay_journal_summary_prints_per_outcome_counts(tmp_path, capsys):
@@ -72,3 +73,41 @@ def test_replay_journal_summary_handles_missing_journal(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "no attempts recorded" in out
+
+
+def test_replay_journal_summary_counts_stream_decode_unavailable_separately_from_replay_failures(
+    tmp_path, capsys
+):
+    """#170 AC2 (code review on PR #196): stream-decode journal entries
+    (YouTube Music participants) were never read by the weekly checkpoint --
+    a stream-decode "unavailable" outcome must be surfaced in its own
+    section, distinct from loopback replay-capture "silent"/"short" failures,
+    not silently dropped from the report."""
+    store = UserStore(root=tmp_path)
+    append_replay_journal_entry(
+        replay_journal_path(store),
+        ReplayJournalEntry(
+            track_id="mbid:abc",
+            outcome="silent",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:02:00+00:00",
+        ),
+    )
+    append_replay_journal_entry(
+        stream_decode_journal_path(store),
+        ReplayJournalEntry(
+            track_id="youtube:gone",
+            outcome="unavailable",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:02:00+00:00",
+        ),
+    )
+
+    rc = main(["replay-journal-summary", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "replay journal: 1 attempts" in out
+    assert "silent: 1" in out
+    assert "stream-decode journal: 1 attempts" in out
+    assert "unavailable: 1" in out

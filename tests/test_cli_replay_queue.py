@@ -50,3 +50,67 @@ def test_replay_queue_handles_empty_history(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "0 tracks queued" in out
     assert "valid-play coverage: 0.0%" in out
+
+
+# --- #170 AC8: coverage ceiling measured and reported before AC5.1's -- #
+# >=80% criterion is applied, stating whether --cap or --min-valid-plays
+# is the binding constraint on reaching it.
+
+
+def _valid_events(track: TrackRef, *, n: int = 3, month: str = "01") -> list[ListenEvent]:
+    return [
+        ListenEvent(
+            track=track,
+            played_at=f"2026-{month}-0{i}T00:00:00Z",
+            source="test",
+            context=PlayContext(ms_played=180_000),
+        )
+        for i in range(1, n + 1)
+    ]
+
+
+def test_replay_queue_prints_ceiling_with_no_recommendation_when_target_already_met(
+    tmp_path, capsys
+):
+    track = TrackRef(name="Real Listen", artist="Artist", spotify_id="s1")
+    _write_history(tmp_path, _valid_events(track))
+
+    rc = main(["replay-queue", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "coverage ceiling: 100.0% (target 80%)" in out
+    assert "recommendation" not in out
+
+
+def test_replay_queue_recommends_raising_the_cap_when_it_is_the_binding_constraint(
+    tmp_path, capsys
+):
+    tracks = [
+        TrackRef(name=f"Track {i}", artist=f"Artist {i}", spotify_id=f"s{i}") for i in range(3)
+    ]
+    events = [e for t in tracks for e in _valid_events(t)]
+    _write_history(tmp_path, events)
+
+    rc = main(["replay-queue", "--data-dir", str(tmp_path), "--cap", "1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "coverage ceiling: 100.0% (target 80%)" in out
+    assert "recommendation: raise --cap" in out
+
+
+def test_replay_queue_recommends_lowering_min_valid_plays_when_ceiling_itself_is_below_target(
+    tmp_path, capsys
+):
+    eligible = TrackRef(name="Eligible", artist="Artist E", spotify_id="e1")
+    ineligible = TrackRef(name="Too Few Plays", artist="Artist F", spotify_id="f1")
+    events = _valid_events(eligible) + _valid_events(ineligible, n=2, month="02")
+    _write_history(tmp_path, events)
+
+    rc = main(["replay-queue", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "coverage ceiling: 60.0% (target 80%)" in out
+    assert "recommendation: lower --min-valid-plays" in out

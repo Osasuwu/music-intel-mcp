@@ -22,11 +22,15 @@ from music_intel_mcp.live_identity import (
     InMemoryAcoustIdSource,
     InMemoryMusicBrainzNameSearchSource,
     InMemorySpotifySearchSource,
+    InMemoryYoutubeHistoryIndex,
     LiveIdentityResolver,
     LiveNegativeCache,
     ProvenanceSidecar,
+    TitleArtistYoutubeIndex,
     normalize_track_name,
 )
+from music_intel_mcp.models import ListenEvent, TrackRef
+from music_intel_mcp.youtube_music import _TOPIC_SUFFIX
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -265,3 +269,142 @@ def test_acoustid_api_source_parses_results():
 
     assert AcoustIdMatch(score=0.93, mbid="M-1") in matches
     assert AcoustIdMatch(score=0.4, mbid="M-2") in matches
+
+
+# --- #170 AC4/AC5: history-backed youtube rung ------------------------------- #
+
+
+def test_resolve_falls_through_to_youtube_history_rung():
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    resolver = LiveIdentityResolver(youtube_history_index=youtube_index)
+
+    ident = resolver.resolve(title="Song", artist="Artist")
+
+    assert ident.level == "youtube"
+    assert ident.youtube_id == "yt-1"
+    assert ident.mbid is None
+    assert ident.name_key is None  # rung 6 must not also fire
+
+
+def test_resolve_youtube_rung_strips_topic_suffix_from_smtc_artist():
+    """AC5: YT Music's SMTC session reports the auto-generated channel name
+    ("<Artist> - Topic") as artist; the Takeout-built index has no such
+    suffix, so the live-side lookup must strip it before comparing."""
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    resolver = LiveIdentityResolver(youtube_history_index=youtube_index)
+
+    ident = resolver.resolve(title="Song", artist=f"Artist{_TOPIC_SUFFIX}")
+
+    assert ident.level == "youtube"
+    assert ident.youtube_id == "yt-1"
+    assert youtube_index.calls == [("Song", "Artist")]
+
+
+def test_resolve_youtube_rung_inert_when_no_index_given():
+    resolver = LiveIdentityResolver()  # no youtube_history_index at all
+
+    ident = resolver.resolve(title="Song", artist="Artist")
+
+    assert ident.level == "name"
+    assert ident.youtube_id is None
+
+
+def test_resolve_youtube_rung_only_reached_after_mb_name_search_misses():
+    mb_name_search = InMemoryMusicBrainzNameSearchSource({("Song", "Artist"): "M-2"})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    resolver = LiveIdentityResolver(
+        mb_name_search=mb_name_search, youtube_history_index=youtube_index
+    )
+
+    ident = resolver.resolve(title="Song", artist="Artist")
+
+    assert ident.level == "mb_name"
+    assert ident.mbid == "M-2"
+    assert youtube_index.calls == []  # short-circuited, rung never reached
+
+
+def test_resolve_youtube_rung_does_not_clobber_an_already_resolved_level():
+    """code review on PR #196: rung 5.5's guard only checked ``mbid is
+    None``, not ``level == "name"`` (unlike rung 6's guard immediately
+    below it). A track that already resolved via Spotify search (rung 2,
+    which sets ``level`` without ever reaching ``mbid``) but also happens
+    to match this participant's youtube-history index must keep its
+    ``spotify_search`` level -- rung 5.5 is a fallback, reached only when
+    nothing above it matched, same as rung 6. Overwriting it to
+    ``"youtube"`` here would make live_pipeline.py's AC6 alias/near-miss
+    block (gated on ``level not in ("youtube", "name")``) skip a
+    score-gated capture it should have journaled."""
+    spotify_search = InMemorySpotifySearchSource({("Song", "Artist"): "sp-1"})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    resolver = LiveIdentityResolver(
+        spotify_search=spotify_search, youtube_history_index=youtube_index
+    )
+
+    ident = resolver.resolve(title="Song", artist="Artist")
+
+    assert ident.level == "spotify_search"
+    assert ident.spotify_id == "sp-1"
+    assert ident.mbid is None
+
+
+def test_resolve_youtube_rung_ambiguous_key_resolves_to_nothing():
+    """AC4: an unresolvable (no match at all, not a picked-arbitrarily match)
+    lookup falls through to the final name-key rung same as any other miss."""
+    youtube_index = InMemoryYoutubeHistoryIndex()  # simulates an ambiguous key
+    resolver = LiveIdentityResolver(youtube_history_index=youtube_index)
+
+    ident = resolver.resolve(title="Song", artist="Artist")
+
+    assert ident.level == "name"
+    assert ident.youtube_id is None
+    assert ident.name_key == normalize_track_name("Song", "Artist")
+
+
+def test_youtube_history_index_from_events_builds_normalized_lookup():
+    events = [
+        ListenEvent(
+            track=TrackRef(name="Song (Official Video)", artist="Artist", youtube_id="yt-1"),
+            played_at=T0,
+            source="youtube_music_takeout",
+        )
+    ]
+
+    index = TitleArtistYoutubeIndex.from_events(events)
+
+    assert index.lookup(title="Song", artist="Artist") == "yt-1"
+
+
+def test_youtube_history_index_from_events_skips_events_without_youtube_id():
+    events = [
+        ListenEvent(
+            track=TrackRef(name="Song", artist="Artist", youtube_id=None),
+            played_at=T0,
+            source="youtube_music_takeout",
+        )
+    ]
+
+    index = TitleArtistYoutubeIndex.from_events(events)
+
+    assert index.lookup(title="Song", artist="Artist") is None
+
+
+def test_youtube_history_index_from_events_ambiguous_key_drops_out():
+    """AC4: two distinct youtube ids under the same normalized title/artist
+    key means the key can't disambiguate -- resolves to nothing rather than
+    an arbitrary pick."""
+    events = [
+        ListenEvent(
+            track=TrackRef(name="Song", artist="Artist", youtube_id="yt-1"),
+            played_at=T0,
+            source="youtube_music_takeout",
+        ),
+        ListenEvent(
+            track=TrackRef(name="Song", artist="Artist", youtube_id="yt-2"),
+            played_at=T0,
+            source="youtube_music_takeout",
+        ),
+    ]
+
+    index = TitleArtistYoutubeIndex.from_events(events)
+
+    assert index.lookup(title="Song", artist="Artist") is None

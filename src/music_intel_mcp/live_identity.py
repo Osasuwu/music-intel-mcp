@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,10 +42,14 @@ from typing import Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict
 
 from .identity import IsrcMbidIndex, SpotifyIsrcSource, disambiguate_mbids
+from .models import ListenEvent
 from .shared_store import encode_cache_key
 from .store import resolve_data_root
+from .youtube_music import _TOPIC_SUFFIX
 
-LiveResolutionLevel = Literal["acoustid", "spotify_search", "isrc", "mbid", "mb_name", "name"]
+LiveResolutionLevel = Literal[
+    "acoustid", "spotify_search", "isrc", "mbid", "mb_name", "youtube", "name"
+]
 
 # Bump whenever the live-path cache schema (this module's ``LiveResolvedIdentity``
 # or the negative-cache record shape) changes, so stale on-disk entries are
@@ -166,6 +171,59 @@ class InMemoryMusicBrainzNameSearchSource:
     def search(self, *, title: str, artist: str) -> str | None:
         self.calls.append((title, artist))
         return self._map.get((title, artist))
+
+
+@runtime_checkable
+class YoutubeHistoryIndex(Protocol):
+    """title/artist -> youtube_id, built from this participant's own YouTube
+    Music Takeout history (#170 AC4/AC5). A key with no unique id (nothing
+    seen, or more than one distinct id under the same normalized key) must
+    resolve to ``None`` — this rung never guesses."""
+
+    def lookup(self, *, title: str, artist: str) -> str | None: ...
+
+
+class InMemoryYoutubeHistoryIndex:
+    """Dict-backed :class:`YoutubeHistoryIndex` for resolver-level tests,
+    keyed by the raw (title, artist) passed to :meth:`lookup` -- mirrors
+    :class:`InMemoryMusicBrainzNameSearchSource`. Ambiguity/normalization are
+    :class:`TitleArtistYoutubeIndex`'s concern, not this test double's."""
+
+    def __init__(self, mapping: dict[tuple[str, str], str] | None = None) -> None:
+        self._map = dict(mapping or {})
+        self.calls: list[tuple[str, str]] = []
+
+    def lookup(self, *, title: str, artist: str) -> str | None:
+        self.calls.append((title, artist))
+        return self._map.get((title, artist))
+
+
+class TitleArtistYoutubeIndex:
+    """Production :class:`YoutubeHistoryIndex` built from this participant's
+    imported Takeout ``ListenEvent``s that carry a ``youtube_id`` (#170 AC4).
+    Keyed by :func:`normalize_track_name` so the same cleaning (feat./
+    Official-Video/etc. stripping) applies on both the index-build side and
+    the live-query side. A normalized key that maps to more than one distinct
+    youtube_id across history is ambiguous and is dropped entirely rather
+    than resolving to an arbitrary pick (AC4)."""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._map = mapping
+
+    @classmethod
+    def from_events(cls, events: Iterable[ListenEvent]) -> TitleArtistYoutubeIndex:
+        seen: dict[str, set[str]] = {}
+        for event in events:
+            youtube_id = event.track.youtube_id
+            if not youtube_id:
+                continue
+            key = normalize_track_name(event.track.name, event.track.artist)
+            seen.setdefault(key, set()).add(youtube_id)
+        mapping = {key: next(iter(ids)) for key, ids in seen.items() if len(ids) == 1}
+        return cls(mapping)
+
+    def lookup(self, *, title: str, artist: str) -> str | None:
+        return self._map.get(normalize_track_name(title, artist))
 
 
 class AcoustIdApiSource:
@@ -299,6 +357,7 @@ class LiveResolvedIdentity(BaseModel):
     spotify_id: str | None = None
     isrc: str | None = None
     mbid: str | None = None
+    youtube_id: str | None = None
     name: str
     artist: str
     level: LiveResolutionLevel
@@ -324,6 +383,7 @@ class LiveIdentityResolver:
         mb_name_search: MusicBrainzNameSearchSource | None = None,
         negative_cache: LiveNegativeCache | None = None,
         min_acoustid_score: float = ACOUSTID_MIN_SCORE_DEFAULT,
+        youtube_history_index: YoutubeHistoryIndex | None = None,
     ) -> None:
         self.acoustid_source = acoustid_source
         self.spotify_search = spotify_search
@@ -332,6 +392,18 @@ class LiveIdentityResolver:
         self.mb_name_search = mb_name_search
         self.negative_cache = negative_cache
         self.min_acoustid_score = min_acoustid_score
+        self.youtube_history_index = youtube_history_index
+
+    def lookup_youtube_history(self, *, title: str, artist: str) -> str | None:
+        """Shared by rung 5.5 and the #170 AC6 alias/near-miss side lookup —
+        both need the identical Topic-suffix strip before querying the same
+        index, so the normalization lives here once."""
+        if self.youtube_history_index is None:
+            return None
+        lookup_artist = artist
+        if lookup_artist.endswith(_TOPIC_SUFFIX):
+            lookup_artist = lookup_artist[: -len(_TOPIC_SUFFIX)]
+        return self.youtube_history_index.lookup(title=title, artist=lookup_artist)
 
     def resolve(
         self,
@@ -344,6 +416,7 @@ class LiveIdentityResolver:
         mbid: str | None = None
         spotify_id: str | None = None
         isrc: str | None = None
+        youtube_id: str | None = None
         level: LiveResolutionLevel = "name"
 
         # Rung 1: AcoustID (high-score gated, AC3).
@@ -388,6 +461,26 @@ class LiveIdentityResolver:
                 elif self.negative_cache is not None:
                     self.negative_cache.put(neg_key, reason="mb_name_search_miss")
 
+        # Rung 5.5 (#170 AC4/AC5): this participant's own YouTube Music
+        # Takeout history, title/artist keyed. YT Music's SMTC session reports
+        # the auto-generated upload channel name ("<Artist> - Topic") as
+        # artist; the Takeout-built index has no such suffix, so it is
+        # stripped here before the lookup so both sides agree. A miss
+        # (nothing seen, or an ambiguous key already dropped by the index
+        # builder) falls through to the name-key rung same as any other miss.
+        #
+        # ``level == "name"`` guard added in a follow-up review pass (code
+        # review on PR #196): without it, this rung fired whenever mbid was
+        # still None -- which also holds for a spotify_search/isrc rung that
+        # resolved without ever reaching an mbid -- and unconditionally
+        # clobbered that already-reached level to "youtube", the same
+        # "still counts as the rung reached" trap rung 6's guard below
+        # exists to avoid.
+        if mbid is None and level == "name" and self.youtube_history_index is not None:
+            found_youtube_id = self.lookup_youtube_history(title=title, artist=artist)
+            if found_youtube_id:
+                youtube_id, level = found_youtube_id, "youtube"
+
         # Rung 6: normalized name key (final fallback, AC4). Only overrides
         # ``level`` when nothing above matched — a rung that found a
         # spotify_id/isrc without reaching an mbid still counts as "the rung
@@ -400,6 +493,7 @@ class LiveIdentityResolver:
             spotify_id=spotify_id,
             isrc=isrc,
             mbid=mbid,
+            youtube_id=youtube_id,
             name=title,
             artist=artist,
             level=level,

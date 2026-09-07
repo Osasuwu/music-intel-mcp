@@ -143,21 +143,24 @@ def resolve_key(
     root_aliases: dict[str, str] | None = None,
     max_chain: int = 64,
 ) -> str:
-    """#140 AC5: follow an alias chain to its winner, checking the pool map
-    before the root map at every hop (pool precedence). A cycle guard --
-    bounded hop count plus a seen-set -- stops the walk and returns the last
-    key reached rather than looping forever; a genuine cycle should never
-    occur (``apply`` only ever points loser -> winner by rank), but this
-    function does not trust that invariant blindly."""
+    """#140 AC5, precedence inverted by #170 AC7 (decision 7a40049d): follow
+    an alias chain to its winner, checking the participant-root map before
+    the pool map at every hop (participant-root-then-pool precedence) -- a
+    participant's own accepted near-dup/crosswalk merge should not be
+    silently overridden by a pool-wide alias. A cycle guard -- bounded hop
+    count plus a seen-set -- stops the walk and returns the last key reached
+    rather than looping forever; a genuine cycle should never occur
+    (``apply`` only ever points loser -> winner by rank), but this function
+    does not trust that invariant blindly."""
     pool_aliases = pool_aliases or {}
     root_aliases = root_aliases or {}
     current = key
     seen = {current}
     for _ in range(max_chain):
-        if current in pool_aliases:
-            next_key = pool_aliases[current]
-        elif current in root_aliases:
+        if current in root_aliases:
             next_key = root_aliases[current]
+        elif current in pool_aliases:
+            next_key = pool_aliases[current]
         else:
             break
         if next_key in seen:
@@ -499,8 +502,9 @@ class UserStore:
         return self.pool_root / "aliases.jsonl" if self.pool_root is not None else None
 
     def resolve_track_key(self, track_id: str) -> str:
-        """#140 AC5: follow recorded aliases to the winner key, pool aliases
-        taking precedence over root aliases at each hop."""
+        """#140 AC5, precedence inverted by #170 AC7: follow recorded aliases
+        to the winner key, participant-root aliases taking precedence over
+        pool aliases at each hop."""
         pool_aliases = load_aliases(self.pool_aliases_path) if self.pool_aliases_path else {}
         root_aliases = load_aliases(self.aliases_path)
         return resolve_key(track_id, pool_aliases=pool_aliases, root_aliases=root_aliases)
