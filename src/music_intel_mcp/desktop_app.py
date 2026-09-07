@@ -21,7 +21,12 @@ from collections.abc import Sequence
 
 from .continuous_capture import run_continuous_capture
 from .identity import MusicBrainzIsrcIndex
-from .live_identity import AcoustIdApiSource, LiveIdentityResolver, LiveNegativeCache
+from .live_identity import (
+    AcoustIdApiSource,
+    LiveIdentityResolver,
+    LiveNegativeCache,
+    TitleArtistYoutubeIndex,
+)
 from .store import UserStore
 
 _CAPTURE_DURATION_S = 120.0  # #139 AC1: ~120s capture window
@@ -31,7 +36,10 @@ _POLL_INTERVAL_S = 5.0
 def _build_live_resolver(store: UserStore) -> LiveIdentityResolver:
     """Mirrors ``cli.py``'s ``_build_live_resolver``: every network-backed
     rung is gated on its own credential, so a missing key skips that rung
-    instead of crashing the tray loop."""
+    instead of crashing the tray loop. The #170 AC4/AC5 youtube-history rung
+    is always local (built from this participant's own imported Takeout
+    history), so it wires in unconditionally alongside the other local
+    rungs."""
     from .spotify_api import SpotifyApiIsrcSource, SpotifySearchApiSource
 
     acoustid_source = AcoustIdApiSource() if os.environ.get("ACOUSTID_API_KEY") else None
@@ -42,12 +50,15 @@ def _build_live_resolver(store: UserStore) -> LiveIdentityResolver:
         spotify_search = SpotifySearchApiSource(isrc_source=isrc_source)
         spotify_isrc = isrc_source
 
+    youtube_history_index = TitleArtistYoutubeIndex.from_events(store.load_history())
+
     return LiveIdentityResolver(
         acoustid_source=acoustid_source,
         spotify_search=spotify_search,
         spotify_isrc=spotify_isrc,
         isrc_index=MusicBrainzIsrcIndex(),
         negative_cache=LiveNegativeCache(root=store.root),
+        youtube_history_index=youtube_history_index,
     )
 
 

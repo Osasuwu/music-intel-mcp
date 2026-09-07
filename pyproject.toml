@@ -97,6 +97,15 @@ desktop = [
   "pystray>=0.19",
   "pillow>=10.0",
 ]
+# YouTube Music stream-decode capture (#170 AC1). yt-dlp resolves a video id
+# to a direct audio-stream URL; the CLI's `replay-capture-youtube` command
+# then decodes and analyzes it through the same Discogs-EffNet/MTG-Jamendo
+# ONNX stack as live-capture, so this extra is meant to be installed
+# alongside `live-capture` rather than duplicating onnxruntime/librosa here.
+# Cross-platform (no WASAPI/SMTC dependency), unlike live-capture/desktop.
+stream-decode = [
+  "yt-dlp>=2024.1.1",
+]
 
 [project.scripts]
 music-intel = "music_intel_mcp.cli:main"

@@ -85,7 +85,12 @@ from .backfill_playlist import run_continuous_backfill
 from .continuous_capture import run_continuous_capture
 from .identity import IdentityCache, IdentityResolver, MusicBrainzIsrcIndex
 from .ingest import IngestStats, dedup_events, load_ifttt_dir
-from .live_identity import AcoustIdApiSource, LiveIdentityResolver, LiveNegativeCache
+from .live_identity import (
+    AcoustIdApiSource,
+    LiveIdentityResolver,
+    LiveNegativeCache,
+    TitleArtistYoutubeIndex,
+)
 from .live_pipeline import run_live_capture_spike
 from .mb_dump import build_artist_mbid_tsv, build_isrc_mbid_tsv
 from .replay_queue import DEFAULT_REPLAY_QUEUE_CAP, MIN_VALID_PLAYS
@@ -507,7 +512,10 @@ def _build_live_resolver(args: argparse.Namespace) -> LiveIdentityResolver:
     unset ``ACOUSTID_API_KEY``/Spotify creds simply skips that rung and the
     waterfall falls through, per the fragmentation-over-false-merge bias
     (AC3). The ISRC->MBID index and the negative cache are always local and
-    cheap, so those wire in unconditionally."""
+    cheap, so those wire in unconditionally. The #170 AC4/AC5 youtube-history
+    rung is built from this participant's own imported Takeout history --
+    also always local, so it wires in unconditionally alongside the other
+    local rungs."""
     from .spotify_api import SpotifyApiIsrcSource, SpotifySearchApiSource
 
     acoustid_source = AcoustIdApiSource() if os.environ.get("ACOUSTID_API_KEY") else None
@@ -518,12 +526,16 @@ def _build_live_resolver(args: argparse.Namespace) -> LiveIdentityResolver:
         spotify_search = SpotifySearchApiSource(isrc_source=isrc_source)
         spotify_isrc = isrc_source
 
+    store = UserStore(root=args.data_dir)
+    youtube_history_index = TitleArtistYoutubeIndex.from_events(store.load_history())
+
     return LiveIdentityResolver(
         acoustid_source=acoustid_source,
         spotify_search=spotify_search,
         spotify_isrc=spotify_isrc,
         isrc_index=MusicBrainzIsrcIndex(path=getattr(args, "mb_index", None)),
         negative_cache=LiveNegativeCache(root=args.data_dir),
+        youtube_history_index=youtube_history_index,
     )
 
 
@@ -1020,7 +1032,12 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
 
 
 def _cmd_replay_queue(args: argparse.Namespace) -> int:
-    from .replay_queue import replay_queue_coverage
+    from .replay_queue import (
+        COVERAGE_TARGET,
+        measure_coverage_ceiling,
+        replay_queue_coverage,
+        youtube_crosswalk_resolve_mbid,
+    )
     from .store import UserStore
 
     store = UserStore(root=args.data_dir)
@@ -1030,33 +1047,147 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
     # live capture pipeline resolved to -- bridge via the same resolve_mbid seam
     # PR #177 used for select_backfill_tracks, reusing the existing _build_resolver
     # helper (no live Spotify calls: no spotify_source is wired here).
+    # #170 AC3: youtube-origin tracks carry no isrc/mbid for resolver.resolve to
+    # bridge, so wrap it with the alias-chain crosswalk (store.resolve_track_key)
+    # for the youtube_id case.
     resolver = _build_resolver(args)
+    resolve_mbid = youtube_crosswalk_resolve_mbid(
+        resolve_track_key=store.resolve_track_key,
+        resolve_mbid=lambda t: resolver.resolve(t).mbid,
+    )
     stats = replay_queue_coverage(
         events,
         has_audio_analysis=store.has_audio_analysis,
         min_valid_plays=args.min_valid_plays,
         cap=args.cap,
-        resolve_mbid=lambda t: resolver.resolve(t).mbid,
+        resolve_mbid=resolve_mbid,
     )
     print(
         f"replay queue: {stats.queued_count} tracks queued "
         f"({stats.eligible_track_count} eligible, {stats.already_analyzed_count} already analyzed)"
     )
     print(f"  valid-play coverage: {stats.valid_play_coverage:.1%}")
+
+    # #170 AC8: measure the achievable ceiling before AC5.1's >=80% criterion
+    # is applied to a real capture run, and state which knob -- --cap or
+    # --min-valid-plays -- is the binding constraint if the target isn't met.
+    ceiling_report = measure_coverage_ceiling(
+        events,
+        has_audio_analysis=store.has_audio_analysis,
+        min_valid_plays=args.min_valid_plays,
+        cap=args.cap,
+        resolve_mbid=resolve_mbid,
+    )
+    print(
+        f"  coverage ceiling: {ceiling_report.ceiling_coverage:.1%} (target {COVERAGE_TARGET:.0%})"
+    )
+    if ceiling_report.cap_should_be_lifted:
+        print("  recommendation: raise --cap to close the gap to the ceiling")
+    elif ceiling_report.min_valid_plays_should_be_lifted:
+        print("  recommendation: lower --min-valid-plays; the ceiling itself is below target")
     return 0
 
 
 def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     from .replay_capture import replay_journal_path, summarize_replay_journal
     from .store import UserStore
+    from .stream_decode import stream_decode_journal_path
 
     store = UserStore(root=args.data_dir)
     counts = summarize_replay_journal(replay_journal_path(store))
     if not counts:
         print("replay journal: no attempts recorded yet")
-        return 0
-    attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
-    print(f"replay journal: {attempts} attempts")
+    else:
+        attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
+        print(f"replay journal: {attempts} attempts")
+        for outcome, count in sorted(counts.items()):
+            print(f"  {outcome}: {count}")
+
+    # #170 AC2 (code review on PR #196): the stream-decode journal
+    # (YouTube Music participants) uses the same ReplayJournalEntry schema
+    # but was never read here -- "unavailable" outcomes must be counted
+    # separately from loopback replay-capture failures, not silently
+    # dropped from the weekly checkpoint.
+    stream_counts = summarize_replay_journal(stream_decode_journal_path(store))
+    if not stream_counts:
+        print("stream-decode journal: no attempts recorded yet")
+    else:
+        stream_attempts = sum(
+            count for outcome, count in stream_counts.items() if outcome != "requeued"
+        )
+        print(f"stream-decode journal: {stream_attempts} attempts")
+        for outcome, count in sorted(stream_counts.items()):
+            print(f"  {outcome}: {count}")
+    return 0
+
+
+def _cmd_replay_capture_youtube(args: argparse.Namespace) -> int:
+    """#170 AC9: run one YouTube Music participant's replay queue end-to-end
+    -- select the queue via the same AC3 crosswalk-aware selector
+    ``_cmd_replay_queue`` uses, print the AC8 coverage ceiling against it,
+    then decode+analyze each queued track through the real yt-dlp backend
+    (#170 AC1), journaling every attempt (AC2). A journaled ``"unavailable"``
+    outcome from a prior run is excluded from this run's candidate selection
+    via :func:`journaled_unavailable_track_ids` composed into
+    ``has_audio_analysis`` -- not re-queued (AC2), and not requeued in-loop
+    either (:func:`process_stream_decode_queue`'s own docstring)."""
+    from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
+    from .replay_queue import (
+        COVERAGE_TARGET,
+        measure_coverage_ceiling,
+        select_replay_queue,
+        youtube_crosswalk_resolve_mbid,
+    )
+    from .store import UserStore
+    from .stream_decode import (
+        YtDlpStreamDecodeSource,
+        journaled_unavailable_track_ids,
+        process_stream_decode_queue,
+        stream_decode_journal_path,
+    )
+
+    store = UserStore(root=args.data_dir)
+    events = store.load_history()
+    resolver = _build_resolver(args)
+    resolve_mbid = youtube_crosswalk_resolve_mbid(
+        resolve_track_key=store.resolve_track_key,
+        resolve_mbid=lambda t: resolver.resolve(t).mbid,
+    )
+    journal_path = stream_decode_journal_path(store)
+    unavailable_ids = journaled_unavailable_track_ids(journal_path)
+
+    def has_audio_analysis(key: str) -> bool:
+        return store.has_audio_analysis(key) or key in unavailable_ids
+
+    ceiling_report = measure_coverage_ceiling(
+        events,
+        has_audio_analysis=has_audio_analysis,
+        min_valid_plays=args.min_valid_plays,
+        cap=args.cap,
+        resolve_mbid=resolve_mbid,
+    )
+    print(f"coverage ceiling: {ceiling_report.ceiling_coverage:.1%} (target {COVERAGE_TARGET:.0%})")
+
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=has_audio_analysis,
+        min_valid_plays=args.min_valid_plays,
+        cap=args.cap,
+        resolve_mbid=resolve_mbid,
+    )
+    print(f"replay-capture-youtube: {len(queue)} tracks queued")
+
+    results = process_stream_decode_queue(
+        queue=queue,
+        source=YtDlpStreamDecodeSource(),
+        embedding_model=DiscogsEffnetOnnxModel(),
+        classifier=MtgJamendoClassifier(),
+        store=store,
+        journal_path=journal_path,
+    )
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.outcome] = counts.get(result.outcome, 0) + 1
     for outcome, count in sorted(counts.items()):
         print(f"  {outcome}: {count}")
     return 0
@@ -1657,6 +1788,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_replay_journal_summary.set_defaults(func=_cmd_replay_journal_summary)
+
+    p_replay_capture_youtube = sub.add_parser(
+        "replay-capture-youtube",
+        help="#170 AC9: run one YouTube Music participant's replay queue "
+        "end-to-end via yt-dlp stream decode, against the measured coverage "
+        "ceiling (AC8)",
+    )
+    p_replay_capture_youtube.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_replay_capture_youtube.add_argument(
+        "--min-valid-plays",
+        dest="min_valid_plays",
+        type=int,
+        default=MIN_VALID_PLAYS,
+        help=f"valid plays (>=30s, AC1) a canonical key needs to be eligible "
+        f"(default: {MIN_VALID_PLAYS})",
+    )
+    p_replay_capture_youtube.add_argument(
+        "--cap",
+        type=int,
+        default=DEFAULT_REPLAY_QUEUE_CAP,
+        help=f"max tracks in the stratified queue (default: {DEFAULT_REPLAY_QUEUE_CAP})",
+    )
+    p_replay_capture_youtube.add_argument(
+        "--mb-index",
+        default=None,
+        help="MusicBrainz ISRC->MBID index TSV, bridging a history-import candidate's "
+        "resolved ISRC to the MBID the live pipeline keys audio-analysis by, for "
+        "cross-pipeline dedup (default: $MUSICBRAINZ_ISRC_INDEX or "
+        "$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
+    )
+    p_replay_capture_youtube.set_defaults(func=_cmd_replay_capture_youtube)
 
     p_login = sub.add_parser(
         "spotify-login",
