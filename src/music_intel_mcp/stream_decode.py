@@ -31,7 +31,13 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 from .capture import AudioFrame
-from .inference import AudioEmbeddingModel, ClassifierModel, InferenceResult, run_inference
+from .inference import (
+    EMBEDDING_SPACE_VERSION,
+    AudioEmbeddingModel,
+    ClassifierModel,
+    InferenceResult,
+    run_inference,
+)
 from .live_pipeline import LiveCaptureOutcome
 from .models import TrackRef
 from .replay_capture import ReplayJournalEntry, append_replay_journal_entry
@@ -281,7 +287,11 @@ def run_stream_decode_capture(
         )
 
     store.write_audio_analysis(
-        track_id=track_id, embedding=inference.embedding, tags=inference.tags
+        track_id=track_id,
+        embedding=inference.embedding,
+        tags=inference.tags,
+        model_version=EMBEDDING_SPACE_VERSION,
+        input_rms=inference.input_rms,
     )
     _journal_stream_decode(journal_path, track_id=track_id, outcome="ok", reason=None, now=now())
     return StreamDecodeCaptureResult(
