@@ -54,6 +54,13 @@ dev = [
   # Mocks httpx at the transport layer so spotify_api.py tests never hit the live
   # Spotify API (#87 AC-A). Test-only.
   "respx>=0.21",
+  # #194's gain-invariance tests call _mel_patches directly and unconditionally
+  # (tests/test_inference.py), which imports librosa -- no longer "never
+  # exercised by the default unit-test suite" (see the onnx-bench/live-capture
+  # comments below, written before those tests existed). Cross-platform, no
+  # onnxruntime/WASAPI dependency needed for these tests, so it belongs here
+  # rather than pulling in a whole extra.
+  "librosa>=0.10",
 ]
 # Production shared-metadata store. Network-only (SupabaseSharedStore); CI uses
 # the in-memory store, so this stays out of the default/dev install.
