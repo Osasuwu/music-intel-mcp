@@ -207,6 +207,34 @@ def run_live_capture_spike(
         )
         track_id = canonical_track_id(track_ref)
 
+    # #179: same RMS/short gate #166 defines for replay, applied to the organic
+    # path — a capture below the RMS threshold or shorter than the requested
+    # window must not embed and must not write an audio-analysis file (silent,
+    # ad, or spoken-intro captures mean-pool to near-identical vectors and are
+    # never replaced under first-write-wins). Checked here, before both the
+    # expensive inference/store-write steps below AND the #170 AC6 alias
+    # write further down -- an unreliable capture must not mint a permanent
+    # alias any more than it may mint a permanent embedding (code review on
+    # PR #196: the AC6 block originally sat above this gate and could alias a
+    # short/silent capture's score-gated match before the gate had a chance
+    # to discard it).
+    if sink.duration_s + 1e-9 < duration_s:
+        reason = f"captured {sink.duration_s:.2f}s < window {duration_s:.2f}s"
+        _journal_live_discard(
+            journal_path, track_id=track_id, outcome="short", reason=reason, now=now
+        )
+        return LiveCaptureResult(
+            identity=identity, inference=None, analysis_path=None, outcome="short"
+        )
+    if _rms(pcm) < rms_threshold:
+        reason = f"rms below threshold {rms_threshold}"
+        _journal_live_discard(
+            journal_path, track_id=track_id, outcome="silent", reason=reason, now=now
+        )
+        return LiveCaptureResult(
+            identity=identity, inference=None, analysis_path=None, outcome="silent"
+        )
+
     # #170 AC6: the participant's own youtube-history index may recognize
     # this capture even when a *different* rung already won the waterfall --
     # e.g. fingerprinting resolves an mbid for a track the participant's
@@ -217,7 +245,8 @@ def run_live_capture_spike(
     # journaled as a near-miss (CONTEXT.md #170 grill decision
     # 4c0041b5-cb93-4106-a92a-fcc03fb8ba41). The youtube rung itself winning,
     # or nothing resolving past the name key, needs no action here -- there
-    # is no separate winner key to relate the history match to.
+    # is no separate winner key to relate the history match to. Runs only
+    # after the RMS/short gate above has confirmed this capture is reliable.
     if (
         identity.level not in ("youtube", "name")
         and live_identity_resolver.youtube_history_index is not None
@@ -239,29 +268,6 @@ def run_live_capture_spike(
                     title=now_playing.title,
                     artist=now_playing.artist,
                 )
-
-    # #179: same RMS/short gate #166 defines for replay, applied to the organic
-    # path — a capture below the RMS threshold or shorter than the requested
-    # window must not embed and must not write an audio-analysis file (silent,
-    # ad, or spoken-intro captures mean-pool to near-identical vectors and are
-    # never replaced under first-write-wins). Checked here so the gate fires
-    # before the expensive inference/store-write steps below.
-    if sink.duration_s + 1e-9 < duration_s:
-        reason = f"captured {sink.duration_s:.2f}s < window {duration_s:.2f}s"
-        _journal_live_discard(
-            journal_path, track_id=track_id, outcome="short", reason=reason, now=now
-        )
-        return LiveCaptureResult(
-            identity=identity, inference=None, analysis_path=None, outcome="short"
-        )
-    if _rms(pcm) < rms_threshold:
-        reason = f"rms below threshold {rms_threshold}"
-        _journal_live_discard(
-            journal_path, track_id=track_id, outcome="silent", reason=reason, now=now
-        )
-        return LiveCaptureResult(
-            identity=identity, inference=None, analysis_path=None, outcome="silent"
-        )
 
     # #126 AC1/AC4: dedup purely off the identity waterfall + local store — an
     # already-analyzed track is skipped, no re-inference (the expensive step).

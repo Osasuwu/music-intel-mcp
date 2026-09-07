@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import builtins
 import json
+import subprocess
+import sys
+import types
 
 import numpy as np
 import pytest
@@ -108,6 +111,43 @@ def test_ytdlp_source_degrades_with_a_clear_error_when_ytdlp_is_not_installed(mo
     source = YtDlpStreamDecodeSource()
 
     with pytest.raises(YtDlpNotInstalledError):
+        source.decode("yt-abc123")
+
+
+# --- code review on PR #196: an ffmpeg decode failure after a successful --- #
+# yt-dlp extraction was previously uncaught -- it must degrade the same way
+# an extractor failure does (VideoUnavailableError), not crash the batch.
+
+
+class _FakeYoutubeDL:
+    def __init__(self, opts) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def extract_info(self, url, download=False):
+        return {"url": "https://example.invalid/stream"}
+
+
+def test_ytdlp_source_raises_video_unavailable_when_ffmpeg_decode_fails(monkeypatch):
+    fake_yt_dlp = types.ModuleType("yt_dlp")
+    fake_yt_dlp.YoutubeDL = _FakeYoutubeDL
+    fake_utils = types.ModuleType("yt_dlp.utils")
+    fake_utils.DownloadError = type("DownloadError", (Exception,), {})
+    fake_yt_dlp.utils = fake_utils
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake_yt_dlp)
+
+    def _raise_called_process_error(cmd, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+    monkeypatch.setattr(subprocess, "run", _raise_called_process_error)
+    source = YtDlpStreamDecodeSource()
+
+    with pytest.raises(VideoUnavailableError):
         source.decode("yt-abc123")
 
 

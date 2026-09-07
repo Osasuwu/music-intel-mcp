@@ -21,6 +21,7 @@ import time.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -131,9 +132,19 @@ class YtDlpStreamDecodeSource:
             raise VideoUnavailableError(f"{youtube_id}: {exc}") from exc
         stream_url = info["url"]
 
-        samples = _decode_stream_to_pcm(
-            stream_url, sample_rate=self.sample_rate, channels=self.channels
-        )
+        try:
+            samples = _decode_stream_to_pcm(
+                stream_url, sample_rate=self.sample_rate, channels=self.channels
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            # code review on PR #196: an ffmpeg decode failure (bad stream,
+            # ffmpeg missing) was previously uncaught here and would crash the
+            # whole batch instead of journaling this one track "unavailable"
+            # like the extractor-failure branch above already does -- route
+            # it through the same safe-failure contract (VideoUnavailableError
+            # is caught by run_stream_decode_capture and excluded from
+            # journaled_unavailable_track_ids re-queue).
+            raise VideoUnavailableError(f"{youtube_id}: ffmpeg decode failed: {exc}") from exc
         return AudioFrame(samples=samples, sample_rate=self.sample_rate)
 
 
@@ -142,8 +153,6 @@ def _decode_stream_to_pcm(stream_url: str, *, sample_rate: int, channels: int) -
     interleaved float32 PCM, reshaped to :class:`AudioFrame`'s
     ``(n_samples, channels)`` contract. Part of the real, not-unit-tested
     ``YtDlpStreamDecodeSource`` backend (see its docstring)."""
-    import subprocess
-
     cmd = [
         "ffmpeg",
         "-i",

@@ -549,6 +549,42 @@ def test_run_live_capture_spike_aliases_youtube_history_when_score_gated_rung_wi
     assert not youtube_near_miss_journal_path(store).exists()
 
 
+def test_run_live_capture_spike_does_not_alias_when_capture_is_silent(tmp_path) -> None:
+    """#179/#170 interaction (code review on PR #196): a score-gated rung
+    winning with a concurrent youtube-history match must NOT be aliased when
+    the capture itself is silent -- the #179 RMS gate must discard the
+    capture before AC6's alias write ever runs, otherwise an unreliable
+    capture could still mint a permanent alias even though it can't mint a
+    permanent embedding."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="chrome.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Around the World", "Daft Punk"): "yt-1"})
+    live_resolver = LiveIdentityResolver(
+        acoustid_source=acoustid, youtube_history_index=youtube_index
+    )
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=_ScriptedCapture(_tone_frame(800, amplitude=0.0001)),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    assert result is not None
+    assert result.outcome == "silent"
+    assert result.identity.level == "acoustid"
+    assert result.identity.mbid == "M-1"
+    assert load_aliases(store.aliases_path) == {}
+    assert not youtube_near_miss_journal_path(store).exists()
+
+
 def test_run_live_capture_spike_journals_near_miss_when_non_score_gated_rung_wins(
     tmp_path,
 ) -> None:

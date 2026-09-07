@@ -1091,16 +1091,33 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
 def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     from .replay_capture import replay_journal_path, summarize_replay_journal
     from .store import UserStore
+    from .stream_decode import stream_decode_journal_path
 
     store = UserStore(root=args.data_dir)
     counts = summarize_replay_journal(replay_journal_path(store))
     if not counts:
         print("replay journal: no attempts recorded yet")
-        return 0
-    attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
-    print(f"replay journal: {attempts} attempts")
-    for outcome, count in sorted(counts.items()):
-        print(f"  {outcome}: {count}")
+    else:
+        attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
+        print(f"replay journal: {attempts} attempts")
+        for outcome, count in sorted(counts.items()):
+            print(f"  {outcome}: {count}")
+
+    # #170 AC2 (code review on PR #196): the stream-decode journal
+    # (YouTube Music participants) uses the same ReplayJournalEntry schema
+    # but was never read here -- "unavailable" outcomes must be counted
+    # separately from loopback replay-capture failures, not silently
+    # dropped from the weekly checkpoint.
+    stream_counts = summarize_replay_journal(stream_decode_journal_path(store))
+    if not stream_counts:
+        print("stream-decode journal: no attempts recorded yet")
+    else:
+        stream_attempts = sum(
+            count for outcome, count in stream_counts.items() if outcome != "requeued"
+        )
+        print(f"stream-decode journal: {stream_attempts} attempts")
+        for outcome, count in sorted(stream_counts.items()):
+            print(f"  {outcome}: {count}")
     return 0
 
 
