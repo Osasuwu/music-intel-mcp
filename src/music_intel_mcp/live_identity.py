@@ -468,7 +468,15 @@ class LiveIdentityResolver:
         # stripped here before the lookup so both sides agree. A miss
         # (nothing seen, or an ambiguous key already dropped by the index
         # builder) falls through to the name-key rung same as any other miss.
-        if mbid is None and self.youtube_history_index is not None:
+        #
+        # ``level == "name"`` guard added in a follow-up review pass (code
+        # review on PR #196): without it, this rung fired whenever mbid was
+        # still None -- which also holds for a spotify_search/isrc rung that
+        # resolved without ever reaching an mbid -- and unconditionally
+        # clobbered that already-reached level to "youtube", the same
+        # "still counts as the rung reached" trap rung 6's guard below
+        # exists to avoid.
+        if mbid is None and level == "name" and self.youtube_history_index is not None:
             found_youtube_id = self.lookup_youtube_history(title=title, artist=artist)
             if found_youtube_id:
                 youtube_id, level = found_youtube_id, "youtube"

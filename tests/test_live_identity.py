@@ -323,6 +323,30 @@ def test_resolve_youtube_rung_only_reached_after_mb_name_search_misses():
     assert youtube_index.calls == []  # short-circuited, rung never reached
 
 
+def test_resolve_youtube_rung_does_not_clobber_an_already_resolved_level():
+    """code review on PR #196: rung 5.5's guard only checked ``mbid is
+    None``, not ``level == "name"`` (unlike rung 6's guard immediately
+    below it). A track that already resolved via Spotify search (rung 2,
+    which sets ``level`` without ever reaching ``mbid``) but also happens
+    to match this participant's youtube-history index must keep its
+    ``spotify_search`` level -- rung 5.5 is a fallback, reached only when
+    nothing above it matched, same as rung 6. Overwriting it to
+    ``"youtube"`` here would make live_pipeline.py's AC6 alias/near-miss
+    block (gated on ``level not in ("youtube", "name")``) skip a
+    score-gated capture it should have journaled."""
+    spotify_search = InMemorySpotifySearchSource({("Song", "Artist"): "sp-1"})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    resolver = LiveIdentityResolver(
+        spotify_search=spotify_search, youtube_history_index=youtube_index
+    )
+
+    ident = resolver.resolve(title="Song", artist="Artist")
+
+    assert ident.level == "spotify_search"
+    assert ident.spotify_id == "sp-1"
+    assert ident.mbid is None
+
+
 def test_resolve_youtube_rung_ambiguous_key_resolves_to_nothing():
     """AC4: an unresolvable (no match at all, not a picked-arbitrarily match)
     lookup falls through to the final name-key rung same as any other miss."""
