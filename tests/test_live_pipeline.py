@@ -22,11 +22,17 @@ from music_intel_mcp.inference import ClassifierResult, InMemoryClassifier, InMe
 from music_intel_mcp.live_identity import (
     AcoustIdMatch,
     InMemoryAcoustIdSource,
+    InMemoryMusicBrainzNameSearchSource,
+    InMemoryYoutubeHistoryIndex,
     LiveIdentityResolver,
 )
-from music_intel_mcp.live_pipeline import live_capture_journal_path, run_live_capture_spike
+from music_intel_mcp.live_pipeline import (
+    live_capture_journal_path,
+    run_live_capture_spike,
+    youtube_near_miss_journal_path,
+)
 from music_intel_mcp.nowplaying import InMemoryNowPlayingSource, NowPlayingInfo
-from music_intel_mcp.store import UserStore
+from music_intel_mcp.store import UserStore, load_aliases
 
 
 def _tone_frame(n: int, *, sample_rate: int = 16000, channels: int = 1, amplitude: float = 0.1):
@@ -471,3 +477,186 @@ def test_run_live_capture_spike_none_when_nothing_playing(tmp_path) -> None:
         store=UserStore(root=tmp_path),
     )
     assert result is None
+
+
+# --- #170 AC4/AC5/AC6: youtube-rung track key + alias/near-miss wiring ------ #
+
+
+def test_run_live_capture_spike_youtube_rung_win_uses_youtube_key(tmp_path) -> None:
+    """AC4/AC5: when the history-backed youtube rung wins the waterfall (no
+    higher rung resolved an mbid), the stored track key must be
+    ``youtube:<id>`` -- canonical_track_id's youtube_id rung -- not the
+    name-key fallback the TrackRef would otherwise bottom out at if
+    ``youtube_id`` were never threaded through."""
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    live_resolver = LiveIdentityResolver(youtube_history_index=youtube_index)
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Song", artist="Artist", app_id="chrome.exe")
+    )
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    assert result is not None
+    assert result.identity.level == "youtube"
+    assert result.identity.youtube_id == "yt-1"
+    assert store.has_audio_analysis("youtube:yt-1")
+
+
+def test_run_live_capture_spike_aliases_youtube_history_when_score_gated_rung_wins(
+    tmp_path,
+) -> None:
+    """AC6: the fingerprint rung (score-gated) wins an mbid for the same
+    capture the participant's own youtube history also recognizes -- the
+    history match must be recorded as an alias (``youtube:<id> ->
+    mbid:<id>``, tier ``history_title_match``) in the participant-root
+    ``aliases.jsonl``, never the pool sidecar."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="chrome.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Around the World", "Daft Punk"): "yt-1"})
+    live_resolver = LiveIdentityResolver(
+        acoustid_source=acoustid, youtube_history_index=youtube_index
+    )
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    assert result is not None
+    assert result.identity.level == "acoustid"
+    assert result.identity.mbid == "M-1"
+    aliases = load_aliases(store.aliases_path)
+    assert aliases["youtube:yt-1"] == "mbid:M-1"
+    assert not youtube_near_miss_journal_path(store).exists()
+
+
+def test_run_live_capture_spike_journals_near_miss_when_non_score_gated_rung_wins(
+    tmp_path,
+) -> None:
+    """AC6: a win at ``mb_name`` (not score-gated evidence) must not alias the
+    youtube history match -- it is journaled as a near-miss instead, no
+    ``aliases.jsonl`` line written."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="chrome.exe")
+    )
+    mb_name_search = InMemoryMusicBrainzNameSearchSource({("Around the World", "Daft Punk"): "M-2"})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Around the World", "Daft Punk"): "yt-1"})
+    live_resolver = LiveIdentityResolver(
+        mb_name_search=mb_name_search, youtube_history_index=youtube_index
+    )
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    assert result is not None
+    assert result.identity.level == "mb_name"
+    assert load_aliases(store.aliases_path) == {}
+    journal_path = youtube_near_miss_journal_path(store)
+    assert journal_path.exists()
+    lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert lines == [
+        {
+            "youtube_id": "yt-1",
+            "winner": "mbid:M-2",
+            "winner_level": "mb_name",
+            "title": "Around the World",
+            "artist": "Daft Punk",
+        }
+    ]
+
+
+def test_run_live_capture_spike_no_alias_or_near_miss_when_youtube_rung_itself_wins(
+    tmp_path,
+) -> None:
+    """AC6 must not fire when the youtube rung is itself the waterfall's
+    winner -- there is no separate winner key to alias the history match to,
+    and it is not a near-miss (it is the primary result)."""
+    youtube_index = InMemoryYoutubeHistoryIndex({("Song", "Artist"): "yt-1"})
+    live_resolver = LiveIdentityResolver(youtube_history_index=youtube_index)
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Song", artist="Artist", app_id="chrome.exe")
+    )
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    assert result is not None
+    assert result.identity.level == "youtube"
+    assert not store.aliases_path.exists()
+    assert not youtube_near_miss_journal_path(store).exists()
+
+
+def test_run_live_capture_spike_does_not_re_alias_already_aliased_youtube_id(tmp_path) -> None:
+    """Idempotent, mirroring #178's metadata-crosswalk convention: a
+    ``loser`` already present in ``aliases.jsonl`` is never re-aliased."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Around the World", artist="Daft Punk", app_id="chrome.exe")
+    )
+    acoustid = InMemoryAcoustIdSource({"fp-fake": [AcoustIdMatch(score=0.95, mbid="M-1")]})
+    youtube_index = InMemoryYoutubeHistoryIndex({("Around the World", "Daft Punk"): "yt-1"})
+    live_resolver = LiveIdentityResolver(
+        acoustid_source=acoustid, youtube_history_index=youtube_index
+    )
+    store = UserStore(root=tmp_path)
+    store.write_audio_analysis(track_id="mbid:M-1", embedding=[0.5], tags={})
+
+    run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+    run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=live_resolver,
+        capture=FakeLoopbackCapture(sample_rate=16000, channels=1),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+    )
+
+    lines = store.aliases_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1

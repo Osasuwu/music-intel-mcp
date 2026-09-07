@@ -575,13 +575,16 @@ def test_resolve_key_follows_root_alias_chain():
     assert resolved == "spotify:dup"
 
 
-def test_resolve_key_pool_alias_takes_precedence_over_root_alias():
+def test_resolve_key_root_alias_takes_precedence_over_pool_alias():
+    """#170 AC7 (decision 7a40049d): participant-root aliases must win over
+    pool aliases at each hop -- inverted from the pre-#170 pool-first
+    behavior this test used to assert."""
     from music_intel_mcp.store import resolve_key
 
     pool_aliases = {"name:dup|artist": "mbid:pool-winner"}
     root_aliases = {"name:dup|artist": "spotify:root-winner"}
     resolved = resolve_key("name:dup|artist", pool_aliases=pool_aliases, root_aliases=root_aliases)
-    assert resolved == "mbid:pool-winner"
+    assert resolved == "spotify:root-winner"
 
 
 def test_resolve_key_guards_against_cycles():

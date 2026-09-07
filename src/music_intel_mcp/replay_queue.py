@@ -31,6 +31,7 @@ from .temporal import _is_valid
 
 MIN_VALID_PLAYS = 3
 DEFAULT_REPLAY_QUEUE_CAP = 200
+COVERAGE_TARGET = 0.8  # AC5.1 (decision 87277764)
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,45 @@ def select_replay_queue(
     return [candidate.track for candidate in selected]
 
 
+def youtube_crosswalk_resolve_mbid(
+    resolve_track_key: Callable[[str], str],
+    resolve_mbid: Callable[[TrackRef], str | None] | None = None,
+) -> Callable[[TrackRef], str | None]:
+    """#170 AC3: extends the ``resolve_mbid`` bridge (see ``_analysis_key``)
+    to youtube-origin ``TrackRef``s. History-import youtube tracks carry no
+    isrc/mbid of their own to hand a plain ``resolve_mbid`` callable, so a
+    track whose ``youtube:<id>`` key already crosswalks to an mbid-keyed pool
+    entry -- via the alias chain #170 AC6 populates when a score-gated rung
+    wins the live waterfall -- would otherwise queue for a redundant decode.
+    ``resolve_track_key`` is the same participant-root-then-pool alias walk
+    ``UserStore.resolve_track_key``/``store.resolve_key`` already perform
+    (injected as a callable, not a store, matching this module's existing
+    ``has_audio_analysis`` convention); an unaliased key echoes back
+    unchanged, so no alias present is simply a no-op.
+
+    Composes with (does not replace) an existing ``resolve_mbid`` bridge --
+    e.g. the ``resolver.resolve(t).mbid`` lambda ``_cmd_replay_queue`` already
+    wires -- so non-youtube tracks keep their ordinary spotify/isrc->mbid
+    bridge. An alias winner that is itself isrc-keyed (no mbid found in the
+    MB dump) is not bridged: the same dump already failed to resolve that
+    isrc once, so nothing here would resolve it differently, and that track
+    still queues for decode."""
+
+    def _resolve(track: TrackRef) -> str | None:
+        if resolve_mbid is not None:
+            mbid = resolve_mbid(track)
+            if mbid is not None:
+                return mbid
+        if track.youtube_id is None:
+            return None
+        resolved = resolve_track_key(f"youtube:{track.youtube_id}")
+        if resolved.startswith("mbid:"):
+            return resolved.removeprefix("mbid:")
+        return None
+
+    return _resolve
+
+
 @dataclass(frozen=True)
 class ReplayQueueStats:
     """The AC5.1 coverage stat (decision ``87277764``): share of **valid
@@ -199,4 +239,63 @@ def replay_queue_coverage(
         already_analyzed_count=len(analyzed_cids),
         queued_count=len(queued_cids),
         valid_play_coverage=coverage,
+    )
+
+
+@dataclass(frozen=True)
+class CoverageCeilingReport:
+    """#170 AC8: the achievable coverage ceiling -- valid-play coverage at the
+    current ``min_valid_plays`` threshold with the queue ``cap`` effectively
+    removed -- measured against the AC5.1 >=80% target (decision ``87277764``,
+    :data:`COVERAGE_TARGET`) *before* that criterion is applied to a real
+    capture run. Isolates which of the two queue-selection knobs is the
+    binding constraint: ``cap_should_be_lifted`` is true when raising
+    ``DEFAULT_REPLAY_QUEUE_CAP`` alone would close the gap to a
+    target-meeting ceiling; ``min_valid_plays_should_be_lifted`` is true when
+    the ceiling itself falls short, meaning the cap is not the bottleneck --
+    ``MIN_VALID_PLAYS`` would need lowering to admit more eligible tracks."""
+
+    ceiling_coverage: float
+    configured_coverage: float
+    ceiling_meets_target: bool
+    cap_should_be_lifted: bool
+    min_valid_plays_should_be_lifted: bool
+
+
+def measure_coverage_ceiling(
+    events: Iterable[ListenEvent],
+    *,
+    has_audio_analysis: Callable[[str], bool],
+    min_valid_plays: int = MIN_VALID_PLAYS,
+    cap: int = DEFAULT_REPLAY_QUEUE_CAP,
+    resolve_mbid: Callable[[TrackRef], str | None] | None = None,
+    target: float = COVERAGE_TARGET,
+) -> CoverageCeilingReport:
+    events = list(events)
+    configured = replay_queue_coverage(
+        events,
+        has_audio_analysis=has_audio_analysis,
+        min_valid_plays=min_valid_plays,
+        cap=cap,
+        resolve_mbid=resolve_mbid,
+    )
+    # A cap this high can never bind -- the queue can never hold more
+    # candidates than there are events, so this measures the ceiling with
+    # DEFAULT_REPLAY_QUEUE_CAP effectively lifted.
+    ceiling = replay_queue_coverage(
+        events,
+        has_audio_analysis=has_audio_analysis,
+        min_valid_plays=min_valid_plays,
+        cap=len(events),
+        resolve_mbid=resolve_mbid,
+    )
+    ceiling_meets_target = ceiling.valid_play_coverage >= target
+    return CoverageCeilingReport(
+        ceiling_coverage=ceiling.valid_play_coverage,
+        configured_coverage=configured.valid_play_coverage,
+        ceiling_meets_target=ceiling_meets_target,
+        cap_should_be_lifted=(
+            configured.valid_play_coverage < target <= ceiling.valid_play_coverage
+        ),
+        min_valid_plays_should_be_lifted=not ceiling_meets_target,
     )

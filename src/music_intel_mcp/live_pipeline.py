@@ -21,6 +21,7 @@ live smoke session with the user.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,16 +43,63 @@ from .replay_capture import (
     append_replay_journal_entry,
 )
 from .shared_store import canonical_track_id
-from .store import UserStore
+from .store import UserStore, load_aliases
 
 FingerprintFn = Callable[[np.ndarray, int], tuple[str, float]]
 RawFingerprintFn = Callable[[np.ndarray, int], tuple[list[int], float]]
 
-LiveCaptureOutcome = Literal["ok", "skipped", "silent", "short"]
+LiveCaptureOutcome = Literal["ok", "skipped", "silent", "short", "unavailable"]
+
+# #170 AC6: tier for an alias emitted when the participant's own youtube-
+# history index recognizes a capture that a *score-gated* rung (acoustid/
+# isrc/mbid) also resolved -- mirrors metadata_crosswalk.py's TIER constant
+# and {loser, winner, tier} alias-line convention.
+HISTORY_TITLE_MATCH_TIER = "history_title_match"
+_SCORE_GATED_LEVELS = {"acoustid", "isrc", "mbid"}
+_NEAR_MISS_LEVELS = {"spotify_search", "mb_name"}
 
 
 def live_capture_journal_path(store: UserStore) -> Path:
     return store.root / "live_capture_journal.jsonl"
+
+
+def youtube_near_miss_journal_path(store: UserStore) -> Path:
+    return store.root / "youtube_history_near_miss.jsonl"
+
+
+def _append_youtube_history_alias(store: UserStore, *, loser: str, winner: str) -> None:
+    """Idempotent, mirroring metadata_crosswalk.py's convention: a ``loser``
+    already present in ``aliases.jsonl`` is never re-aliased."""
+    existing = load_aliases(store.aliases_path)
+    if loser in existing:
+        return
+    aliases_path = store.aliases_path
+    aliases_path.parent.mkdir(parents=True, exist_ok=True)
+    line = {"loser": loser, "winner": winner, "tier": HISTORY_TITLE_MATCH_TIER}
+    with aliases_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line) + "\n")
+
+
+def _append_youtube_near_miss(
+    store: UserStore,
+    *,
+    youtube_id: str,
+    winner: str,
+    winner_level: str,
+    title: str,
+    artist: str,
+) -> None:
+    path = youtube_near_miss_journal_path(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "youtube_id": youtube_id,
+        "winner": winner,
+        "winner_level": winner_level,
+        "title": title,
+        "artist": artist,
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
 
 
 def _journal_live_discard(
@@ -153,10 +201,44 @@ def run_live_capture_spike(
             spotify_id=identity.spotify_id,
             isrc=identity.isrc,
             mbid=identity.mbid,
+            youtube_id=identity.youtube_id,
             name=identity.name,
             artist=identity.artist,
         )
         track_id = canonical_track_id(track_ref)
+
+    # #170 AC6: the participant's own youtube-history index may recognize
+    # this capture even when a *different* rung already won the waterfall --
+    # e.g. fingerprinting resolves an mbid for a track the participant's
+    # Takeout history also has under a youtube_id. That relationship is worth
+    # recording even though it didn't win: a score-gated winner (acoustid/
+    # isrc/mbid) is trustworthy enough to alias the history youtube_id to; a
+    # non-score-gated winner (spotify_search/mb_name) is not, so it is only
+    # journaled as a near-miss (CONTEXT.md #170 grill decision
+    # 4c0041b5-cb93-4106-a92a-fcc03fb8ba41). The youtube rung itself winning,
+    # or nothing resolving past the name key, needs no action here -- there
+    # is no separate winner key to relate the history match to.
+    if (
+        identity.level not in ("youtube", "name")
+        and live_identity_resolver.youtube_history_index is not None
+    ):
+        history_youtube_id = live_identity_resolver.lookup_youtube_history(
+            title=now_playing.title, artist=now_playing.artist
+        )
+        if history_youtube_id:
+            if identity.level in _SCORE_GATED_LEVELS:
+                _append_youtube_history_alias(
+                    store, loser=f"youtube:{history_youtube_id}", winner=track_id
+                )
+            elif identity.level in _NEAR_MISS_LEVELS:
+                _append_youtube_near_miss(
+                    store,
+                    youtube_id=history_youtube_id,
+                    winner=track_id,
+                    winner_level=identity.level,
+                    title=now_playing.title,
+                    artist=now_playing.artist,
+                )
 
     # #179: same RMS/short gate #166 defines for replay, applied to the organic
     # path — a capture below the RMS threshold or shorter than the requested

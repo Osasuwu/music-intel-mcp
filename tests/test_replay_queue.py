@@ -10,8 +10,15 @@ green — no new test needed here.
 
 from __future__ import annotations
 
+import pytest
+
 from music_intel_mcp.models import ListenEvent, PlayContext, TrackRef
-from music_intel_mcp.replay_queue import replay_queue_coverage, select_replay_queue
+from music_intel_mcp.replay_queue import (
+    measure_coverage_ceiling,
+    replay_queue_coverage,
+    select_replay_queue,
+    youtube_crosswalk_resolve_mbid,
+)
 from music_intel_mcp.shared_store import canonical_track_id
 
 
@@ -206,4 +213,150 @@ def test_coverage_counts_a_history_import_track_via_resolve_mbid_bridge():
 
     assert stats.already_analyzed_count == 1
     assert stats.queued_count == 0
-    assert stats.valid_play_coverage == 1.0
+
+
+# --- #170 AC3: youtube-key crosswalk skips decode when the pool already --- #
+# covers the track under an aliased isrc:/mbid: key. Reuses the existing
+# resolve_mbid seam (composed via youtube_crosswalk_resolve_mbid) rather than
+# a new mechanism -- a youtube-origin TrackRef never carries its own
+# isrc/mbid to hand to a plain resolve_mbid callable, so the bridge instead
+# walks the alias chain #170 AC6 populates (``youtube:<id>`` -> the
+# score-gated rung's winner key).
+
+
+def test_youtube_track_aliased_to_an_analyzed_mbid_is_not_queued():
+    track = _track("Song", youtube_id="yt-1")
+    events = [
+        _event(track, played_at=f"2026-01-0{i}T00:00:00Z", ms_played=180_000) for i in range(1, 4)
+    ]
+    resolve_mbid = youtube_crosswalk_resolve_mbid(
+        resolve_track_key=lambda key: {"youtube:yt-1": "mbid:M-1"}.get(key, key)
+    )
+
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=lambda cid: cid == "mbid:M-1",
+        resolve_mbid=resolve_mbid,
+    )
+
+    assert queue == []
+
+
+def test_youtube_track_with_no_alias_is_still_queued():
+    track = _track("Unaliased Song", youtube_id="yt-2")
+    events = [
+        _event(track, played_at=f"2026-01-0{i}T00:00:00Z", ms_played=180_000) for i in range(1, 4)
+    ]
+    # resolve_track_key is a no-op bridge here -- no alias was ever written
+    # for yt-2, so it echoes the key back unchanged (mirrors store.py's
+    # resolve_key/resolve_track_key contract: no alias hop found -> the
+    # input key itself).
+    resolve_mbid = youtube_crosswalk_resolve_mbid(resolve_track_key=lambda key: key)
+
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=lambda cid: cid == "mbid:M-1",
+        resolve_mbid=resolve_mbid,
+    )
+
+    assert queue == [track]
+
+
+def test_youtube_crosswalk_falls_back_to_a_wrapped_resolve_mbid_for_non_youtube_tracks():
+    # youtube_crosswalk_resolve_mbid must compose with (not replace) an
+    # existing resolve_mbid bridge -- e.g. _cmd_replay_queue's
+    # resolver.resolve(t).mbid lambda -- so a spotify-origin history track
+    # still gets its ordinary mbid bridge, not just youtube-origin ones.
+    track = _track("Spotify History Track", spotify_id="s7")
+    events = [
+        _event(track, played_at=f"2026-01-0{i}T00:00:00Z", ms_played=180_000) for i in range(1, 4)
+    ]
+    resolve_mbid = youtube_crosswalk_resolve_mbid(
+        resolve_track_key=lambda key: key,
+        resolve_mbid=lambda t: "mb-777" if t.spotify_id == "s7" else None,
+    )
+
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=lambda cid: cid == "mbid:mb-777",
+        resolve_mbid=resolve_mbid,
+    )
+
+    assert queue == []
+
+
+# --- #170 AC8: achievable coverage ceiling, measured before AC5.1's >=80% -- #
+# target (decision 87277764) is applied. The ceiling is the coverage achieved
+# at the current min_valid_plays threshold with the queue cap removed -- it
+# isolates whether DEFAULT_REPLAY_QUEUE_CAP is the binding constraint from
+# whether MIN_VALID_PLAYS is.
+
+
+def _eligible_events_many(n: int, *, year: int = 2020) -> list[ListenEvent]:
+    events = []
+    for i in range(n):
+        track = _track(f"Ceiling Track {i}", artist=f"Artist {i}", spotify_id=f"c{i}")
+        events += _eligible_events(track, year=year)
+    return events
+
+
+def test_ceiling_ignores_a_binding_cap_that_configured_coverage_is_stuck_under():
+    events = _eligible_events_many(3)
+
+    report = measure_coverage_ceiling(events, has_audio_analysis=lambda _cid: False, cap=1)
+
+    assert report.configured_coverage == pytest.approx(1 / 3)
+    assert report.ceiling_coverage == pytest.approx(1.0)
+    assert report.ceiling_meets_target is True
+    assert report.cap_should_be_lifted is True
+    assert report.min_valid_plays_should_be_lifted is False
+
+
+def test_ceiling_lifting_the_cap_to_exactly_target_still_recommends_lifting_it():
+    # Boundary case: ceiling_coverage == target exactly. The cap is still the
+    # binding constraint here (configured_coverage is below target only
+    # because of the cap), so lifting it should still be recommended -- an
+    # off-by-one on this boundary (< instead of <=) would silently drop the
+    # recommendation exactly when the ceiling just barely clears the target.
+    events = _eligible_events_many(3)
+
+    report = measure_coverage_ceiling(
+        events, has_audio_analysis=lambda _cid: False, cap=1, target=1.0
+    )
+
+    assert report.configured_coverage == pytest.approx(1 / 3)
+    assert report.ceiling_coverage == pytest.approx(1.0)
+    assert report.cap_should_be_lifted is True
+
+
+def test_ceiling_below_target_recommends_lowering_min_valid_plays_not_the_cap():
+    eligible_track = _track("Eligible", artist="Artist E", spotify_id="e1")
+    ineligible_track = _track("Too Few Plays", artist="Artist F", spotify_id="f1")
+    events = _eligible_events(eligible_track, year=2020) + [
+        _event(ineligible_track, played_at="2020-02-01T00:00:00Z", ms_played=180_000),
+        _event(ineligible_track, played_at="2020-02-02T00:00:00Z", ms_played=180_000),
+    ]
+
+    report = measure_coverage_ceiling(events, has_audio_analysis=lambda _cid: False)
+
+    # 3 valid plays covered (the eligible track) out of 5 total valid plays = 0.6
+    assert report.ceiling_coverage == pytest.approx(0.6)
+    assert report.configured_coverage == pytest.approx(0.6)
+    assert report.ceiling_meets_target is False
+    assert report.cap_should_be_lifted is False
+    assert report.min_valid_plays_should_be_lifted is True
+
+
+def test_ceiling_already_meets_target_recommends_nothing():
+    track = _track("Covered", artist="Artist G", spotify_id="g1")
+    events = _eligible_events(track, year=2020)
+
+    report = measure_coverage_ceiling(
+        events, has_audio_analysis=lambda cid: cid == canonical_track_id(track)
+    )
+
+    assert report.ceiling_coverage == pytest.approx(1.0)
+    assert report.configured_coverage == pytest.approx(1.0)
+    assert report.ceiling_meets_target is True
+    assert report.cap_should_be_lifted is False
+    assert report.min_valid_plays_should_be_lifted is False
