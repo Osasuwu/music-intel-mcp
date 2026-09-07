@@ -31,7 +31,12 @@ from pydantic import BaseModel, ConfigDict
 
 from .automated_playback import TrackSkipped
 from .capture import LoopbackSource, RingBufferSink
-from .inference import AudioEmbeddingModel, ClassifierModel, run_inference
+from .inference import (
+    EMBEDDING_SPACE_VERSION,
+    AudioEmbeddingModel,
+    ClassifierModel,
+    run_inference,
+)
 from .models import TrackRef
 from .shared_store import canonical_track_id
 from .store import UserStore
@@ -254,7 +259,11 @@ def run_replay_capture(
         pcm, sample_rate=sink.sample_rate, embedding_model=embedding_model, classifier=classifier
     )
     analysis_path = store.write_audio_analysis(
-        track_id=track_id, embedding=inference.embedding, tags=inference.tags
+        track_id=track_id,
+        embedding=inference.embedding,
+        tags=inference.tags,
+        model_version=EMBEDDING_SPACE_VERSION,
+        input_rms=inference.input_rms,
     )
     return _finish("ok", reason=None, analysis_path=analysis_path)
 

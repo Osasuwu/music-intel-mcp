@@ -81,10 +81,19 @@ class ClassifierResult:
     tags: dict[str, float] = field(default_factory=dict)
 
 
+# #194 AC6: bumped whenever the front-end parametrization changes the model
+# input space (not just the ONNX filename) -- gain normalization added here
+# means every embedding computed before this version is not comparable to one
+# computed after it. Consumers (near_dup.py, the store) key on this string to
+# decide when a record's embedding must be treated as stale.
+EMBEDDING_SPACE_VERSION = "discogs-effnet-bsdynamic-1+rms-norm-v1"
+
+
 @dataclass
 class InferenceResult:
     embedding: np.ndarray
     tags: dict[str, float]
+    input_rms: float | None = None
 
 
 @runtime_checkable
@@ -103,6 +112,7 @@ class InMemoryEmbeddingModel:
     def __init__(self, vector: np.ndarray) -> None:
         self._vector = vector
         self.calls = 0
+        self.last_input_rms: float | None = None
 
     def embed(self, pcm: np.ndarray, sample_rate: int) -> np.ndarray:
         self.calls += 1
@@ -178,14 +188,42 @@ _MEL_N_BANDS = 96
 _MEL_LOG_SCALE = 10000.0
 _PATCH_FRAMES = 128
 
+# #194: gain-invariance target and degenerate-signal floor. RMS (not peak, not
+# LUFS) to a fixed -20 dBFS -- see CONTEXT.md "Gain-invariant mel front-end"
+# (decision f0f66484) for why the alternatives were rejected.
+_RMS_NORMALIZATION_TARGET = 0.1
+_RMS_DEGENERATE_FLOOR = 1e-6
 
-def _mel_patches(pcm: np.ndarray, sample_rate: int) -> np.ndarray:
+
+def _normalize_rms(mono: np.ndarray) -> tuple[np.ndarray, float]:
+    """Scale ``mono`` to :data:`_RMS_NORMALIZATION_TARGET` RMS. Returns the
+    normalized signal and the *pre-normalization* RMS (the scalar recorded
+    alongside the analysis, per #194's applied-gain AC). Below
+    ``_RMS_DEGENERATE_FLOOR`` the signal is returned unchanged -- no gain cap,
+    no clipping special-case (decision 271c9acf): a cap would reintroduce the
+    level-dependence this normalizer exists to remove."""
+    rms = float(np.sqrt(np.mean(np.square(mono))))
+    if rms < _RMS_DEGENERATE_FLOOR:
+        return mono, rms
+    return mono * (_RMS_NORMALIZATION_TARGET / rms), rms
+
+
+def _mel_patches(pcm: np.ndarray, sample_rate: int) -> tuple[np.ndarray, float]:
     import librosa
 
+    # #194 AC3: the mel/log pipeline runs in float64 end-to-end, casting down
+    # to float32 only on the final patch array (the ONNX model's input dtype).
+    # A float32 signal carries ~1e-7 relative rounding noise whose *absolute*
+    # size scales with the signal's magnitude -- since the three gain levels
+    # this feeds into differ in magnitude before normalization divides it back
+    # out, that noise doesn't cancel and shows up as a gain-dependent residual
+    # after the log/mel nonlinearity. float64 pushes it below the noise floor
+    # of the tolerance this front-end is contracted to (rtol=1e-4, atol=1e-5).
     mono = pcm.mean(axis=1) if pcm.ndim == 2 else pcm
-    mono = mono.astype(np.float32)
+    mono = mono.astype(np.float64)
     if sample_rate != DISCOGS_EFFNET_SAMPLE_RATE:
         mono = librosa.resample(mono, orig_sr=sample_rate, target_sr=DISCOGS_EFFNET_SAMPLE_RATE)
+    mono, input_rms = _normalize_rms(mono)
 
     mel = librosa.feature.melspectrogram(
         y=mono,
@@ -195,7 +233,7 @@ def _mel_patches(pcm: np.ndarray, sample_rate: int) -> np.ndarray:
         n_mels=_MEL_N_BANDS,
         power=1.0,
     )
-    log_mel = np.log10(1.0 + _MEL_LOG_SCALE * mel).astype(np.float32).T  # (frames, bands)
+    log_mel = np.log10(1.0 + _MEL_LOG_SCALE * mel).T  # (frames, bands), float64
 
     n_frames = log_mel.shape[0]
     if n_frames < _PATCH_FRAMES:
@@ -203,7 +241,8 @@ def _mel_patches(pcm: np.ndarray, sample_rate: int) -> np.ndarray:
         n_frames = _PATCH_FRAMES
     n_patches = n_frames // _PATCH_FRAMES
     trimmed = log_mel[: n_patches * _PATCH_FRAMES]
-    return trimmed.reshape(n_patches, _PATCH_FRAMES, _MEL_N_BANDS)
+    patches = trimmed.reshape(n_patches, _PATCH_FRAMES, _MEL_N_BANDS).astype(np.float32)
+    return patches, input_rms
 
 
 class DiscogsEffnetOnnxModel:
@@ -219,6 +258,7 @@ class DiscogsEffnetOnnxModel:
             default_filename=_DISCOGS_EFFNET_DEFAULT_FILENAME,
         )
         self._session = None
+        self.last_input_rms: float | None = None
 
     def _ensure_session(self):
         if self._session is None:
@@ -230,7 +270,12 @@ class DiscogsEffnetOnnxModel:
     def embed(self, pcm: np.ndarray, sample_rate: int) -> np.ndarray:
         session = self._ensure_session()
         input_name = session.get_inputs()[0].name
-        patches = _mel_patches(pcm, sample_rate)
+        patches, input_rms = _mel_patches(pcm, sample_rate)
+        # #194 AC9: the pre-normalization RMS is threaded to run_inference via
+        # this attribute rather than changing embed()'s Protocol-declared
+        # return type -- InMemoryEmbeddingModel mirrors this attribute so both
+        # fakes and the real model satisfy AudioEmbeddingModel unchanged.
+        self.last_input_rms = input_rms
         outputs = session.run(["embeddings"], {input_name: patches})
         # One embedding per 128-frame patch -> mean-pool into a track-level vector.
         return np.asarray(outputs[0]).mean(axis=0)
@@ -278,4 +323,5 @@ def run_inference(
     """Wire capture -> embedding -> classifier tags (#124 AC3)."""
     embedding = embedding_model.embed(pcm, sample_rate)
     result = classifier.classify(embedding)
-    return InferenceResult(embedding=embedding, tags=result.tags)
+    input_rms = getattr(embedding_model, "last_input_rms", None)
+    return InferenceResult(embedding=embedding, tags=result.tags, input_rms=input_rms)

@@ -39,6 +39,8 @@ class AudioAnalysisRecord:
     embedding: list[float]
     tags: dict[str, float]
     provenance: dict[str, Any] | None = None
+    model_version: str | None = None
+    input_rms: float | None = None
 
 
 DEFAULT_DATA_DIR = "data"
@@ -334,6 +336,7 @@ class UserStore:
         tags: dict[str, float],
         provenance: Any | None = None,
         model_version: str | None = None,
+        input_rms: float | None = None,
     ) -> Path:
         """Write one live-capture inference result under the LOCAL store only
         (#124 AC5). MTG-Jamendo outputs are licensing-gated local-only
@@ -358,12 +361,19 @@ class UserStore:
         exclusively to the pool, never to the participant root -- and the
         pool record excludes ``provenance`` entirely (not even as a ``null``
         key) in favor of ``model_version``. Without a pool this is the
-        original #124/#139 root write, unchanged."""
+        original #124/#139 root write, unchanged.
+
+        #194 AC6/AC7/AC9: ``model_version`` (the embedding-space version that
+        produced this record) and ``input_rms`` (the pre-normalization RMS
+        applied-gain scalar) round-trip through BOTH branches now -- previously
+        ``model_version`` was pool-only, leaving root records with no way to
+        tell which embedding-space version produced them."""
         pool_path = self.pool_audio_analysis_path(track_id)
         if pool_path is not None:
             pool_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = self._audio_analysis_payload(track_id, embedding, tags)
-            payload["model_version"] = model_version
+            payload = self._audio_analysis_payload(
+                track_id, embedding, tags, model_version=model_version, input_rms=input_rms
+            )
             return self._atomic_write(pool_path, payload)
 
         self.audio_analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -374,20 +384,29 @@ class UserStore:
             provenance_payload = provenance.model_dump()
         else:
             provenance_payload = dict(provenance)
-        payload = self._audio_analysis_payload(track_id, embedding, tags)
+        payload = self._audio_analysis_payload(
+            track_id, embedding, tags, model_version=model_version, input_rms=input_rms
+        )
         payload["provenance"] = provenance_payload
         return self._atomic_write(path, payload)
 
     @staticmethod
     def _audio_analysis_payload(
-        track_id: str, embedding: Any, tags: dict[str, float]
+        track_id: str,
+        embedding: Any,
+        tags: dict[str, float],
+        *,
+        model_version: str | None = None,
+        input_rms: float | None = None,
     ) -> dict[str, Any]:
         """Fields common to both the root and pool record shapes -- the two
-        writers diverge only on ``provenance`` vs. ``model_version`` (#161)."""
+        writers diverge only on ``provenance`` (root-only, #161)."""
         return {
             "track_id": track_id,
             "embedding": [float(x) for x in embedding],
             "tags": {label: float(score) for label, score in tags.items()},
+            "model_version": model_version,
+            "input_rms": input_rms,
         }
 
     @staticmethod
@@ -421,6 +440,8 @@ class UserStore:
                     embedding=[float(x) for x in payload["embedding"]],
                     tags={k: float(v) for k, v in payload.get("tags", {}).items()},
                     provenance=payload.get("provenance"),
+                    model_version=payload.get("model_version"),
+                    input_rms=payload.get("input_rms"),
                 )
             )
         records.sort(key=lambda r: r.track_id)
@@ -444,6 +465,8 @@ class UserStore:
                     embedding=[float(x) for x in payload["embedding"]],
                     tags={k: float(v) for k, v in payload.get("tags", {}).items()},
                     provenance=payload.get("provenance"),
+                    model_version=payload.get("model_version"),
+                    input_rms=payload.get("input_rms"),
                 )
             )
         records.sort(key=lambda r: r.track_id)
