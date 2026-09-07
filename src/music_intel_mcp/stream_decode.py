@@ -243,6 +243,7 @@ def run_stream_decode_capture(
     classifier: ClassifierModel,
     store: UserStore,
     journal_path: Path | None = None,
+    on_capture_analyzed: Callable[..., None] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> StreamDecodeCaptureResult:
     """#170 AC2: one journal line per decode attempt.
@@ -269,9 +270,7 @@ def run_stream_decode_capture(
         )
 
     try:
-        inference = decode_and_run_inference(
-            source, youtube_id, embedding_model=embedding_model, classifier=classifier
-        )
+        frame = source.decode(youtube_id)
     except VideoUnavailableError as exc:
         _journal_stream_decode(
             journal_path, track_id=track_id, outcome="unavailable", reason=str(exc), now=now()
@@ -279,10 +278,29 @@ def run_stream_decode_capture(
         return StreamDecodeCaptureResult(
             track_id=track_id, inference=None, analysis_path=None, outcome="unavailable"
         )
+    inference = run_inference(
+        frame.samples,
+        sample_rate=frame.sample_rate,
+        embedding_model=embedding_model,
+        classifier=classifier,
+    )
 
     store.write_audio_analysis(
         track_id=track_id, embedding=inference.embedding, tags=inference.tags
     )
+    if on_capture_analyzed is not None:
+        # #201 AC1/AC2: passive observer of an accepted decode -- the
+        # stream-decode window probe rides here so it re-uses this PCM and
+        # this embedding as its whole-track leg instead of costing a second
+        # decode (mirrors replay_capture.run_replay_capture's identical hook
+        # for the loopback leg).
+        on_capture_analyzed(
+            track_id=track_id,
+            pcm=frame.samples,
+            sample_rate=frame.sample_rate,
+            embedding=inference.embedding,
+            tags=inference.tags,
+        )
     _journal_stream_decode(journal_path, track_id=track_id, outcome="ok", reason=None, now=now())
     return StreamDecodeCaptureResult(
         track_id=track_id,
@@ -309,6 +327,7 @@ def process_stream_decode_queue(
     classifier: ClassifierModel,
     store: UserStore,
     journal_path: Path | None = None,
+    on_capture_analyzed: Callable[..., None] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> list[StreamDecodeCaptureResult]:
     """#170 AC9: drive ``queue`` end-to-end through
@@ -334,6 +353,7 @@ def process_stream_decode_queue(
                 classifier=classifier,
                 store=store,
                 journal_path=journal_path,
+                on_capture_analyzed=on_capture_analyzed,
                 now=now,
             )
         )

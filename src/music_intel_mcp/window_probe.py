@@ -270,13 +270,26 @@ def _fmt(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
 
 
-def render_window_probe_report(report: WindowProbeReport) -> str:
+def render_window_probe_report(
+    report: WindowProbeReport,
+    *,
+    title: str = "120 s vs 30 s capture-window probe (#169)",
+    long_label: str = "120 s leg",
+    short_label: str = "30 s leg",
+    capture_noun: str = "capture",
+) -> str:
     """Human-readable gate result. The single-capture caveat travels with the
-    numbers because the numbers are what gets over-read without it."""
+    numbers because the numbers are what gets over-read without it.
+
+    ``title``/``long_label``/``short_label``/``capture_noun`` default to the
+    #169 loopback leg's original wording (unchanged) but let a caller render
+    a different leg's report without its numbers being mistakable for #169's
+    (#201 AC6) -- e.g. the stream-decode leg passes ``long_label="whole-track
+    leg"`` since its long leg is a whole decoded track, not a 120 s window."""
     d = report.distances
     a = report.agreement
     lines = [
-        "120 s vs 30 s capture-window probe (#169)",
+        title,
         "",
         f"tracks: {report.n_tracks} (minimum for the gate: {report.min_sample_size})",
     ]
@@ -287,18 +300,19 @@ def render_window_probe_report(report: WindowProbeReport) -> str:
         )
     lines += [
         "",
-        "cosine distance, 120 s leg vs 30 s leg:",
+        f"cosine distance, {long_label} vs {short_label}:",
         f"  mean {_fmt(d.mean)}  median {_fmt(d.median)}  p90 {_fmt(d.p90)}  p95 {_fmt(d.p95)}",
         f"  min {_fmt(d.minimum)}  max {_fmt(d.maximum)}",
         "",
         "timbre cluster agreement:",
         f"  adjusted Rand index: {_fmt(a.adjusted_rand_index)}",
-        f"  roots/clusters: 120 s leg {a.long_cluster_count}, 30 s leg {a.short_cluster_count}",
-        f"  unclustered tracks: 120 s leg {a.long_noise}, 30 s leg {a.short_noise}",
+        f"  roots/clusters: {long_label} {a.long_cluster_count}, "
+        f"{short_label} {a.short_cluster_count}",
+        f"  unclustered tracks: {long_label} {a.long_noise}, {short_label} {a.short_noise}",
         "",
-        "Caveat: both legs are derived from one capture (the 30 s leg is a front",
+        f"Caveat: both legs are derived from one {capture_noun} (the {short_label} is a front",
         "truncation of the same buffer), so these distances contain no",
-        "capture-to-capture variance and are not a total noise floor -- they",
+        f"{capture_noun}-to-{capture_noun} variance and are not a total noise floor -- they",
         "isolate window length alone.",
     ]
     return "\n".join(lines)
@@ -308,6 +322,13 @@ def window_probe_path(store: UserStore) -> Path:
     """Under the gitignored per-user data root, never in the repo (#169 AC4:
     no captured audio or embeddings committed)."""
     return store.root / "window_probe.jsonl"
+
+
+def stream_decode_window_probe_path(store: UserStore) -> Path:
+    """The #201 stream-decode leg's journal -- separate file from
+    :func:`window_probe_path`'s #169 loopback leg (AC6/AC9: never mixed with
+    the loopback pairs, never committed)."""
+    return store.root / "stream_decode_window_probe.jsonl"
 
 
 def append_window_pair(path: Path, pair: WindowPair) -> None:
