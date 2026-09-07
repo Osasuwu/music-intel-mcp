@@ -709,6 +709,8 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
     capture = WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
     store = UserStore(root=args.data_dir)
 
+    from .live_pipeline import live_capture_journal_path
+
     result = run_live_capture_spike(
         duration_s=args.duration,
         now_playing_source=InMemoryNowPlayingSource(now_playing),
@@ -717,14 +719,19 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
         embedding_model=DiscogsEffnetOnnxModel(),
         classifier=MtgJamendoClassifier(),
         store=store,
+        journal_path=live_capture_journal_path(store),
     )
     if result is None:
         print("nothing playing by the time capture ran")
         return 1
+    if result.outcome in ("silent", "short"):
+        print(f"discarded capture ({result.outcome}): no audio-analysis file written")
+        return 1
 
     print(f"identity: mbid={result.identity.mbid} level={result.identity.level}")
-    print(f"embedding: shape={result.inference.embedding.shape}")
-    print(f"tags: {result.inference.tags}")
+    if result.inference is not None:
+        print(f"embedding: shape={result.inference.embedding.shape}")
+        print(f"tags: {result.inference.tags}")
     print(f"wrote local-only analysis to {result.analysis_path}")
     return 0
 
@@ -749,6 +756,12 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     def on_result(now_playing, result) -> None:
         if result is None:
             print(f"skipped: {now_playing.artist} - {now_playing.title} (nothing to capture)")
+            return
+        if result.outcome in ("silent", "short"):
+            print(
+                f"discarded ({result.outcome}): {now_playing.artist} - {now_playing.title} "
+                "(no audio-analysis file written)"
+            )
             return
         print(
             f"captured: {now_playing.artist} - {now_playing.title} "

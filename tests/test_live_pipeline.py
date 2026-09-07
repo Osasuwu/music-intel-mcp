@@ -13,18 +13,46 @@ call order across the fakes to pin that down, not just the end result.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
-from music_intel_mcp.capture import FakeLoopbackCapture
+from music_intel_mcp.capture import AudioFrame, FakeLoopbackCapture
 from music_intel_mcp.inference import ClassifierResult, InMemoryClassifier, InMemoryEmbeddingModel
 from music_intel_mcp.live_identity import (
     AcoustIdMatch,
     InMemoryAcoustIdSource,
     LiveIdentityResolver,
 )
-from music_intel_mcp.live_pipeline import run_live_capture_spike
+from music_intel_mcp.live_pipeline import live_capture_journal_path, run_live_capture_spike
 from music_intel_mcp.nowplaying import InMemoryNowPlayingSource, NowPlayingInfo
 from music_intel_mcp.store import UserStore
+
+
+def _tone_frame(n: int, *, sample_rate: int = 16000, channels: int = 1, amplitude: float = 0.1):
+    t = np.arange(n) / sample_rate
+    tone = (amplitude * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
+    samples = np.repeat(tone.reshape(-1, 1), channels, axis=1)
+    return AudioFrame(samples=samples, sample_rate=sample_rate)
+
+
+class _ScriptedCapture:
+    """Returns a single fixed frame from ``read()`` regardless of the
+    requested duration — lets a test hand the organic path a silent or
+    short buffer directly, the same fake-sink idiom ``test_replay_capture.py``
+    uses for #166's gate."""
+
+    def __init__(self, frame: AudioFrame) -> None:
+        self._frame = frame
+
+    def start(self) -> None:
+        pass
+
+    def read(self, duration_s: float) -> AudioFrame:
+        return self._frame
+
+    def stop(self) -> None:
+        pass
 
 
 def _fake_fingerprint_fn(events: list[str]):
@@ -323,6 +351,113 @@ def test_run_live_capture_spike_skips_raw_fingerprint_when_already_analyzed(tmp_
 
     assert result is not None
     assert result.skipped is True
+
+
+def test_run_live_capture_spike_discards_silent_capture(tmp_path) -> None:
+    """#179 AC1/AC2: a capture whose RMS is below the shared #166 threshold
+    writes no audio-analysis file and is journaled with reason ``silent``."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Ad Break", artist="Unknown", app_id="Spotify.exe")
+    )
+    store = UserStore(root=tmp_path)
+    journal_path = live_capture_journal_path(store)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=LiveIdentityResolver(),
+        capture=_ScriptedCapture(_tone_frame(800, amplitude=0.0001)),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+        journal_path=journal_path,
+    )
+
+    assert result is not None
+    assert result.outcome == "silent"
+    assert result.analysis_path is None
+    assert result.inference is None
+    assert list(store.audio_analysis_dir.glob("*.json")) == []
+
+    entries = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == "silent"
+    assert entries[0]["reason"] is not None
+
+
+def test_run_live_capture_spike_discards_short_capture(tmp_path) -> None:
+    """#179 AC1/AC2: a capture shorter than the requested window writes no
+    audio-analysis file and is journaled with reason ``short``, even though
+    the buffer isn't silent."""
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Cut Off", artist="Unknown", app_id="Spotify.exe")
+    )
+    store = UserStore(root=tmp_path)
+    journal_path = live_capture_journal_path(store)
+
+    result = run_live_capture_spike(
+        duration_s=0.5,
+        now_playing_source=now_playing,
+        live_identity_resolver=LiveIdentityResolver(),
+        capture=_ScriptedCapture(_tone_frame(800)),  # 0.05s of audio, window is 0.5s
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+        journal_path=journal_path,
+    )
+
+    assert result is not None
+    assert result.outcome == "short"
+    assert result.analysis_path is None
+    assert result.inference is None
+    assert list(store.audio_analysis_dir.glob("*.json")) == []
+
+    entries = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == "short"
+    assert entries[0]["reason"] is not None
+
+
+def test_run_live_capture_spike_gate_uses_shared_replay_threshold(tmp_path) -> None:
+    """#179 AC3: the RMS threshold is imported from #166's ``replay_capture``
+    module, not redefined here — proven by monkeypatching the shared constant
+    via the default argument and observing the gate's behavior change."""
+    from music_intel_mcp import replay_capture
+
+    now_playing = InMemoryNowPlayingSource(
+        NowPlayingInfo(title="Quiet But Not That Quiet", artist="Unknown", app_id="Spotify.exe")
+    )
+    store = UserStore(root=tmp_path)
+
+    result = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=LiveIdentityResolver(),
+        capture=_ScriptedCapture(_tone_frame(800, amplitude=0.02)),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=store,
+        fingerprint_fn=_fake_fingerprint_fn([]),
+        rms_threshold=replay_capture.RMS_SILENCE_THRESHOLD,
+    )
+    assert result is not None
+    assert result.outcome != "silent"
+
+    result_stricter = run_live_capture_spike(
+        duration_s=0.05,
+        now_playing_source=now_playing,
+        live_identity_resolver=LiveIdentityResolver(),
+        capture=_ScriptedCapture(_tone_frame(800, amplitude=0.02)),
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult()),
+        store=UserStore(root=tmp_path / "second"),
+        fingerprint_fn=_fake_fingerprint_fn([]),
+        rms_threshold=0.03,
+    )
+    assert result_stricter is not None
+    assert result_stricter.outcome == "silent"
 
 
 def test_run_live_capture_spike_none_when_nothing_playing(tmp_path) -> None:

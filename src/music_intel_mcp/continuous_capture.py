@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from .capture import LoopbackSource
 from .inference import (
@@ -31,7 +32,7 @@ from .inference import (
     check_rss_ceiling,
 )
 from .live_identity import LiveIdentityResolver
-from .live_pipeline import LiveCaptureResult, run_live_capture_spike
+from .live_pipeline import LiveCaptureResult, live_capture_journal_path, run_live_capture_spike
 from .nowplaying import InMemoryNowPlayingSource, NowPlayingInfo, NowPlayingSource
 from .store import UserStore
 
@@ -60,15 +61,21 @@ def run_continuous_capture(
     sleep: Callable[[float], None] = time.sleep,
     rss_ceiling_mb: float = PEAK_RSS_CEILING_MB,
     rss_reader: Callable[[], float] | None = None,
+    journal_path: Path | None = None,
 ) -> None:
     """Poll forever (until ``stop_event`` is set) capturing each new track once.
 
     ``capture_factory`` builds a fresh :class:`LoopbackSource` per detected
     track (the real backend needs the track's resolved ``process_id`` at
     construction time, which can change between tracks even for the same app).
+
+    ``journal_path`` defaults to :func:`~music_intel_mcp.live_pipeline.live_capture_journal_path`
+    for ``store`` — a silent/short organic capture (#179) is journaled there.
     """
     stop_event = stop_event or threading.Event()
     last_key: _TrackKey | None = None
+    if journal_path is None:
+        journal_path = live_capture_journal_path(store)
 
     while not stop_event.is_set():
         now_playing = now_playing_source.current()
@@ -90,6 +97,7 @@ def run_continuous_capture(
                         embedding_model=embedding_model,
                         classifier=classifier,
                         store=store,
+                        journal_path=journal_path,
                     )
                     check_rss_ceiling(ceiling_mb=rss_ceiling_mb, rss_reader=rss_reader)
                 except RssCeilingExceededError as exc:
