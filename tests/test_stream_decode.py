@@ -151,6 +151,37 @@ def test_ytdlp_source_raises_video_unavailable_when_ffmpeg_decode_fails(monkeypa
         source.decode("yt-abc123")
 
 
+def test_ytdlp_source_raises_video_unavailable_when_stream_is_truncated(monkeypatch):
+    """code review on PR #196: a ``googlevideo`` stream URL that expires or
+    drops mid-transfer can leave ffmpeg exiting 0 with a truncated stdout
+    buffer -- one whose byte count isn't an exact multiple of
+    ``channels * 4`` (float32). ``_decode_stream_to_pcm``'s
+    ``raw.reshape(-1, channels)`` raises ``ValueError`` in that case, which
+    must degrade through the same VideoUnavailableError contract as every
+    other decode failure, not crash the batch."""
+    fake_yt_dlp = types.ModuleType("yt_dlp")
+    fake_yt_dlp.YoutubeDL = _FakeYoutubeDL
+    fake_utils = types.ModuleType("yt_dlp.utils")
+    fake_utils.DownloadError = type("DownloadError", (Exception,), {})
+    fake_yt_dlp.utils = fake_utils
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake_yt_dlp)
+
+    class _TruncatedCompletedProcess:
+        # 3 float32 samples (12 bytes) is not a multiple of channels=2 --
+        # reshape(-1, 2) raises ValueError, simulating a stream cut short
+        # mid-transfer that ffmpeg still exited 0 for.
+        stdout = b"\x00" * 12
+
+    def _return_truncated_stdout(cmd, **kwargs):
+        return _TruncatedCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", _return_truncated_stdout)
+    source = YtDlpStreamDecodeSource()
+
+    with pytest.raises(VideoUnavailableError):
+        source.decode("yt-abc123")
+
+
 # --- AC2: one journal line per decode attempt; extractor failure for a ----- #
 # removed/private/region-locked video journals outcome "unavailable" and is
 # not re-queued; already-analyzed tracks are skipped without decoding.

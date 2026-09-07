@@ -136,14 +136,19 @@ class YtDlpStreamDecodeSource:
             samples = _decode_stream_to_pcm(
                 stream_url, sample_rate=self.sample_rate, channels=self.channels
             )
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as exc:
             # code review on PR #196: an ffmpeg decode failure (bad stream,
             # ffmpeg missing) was previously uncaught here and would crash the
             # whole batch instead of journaling this one track "unavailable"
             # like the extractor-failure branch above already does -- route
             # it through the same safe-failure contract (VideoUnavailableError
             # is caught by run_stream_decode_capture and excluded from
-            # journaled_unavailable_track_ids re-queue).
+            # journaled_unavailable_track_ids re-queue). ValueError added in
+            # a follow-up review pass: a googlevideo stream URL that expires
+            # or drops mid-transfer can leave ffmpeg exiting 0 with a
+            # truncated stdout buffer -- _decode_stream_to_pcm's
+            # raw.reshape(-1, channels) raises ValueError in that case, the
+            # same batch-crash failure mode as the subprocess errors above.
             raise VideoUnavailableError(f"{youtube_id}: ffmpeg decode failed: {exc}") from exc
         return AudioFrame(samples=samples, sample_rate=self.sample_rate)
 
