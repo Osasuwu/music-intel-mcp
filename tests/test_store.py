@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import shutil
 
+import pytest
+
 from music_intel_mcp.analyzer import analyze
 from music_intel_mcp.store import UserStore
 
@@ -132,6 +134,51 @@ def test_write_audio_analysis_provenance_optional(tmp_path):
     path = store.write_audio_analysis(track_id="mbid-1", embedding=[0.1], tags={})
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["provenance"] is None
+
+
+# #194 AC6/AC7: model_version must round-trip through BOTH storage branches --
+# previously it was accepted as a kwarg but only ever written on the pool
+# branch, so a root-only record had no way to tell which embedding-space
+# version produced it.
+def test_write_audio_analysis_root_persists_and_reads_back_model_version(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.write_audio_analysis(
+        track_id="mbid-1", embedding=[0.1], tags={}, model_version="discogs-effnet-bsdynamic-1"
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["model_version"] == "discogs-effnet-bsdynamic-1"
+
+    records = store.list_audio_analyses()
+    assert records[0].model_version == "discogs-effnet-bsdynamic-1"
+
+
+# #194 AC9: the applied-gain scalar (pre-normalization RMS) is recorded
+# alongside the analysis on both branches so a downstream consumer can tell
+# how much the front-end normalizer scaled a given capture.
+def test_write_audio_analysis_root_persists_and_reads_back_input_rms(tmp_path):
+    store = UserStore(root=tmp_path)
+    path = store.write_audio_analysis(track_id="mbid-1", embedding=[0.1], tags={}, input_rms=0.037)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["input_rms"] == pytest.approx(0.037)
+
+    records = store.list_audio_analyses()
+    assert records[0].input_rms == pytest.approx(0.037)
+
+
+def test_write_audio_analysis_pool_persists_and_reads_back_input_rms(tmp_path):
+    store = UserStore(root=tmp_path / "participant", pool_root=tmp_path / "pool")
+    store.write_audio_analysis(
+        track_id="mbid-1",
+        embedding=[0.1],
+        tags={},
+        model_version="discogs-effnet-bsdynamic-1",
+        input_rms=0.037,
+    )
+
+    records = store.list_pool_audio_analyses()
+    assert records[0].input_rms == pytest.approx(0.037)
 
 
 # #125 AC1: a reader for the local store so per-user clustering can consume
@@ -349,7 +396,7 @@ def test_write_audio_analysis_with_pool_writes_exact_schema_no_provenance(tmp_pa
     )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert set(payload.keys()) == {"track_id", "embedding", "tags", "model_version"}
+    assert set(payload.keys()) == {"track_id", "embedding", "tags", "model_version", "input_rms"}
     assert payload["model_version"] == "discogs-effnet-bsdynamic-1"
 
 

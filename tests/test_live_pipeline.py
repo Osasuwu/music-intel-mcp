@@ -122,6 +122,11 @@ def test_run_live_capture_spike_captures_before_resolving_identity(tmp_path) -> 
     payload = json.loads(result.analysis_path.read_text(encoding="utf-8"))
     assert payload["provenance"]["raw_title"] == "Around the World"
     assert payload["provenance"]["chromaprint_fingerprint"] == "fp-fake"
+    # #194 AC8/AC9: the organic live-capture path must also stamp the
+    # embedding-space version and applied-gain scalar on every analysis.
+    from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
+
+    assert payload["model_version"] == EMBEDDING_SPACE_VERSION
 
 
 def test_run_live_capture_spike_falls_through_when_fingerprinting_fails(tmp_path) -> None:

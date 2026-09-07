@@ -32,7 +32,13 @@ import numpy as np
 
 from .capture import LoopbackSource, RingBufferSink
 from .chromaprint_fpcalc import compute_fingerprint, compute_raw_fingerprint
-from .inference import AudioEmbeddingModel, ClassifierModel, InferenceResult, run_inference
+from .inference import (
+    EMBEDDING_SPACE_VERSION,
+    AudioEmbeddingModel,
+    ClassifierModel,
+    InferenceResult,
+    run_inference,
+)
 from .live_identity import LiveIdentityResolver, LiveResolvedIdentity, ProvenanceSidecar
 from .models import TrackRef
 from .nowplaying import NowPlayingSource
@@ -311,6 +317,8 @@ def run_live_capture_spike(
         embedding=inference.embedding,
         tags=inference.tags,
         provenance=provenance,
+        model_version=EMBEDDING_SPACE_VERSION,
+        input_rms=inference.input_rms,
     )
 
     return LiveCaptureResult(identity=identity, inference=inference, analysis_path=analysis_path)

@@ -116,6 +116,34 @@ def test_run_replay_capture_bypasses_identity_resolution(tmp_path, monkeypatch) 
     assert store.has_audio_analysis(canonical_track_id(track))
 
 
+# #194 AC8/AC9: every replay-captured analysis carries the embedding-space
+# version and the applied-gain (pre-normalization RMS) that produced it --
+# previously write_audio_analysis was called with neither, so a replay
+# record had no way to tell which front-end (pre- or post-gain-fix)
+# produced its embedding.
+def test_run_replay_capture_writes_model_version_and_input_rms(tmp_path) -> None:
+    from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
+
+    track = _track()
+    capture = _ScriptedCapture([_tone_frame(800)])
+    driver = _ScriptedDriver()
+    store = UserStore(root=tmp_path)
+
+    outcome = run_replay_capture(
+        track=track,
+        duration_s=0.05,
+        capture=capture,
+        driver=driver,
+        store=store,
+        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1], dtype=np.float32)),
+        classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
+        max_window_s=0.05,
+    )
+
+    payload = json.loads(outcome.analysis_path.read_text(encoding="utf-8"))
+    assert payload["model_version"] == EMBEDDING_SPACE_VERSION
+
+
 def test_run_replay_capture_arms_before_play_and_anchors_window_on_signal(tmp_path) -> None:
     """AC2: capture is armed (started) before the play call; the window
     anchor is the first frame *above* the silence threshold -- a leading

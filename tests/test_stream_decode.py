@@ -224,6 +224,34 @@ def test_run_stream_decode_capture_journals_ok_and_writes_analysis(tmp_path):
     assert entry["outcome"] == "ok"
 
 
+# #194: the stream-decode path runs through the same run_inference/_mel_patches
+# pipeline as replay/live capture, so its records must carry the same
+# model_version/input_rms provenance -- otherwise a stream-decode record is
+# indistinguishable from a genuinely stale pre-fix record.
+def test_run_stream_decode_capture_writes_model_version_and_input_rms(tmp_path):
+    from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
+
+    store = UserStore(root=tmp_path)
+    journal_path = tmp_path / "journal.jsonl"
+    source = FakeStreamDecodeSource(channels=2)
+    embedding_model = InMemoryEmbeddingModel(np.array([1.0, 2.0, 3.0]))
+    classifier = InMemoryClassifier(ClassifierResult(tags={"genre---rock": 0.9}))
+
+    result = run_stream_decode_capture(
+        track_id="youtube:abc123",
+        youtube_id="abc123",
+        source=source,
+        embedding_model=embedding_model,
+        classifier=classifier,
+        store=store,
+        journal_path=journal_path,
+    )
+
+    payload = json.loads(result.analysis_path.read_text(encoding="utf-8"))
+    assert payload["model_version"] == EMBEDDING_SPACE_VERSION
+    assert payload["input_rms"] == pytest.approx(result.inference.input_rms)
+
+
 def test_run_stream_decode_capture_journals_unavailable_on_extractor_failure(tmp_path):
     store = UserStore(root=tmp_path)
     journal_path = tmp_path / "journal.jsonl"
