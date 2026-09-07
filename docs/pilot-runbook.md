@@ -80,6 +80,23 @@ The report prints the per-track cosine-distance distribution (AC1), the adjusted
 
 Judge the result and record it with `record_decision`: keep 120 s, switch to 30 s, or add a per-track multi-window mean. If the two windows produce meaningfully different clusters on the same tracks, document the discrepancy before proceeding — don't silently ship the 120 s setting on an unmeasured assumption.
 
+## Pre-pilot measurement gate: whole-track vs 30 s stream-decode window
+
+The 120 s-vs-30 s gate above only covers the loopback leg. The YouTube stream-decode leg (#170) is architecturally different: it never captures a fixed window at all, it decodes and embeds the *whole track*. #201 asks the analogous bias question for that leg: does the whole-track embedding disagree with a 30 s truncation the way the loopback windows do? This is a separate gate with its own journal and command — its numbers must never be read together with the loopback leg's (decision `d4f61147-ec4f-4759-a59f-4684b679c881`: exactly two comparison points, whole-track vs 30 s, reusing the same leg-agnostic `window_probe.py` machinery rather than adding a third 120 s point that would blur the two legs' numbers).
+
+The measurement rides passively on an ordinary `replay-capture-youtube` run: `run_stream_decode_capture`/`process_stream_decode_queue` accept the same `on_capture_analyzed` hook as the loopback leg, and `make_window_probe_recorder` reuses the decode's own inference embedding as the whole-track leg — zero extra decode, one extra inference pass over a 30 s truncation.
+
+Run the owner's stream-decode replay queue (the hook is wired in unconditionally), then read the gate back:
+
+```powershell
+music-intel replay-capture-youtube --data-dir <owner root>
+music-intel stream-decode-window-probe-report --data-dir <owner root>
+```
+
+The report prints the same per-track cosine-distance distribution, adjusted Rand index, and `under-powered sample` warning below 100 tracks as the loopback report, but titled and labeled for this leg (`whole-track leg` / `30 s leg`, `#201`) so it can never be mistaken for the loopback leg's numbers. Pairs are journaled separately to `<data_root>/stream_decode_window_probe.jsonl`, gitignored like every other per-user artifact.
+
+Judge the result and record it with `record_decision`: whole-track embedding is fine as-is, or the 30 s truncation should replace it for consistency with the loopback leg. If the sample reads unmeasured (fewer than 100 tracks), treat the gate as not yet passed — do not proceed to the full pilot on this leg based on an under-powered sample.
+
 ## Spotify ToS exposure: automated playback
 
 Replay drives Spotify playback programmatically via the Web API (`automated-playback`), which sits close to Spotify's terms around automated/bot use of the service. This is a known, accepted risk for the pilot, mitigated by:

@@ -1145,6 +1145,7 @@ def _cmd_replay_capture_youtube(args: argparse.Namespace) -> int:
         process_stream_decode_queue,
         stream_decode_journal_path,
     )
+    from .window_probe import make_window_probe_recorder, stream_decode_window_probe_path
 
     store = UserStore(root=args.data_dir)
     events = store.load_history()
@@ -1177,13 +1178,19 @@ def _cmd_replay_capture_youtube(args: argparse.Namespace) -> int:
     )
     print(f"replay-capture-youtube: {len(queue)} tracks queued")
 
+    embedding_model = DiscogsEffnetOnnxModel()
     results = process_stream_decode_queue(
         queue=queue,
         source=YtDlpStreamDecodeSource(),
-        embedding_model=DiscogsEffnetOnnxModel(),
+        embedding_model=embedding_model,
         classifier=MtgJamendoClassifier(),
         store=store,
         journal_path=journal_path,
+        on_capture_analyzed=make_window_probe_recorder(
+            store=store,
+            embedding_model=embedding_model,
+            path=stream_decode_window_probe_path(store),
+        ),
     )
     counts: dict[str, int] = {}
     for result in results:
@@ -1209,6 +1216,36 @@ def _cmd_window_probe_report(args: argparse.Namespace) -> int:
         return 0
     report = build_window_probe_report(pairs, min_cluster_size=args.min_cluster_size)
     print(render_window_probe_report(report))
+    return 0
+
+
+def _cmd_stream_decode_window_probe_report(args: argparse.Namespace) -> int:
+    """#201: read back the stream-decode leg's whole-track-vs-30s journal --
+    kept on its own command/journal so its numbers are never mistaken for
+    #169's loopback-leg ones (AC6)."""
+    from .store import UserStore
+    from .window_probe import (
+        build_window_probe_report,
+        load_window_pairs,
+        render_window_probe_report,
+        stream_decode_window_probe_path,
+    )
+
+    store = UserStore(root=args.data_dir)
+    pairs = load_window_pairs(stream_decode_window_probe_path(store))
+    if not pairs:
+        print("no window-probe pairs recorded yet (#201 gate unmeasured)")
+        return 0
+    report = build_window_probe_report(pairs, min_cluster_size=args.min_cluster_size)
+    print(
+        render_window_probe_report(
+            report,
+            title="whole-track vs 30 s stream-decode probe (#201)",
+            long_label="whole-track leg",
+            short_label="30 s leg",
+            capture_noun="decode",
+        )
+    )
     return 0
 
 
@@ -1826,6 +1863,26 @@ def build_parser() -> argparse.ArgumentParser:
         "pilot's own timbre setting)",
     )
     p_window_probe_report.set_defaults(func=_cmd_window_probe_report)
+
+    p_stream_decode_window_probe_report = sub.add_parser(
+        "stream-decode-window-probe-report",
+        help="read back the whole-track-vs-30s stream-decode probe journal "
+        "and print the pre-pilot gate result (#201) -- distinct from "
+        "window-probe-report's #169 loopback leg",
+    )
+    p_stream_decode_window_probe_report.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_stream_decode_window_probe_report.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=3,
+        help="HDBSCAN min_cluster_size for both derivations (default: 3, the "
+        "pilot's own timbre setting)",
+    )
+    p_stream_decode_window_probe_report.set_defaults(func=_cmd_stream_decode_window_probe_report)
 
     p_replay_capture_youtube = sub.add_parser(
         "replay-capture-youtube",
