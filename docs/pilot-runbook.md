@@ -68,14 +68,17 @@ Once participants are active, review the capture journal weekly — one pass ove
 
 Before any participant starts, compare embeddings from a 120 s capture window against 30 s windows on the **owner's own data** — this is a gate, not a nice-to-have (decision `87277764-8173-4d87-a283-b5dc85aff76c`). The pilot's replay capture contract uses a 120 s window (`min(track duration, 120 s)`) to fit more tracks per hour, but the MTG models were trained on short clips, so a bias check against a 30 s window is due diligence before committing every participant's replay hours to the 120 s setting.
 
-There is no dedicated comparison tool yet (full automation of this measurement is tracked as a follow-up issue) — run it manually with `capture-spike` at both durations on the same set of tracks and compare the resulting embeddings/audio roots by hand:
+The measurement rides on an ordinary replay session rather than costing dedicated hours: `run_replay_capture`/`process_replay_queue` accept an `on_capture_analyzed` hook, and `make_window_probe_recorder` (`window_probe.py`) uses it to embed the *same* accepted PCM buffer a second time, truncated to its first 30 s. Both legs therefore come from one capture — content is held fixed, so the reported distance is a pure window-length effect. The flip side, which the report prints and you must not read past: it contains **no** capture-to-capture variance, so those distances are not a total noise floor.
+
+Run the owner's replay queue with the hook wired, then read the gate back:
 
 ```powershell
-music-intel capture-spike --duration 120 --data-dir <owner root>
-music-intel capture-spike --duration 30 --data-dir <owner root>
+music-intel window-probe-report --data-dir <owner root>
 ```
 
-If the two durations produce meaningfully different clusters on the same tracks, document the discrepancy before proceeding — don't silently ship the 120 s setting on an unmeasured assumption.
+The report prints the per-track cosine-distance distribution (AC1), the adjusted Rand index between timbre derivations from each leg plus each leg's root/cluster and noise counts (AC2), and — below 100 tracks — a loud `under-powered sample` warning, because a thin sample must never read as a passed gate. Pairs are journaled to `<data_root>/window_probe.jsonl`; like every other per-user artifact they stay inside the gitignored data root and are never committed.
+
+Judge the result and record it with `record_decision`: keep 120 s, switch to 30 s, or add a per-track multi-window mean. If the two windows produce meaningfully different clusters on the same tracks, document the discrepancy before proceeding — don't silently ship the 120 s setting on an unmeasured assumption.
 
 ## Spotify ToS exposure: automated playback
 

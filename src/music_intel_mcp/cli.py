@@ -1062,6 +1062,25 @@ def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_window_probe_report(args: argparse.Namespace) -> int:
+    from .store import UserStore
+    from .window_probe import (
+        build_window_probe_report,
+        load_window_pairs,
+        render_window_probe_report,
+        window_probe_path,
+    )
+
+    store = UserStore(root=args.data_dir)
+    pairs = load_window_pairs(window_probe_path(store))
+    if not pairs:
+        print("no window-probe pairs recorded yet (#169 gate unmeasured)")
+        return 0
+    report = build_window_probe_report(pairs, min_cluster_size=args.min_cluster_size)
+    print(render_window_probe_report(report))
+    return 0
+
+
 def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
     from .store import UserStore
 
@@ -1657,6 +1676,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
     p_replay_journal_summary.set_defaults(func=_cmd_replay_journal_summary)
+
+    p_window_probe_report = sub.add_parser(
+        "window-probe-report",
+        help="read back the 120 s-vs-30 s capture-window probe journal and "
+        "print the pre-pilot gate result (#169)",
+    )
+    p_window_probe_report.add_argument(
+        "--data-dir",
+        default=None,
+        help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
+    )
+    p_window_probe_report.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=3,
+        help="HDBSCAN min_cluster_size for both derivations (default: 3, the "
+        "pilot's own timbre setting)",
+    )
+    p_window_probe_report.set_defaults(func=_cmd_window_probe_report)
 
     p_login = sub.add_parser(
         "spotify-login",
