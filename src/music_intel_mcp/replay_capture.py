@@ -15,6 +15,12 @@ Identity is taken directly from the queue's ``TrackRef`` via
 ``LiveIdentityResolver.resolve()`` or computes a chromaprint fingerprint for
 identity purposes (decision ``2e17aafa``, refined by the #166 AC1 comment
 thread: fpcalc-for-pool-storage is a separate, deferred concern, #140/#161).
+
+``run_replay_capture`` takes an optional ``on_capture_analyzed`` hook, called
+once per *accepted* capture with the analyzed PCM and its inference result.
+It exists so measurement riders (the #169 window-bias probe) can observe a
+real replay session without a parallel capture path of their own; a discarded
+silent/short capture never reaches it.
 """
 
 from __future__ import annotations
@@ -174,6 +180,7 @@ def run_replay_capture(
     poll_interval_s: float = SILENCE_POLL_INTERVAL_S,
     max_silence_wait_s: float = MAX_SILENCE_WAIT_S,
     expected_sample_rate: int | None = None,
+    on_capture_analyzed: Callable[..., None] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> ReplayCaptureOutcome:
     """Run one replay capture attempt for ``track`` (already resolved by the
@@ -256,6 +263,17 @@ def run_replay_capture(
     analysis_path = store.write_audio_analysis(
         track_id=track_id, embedding=inference.embedding, tags=inference.tags
     )
+    if on_capture_analyzed is not None:
+        # Passive observer of an accepted capture -- the #169 window probe rides
+        # here so it re-uses this buffer and this embedding instead of costing a
+        # second capture. Given the analyzed PCM, never the raw frames.
+        on_capture_analyzed(
+            track_id=track_id,
+            pcm=pcm,
+            sample_rate=sink.sample_rate,
+            embedding=inference.embedding,
+            tags=inference.tags,
+        )
     return _finish("ok", reason=None, analysis_path=analysis_path)
 
 
