@@ -471,7 +471,7 @@ Composes with the existing play-validity filter (`c69c6f17`, `MIN_VALID_MS=30_00
 
 ## Architectural decisions
 
-Decisions live in queryable memory (`record_decision` episodes), not duplicated here. Pointers:
+Decisions live in native Claude Code auto-memory (`~/.claude/projects/<project>/memory/decisions.md`), not duplicated here. Pointers:
 
 - **`d94c44fb-03eb-4867-8440-9910f905a903`** — repo revival + Python rewrite + jarvis-style conventions.
 - **`14595ec7-6049-4be9-8b16-c966be7fcb31`** — pillar order pivot: Understand primary, Discover derived, Act byproduct.
