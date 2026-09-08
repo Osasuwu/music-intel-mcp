@@ -78,7 +78,7 @@ music-intel window-probe-report --data-dir <owner root>
 
 The report prints the per-track cosine-distance distribution (AC1), the adjusted Rand index between timbre derivations from each leg plus each leg's root/cluster and noise counts (AC2), and — below 100 tracks — a loud `under-powered sample` warning, because a thin sample must never read as a passed gate. Pairs are journaled to `<data_root>/window_probe.jsonl`; like every other per-user artifact they stay inside the gitignored data root and are never committed.
 
-Judge the result and record it with `record_decision`: keep 120 s, switch to 30 s, or add a per-track multi-window mean. If the two windows produce meaningfully different clusters on the same tracks, document the discrepancy before proceeding — don't silently ship the 120 s setting on an unmeasured assumption.
+Judge the result and record it in memory (`~/.claude/projects/<project>/memory/decisions.md`): keep 120 s, switch to 30 s, or add a per-track multi-window mean. If the two windows produce meaningfully different clusters on the same tracks, document the discrepancy before proceeding — don't silently ship the 120 s setting on an unmeasured assumption.
 
 ## Pre-pilot measurement gate: whole-track vs 30 s stream-decode window
 
@@ -95,7 +95,7 @@ music-intel stream-decode-window-probe-report --data-dir <owner root>
 
 The report prints the same per-track cosine-distance distribution, adjusted Rand index, and `under-powered sample` warning below 100 tracks as the loopback report, but titled and labeled for this leg (`whole-track leg` / `30 s leg`, `#201`) so it can never be mistaken for the loopback leg's numbers. Pairs are journaled separately to `<data_root>/stream_decode_window_probe.jsonl`, gitignored like every other per-user artifact.
 
-Judge the result and record it with `record_decision`: whole-track embedding is fine as-is, or the 30 s truncation should replace it for consistency with the loopback leg. If the sample reads unmeasured (fewer than 100 tracks), treat the gate as not yet passed — do not proceed to the full pilot on this leg based on an under-powered sample.
+Judge the result and record it in memory (`~/.claude/projects/<project>/memory/decisions.md`): whole-track embedding is fine as-is, or the 30 s truncation should replace it for consistency with the loopback leg. If the sample reads unmeasured (fewer than 100 tracks), treat the gate as not yet passed — do not proceed to the full pilot on this leg based on an under-powered sample.
 
 ## Spotify ToS exposure: automated playback
 
