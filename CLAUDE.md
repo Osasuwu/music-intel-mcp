@@ -26,12 +26,12 @@ Before marking any task complete:
 1. **Tests are green** — pytest + ruff + pre-commit all pass. CI status is the source of truth, not local "looks fine".
 2. **No hardcoded secrets** — `.env.example` declares the metadata; values live in `.env` (gitignored) or the host env.
 3. **CONTEXT.md reflects the change** — any new term, invariant, or architectural shift is documented inline. Don't let CONTEXT.md drift behind code.
-4. **Memory** — non-obvious decision or learning → `record_decision` or `memory_store` with `source_provenance`. Code captures *what*; memory captures *why*.
+4. **Memory** — non-obvious decision or learning → append to `~/.claude/projects/<project>/memory/decisions.md` (dated line: what was decided, why). Code captures *what*; memory captures *why*.
 
 ## Process
 
 - **Branches** from `main`. One issue → one PR. PR body must `Closes #NNN`, or carry the `priority:critical` label (hotfix), or contain a `[no-issue]` body marker (drive-by / artifact PRs, e.g. grill CONTEXT.md notes), or use a `refactor:` / `refactor(scope):` title prefix — the four lanes of the universal owned-repo contract (jarvis#428).
-- **Decisions** belong in memory (`record_decision`), not in PR bodies or markdown files. CONTEXT.md captures *resolved* state; ephemeral debate goes to GitHub Discussions.
+- **Decisions** belong in memory (`decisions.md`), not in PR bodies or markdown files. CONTEXT.md captures *resolved* state; ephemeral debate goes to GitHub Discussions.
 - **TDD where the domain decides correctness** — recommendation scoring, similarity, anti-bubble penalty, importers. Write the failing test that defines "right answer" before the implementation.
 - **Vertical slices, not horizontal.** Each issue ships end-to-end (data → logic → test → CLI/output). Don't do "all loaders, then all scoring, then all output".
 - **No `git add -A`** in scratch-heavy directories. Use explicit paths.
