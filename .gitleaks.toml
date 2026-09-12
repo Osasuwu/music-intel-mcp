@@ -1,0 +1,59 @@
+# Gitleaks configuration for music-intel-mcp
+# https://github.com/gitleaks/gitleaks
+#
+# This file is the committed half of the two-layer secret guard: the PreToolUse
+# hook in .claude/hooks/secret-scanner.py stops a value before it leaves an
+# agent session, and this config drives the CI scan that catches whatever a
+# session without the hook (a CI runner, a different harness, a plain
+# `git push`) would have let through. Any future exemption belongs here, as a
+# reviewable diff — not in a local setting.
+
+title = "Gitleaks config for music-intel-mcp"
+
+# `useDefault = true` is load-bearing: without it, and with no [[rules]] of our
+# own, the scan runs with ZERO active detection rules and passes everything.
+# The default ruleset already covers AWS keys, GitHub tokens, private keys,
+# JWTs and generic high-entropy API keys.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  '''\.gitleaks\.toml$''',
+  # Placeholders only — every value in this file is empty by construction.
+  '''\.env\.example$''',
+  '''\.venv/''',
+  '''__pycache__/''',
+  '''\.pytest_cache/''',
+  '''\.ruff_cache/''',
+  '''\.mypy_cache/''',
+  '''node_modules/''',
+  '''dist/''',
+  '''\.vscode/''',
+  '''\.idea/''',
+]
+
+# ---------------------------------------------------------------------------
+# Project-specific rules: the provider credentials this repo actually holds.
+# Their raw value shapes (hex strings, opaque tokens) are too generic for a
+# standalone regex, so each rule anchors on the env-var name being assigned a
+# literal — the shape a hardcoded credential takes.
+# ---------------------------------------------------------------------------
+
+[[rules]]
+id = "music-intel-provider-key-assignment"
+description = "Provider credential assigned a literal value (should be env-injected)"
+regex = '''(?i)\b(?:SPOTIFY_CLIENT_SECRET|LASTFM_API_KEY|ACOUSTID_API_KEY|DISCOGS_TOKEN)\s*[:=]\s*["']?[A-Za-z0-9_/+.-]{16,}["']?'''
+keywords = [
+  "spotify_client_secret",
+  "lastfm_api_key",
+  "acoustid_api_key",
+  "discogs_token",
+]
+
+[[rules]]
+id = "music-intel-spotify-oauth-token"
+description = "Spotify OAuth access/refresh token written into the repo"
+regex = '''(?i)\b(?:refresh_token|access_token)\s*["']?\s*[:=]\s*["'][A-Za-z0-9_-]{40,}["']'''
+keywords = ["refresh_token", "access_token"]

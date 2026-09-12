@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python $CLAUDE_PROJECT_DIR/.claude/hooks/secret-scanner.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python $CLAUDE_PROJECT_DIR/.claude/hooks/secret-scanner.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__github__(issue_write|create_pull_request|update_pull_request|add_issue_comment|add_reply_to_pull_request_comment|add_comment_to_pending_review|create_or_update_file|push_files|pull_request_review_write|sub_issue_write)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python $CLAUDE_PROJECT_DIR/.claude/hooks/secret-scanner.py"
+          }
+        ]
+      }
+    ]
+  }
+}
