@@ -59,3 +59,7 @@ native/**/*.exe
 native/**/*.obj
 native/**/*.pdb
 native/**/*.ilk
+
+# Claude Code — per-machine local state, never shared
+.claude/settings.local.json
+.claude/worktrees/

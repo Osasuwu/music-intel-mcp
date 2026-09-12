@@ -14,8 +14,9 @@ Scope, acceptance criteria and architectural decisions are pending `/grill` — 
 
 ## Repo conventions
 
-- `CLAUDE.md` — rules and process for AI agents working in this repo.
-- `CONTEXT.md` — domain model (glossary, invariants, architecture). Grows inline.
+- `AGENTS.md` — rules and process for AI agents working in this repo. `CLAUDE.md` is kept as a bare import pointing to it, for tools that only look for that filename.
+- `CONTEXT.md` — domain model (glossary, architecture). Grows inline.
+- `INVARIANTS.md` — extracted `CONTEXT.md` invariants, imported into every agent session.
 - `src/music_intel_mcp/` — Python package.
 - `tests/` — pytest suite, green from day 1.
 
