@@ -1,0 +1,37 @@
+name: Gitleaks Secret Scanning
+
+# The `pull_request` trigger is deliberately NOT path-filtered. If this job is
+# ever promoted to a required status check, a paths-ignore that skips the run
+# (docs-only PR, empty diff) leaves the required context stuck at
+# "Expected — waiting for status" and blocks the PR permanently, even with
+# every other gate green. The `push` trigger keeps its filter — it is not a
+# merge gate, and scanning every docs commit to main is wasted minutes.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: false
