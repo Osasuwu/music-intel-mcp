@@ -1,17 +1,15 @@
-# repo-baseline canon — code-review.yml (retry-wrapper)
+# code-review.yml (retry-wrapper)
 # attempt-1 → (on failure) attempt-2 → verify-verdict
 # NOT using continue-on-error — retry the cause, not the symptom.
 #
-# This 3-job shape is INTENTIONALLY different from the live reference
-# workflow (.github/workflows/code-review.yml), which is a single `review`
-# job. It is not drift: canon adds the retry wrapper so repos synced from
-# this template get an automatic re-run on a failed attempt (jarvis itself
-# has since converged its own live workflow onto a single job, but that is a
-# jarvis-specific simplification, not a canon regression — #1300). The
-# verdict-decision and cleanliness-gate LOGIC inside these jobs is pinned to
-# match live by tests/ci/test_canon_code_review_verdict_parity.py and
-# tests/ci/test_canon_code_review_ran_cleanly_parity.py; only the job
-# topology around that logic differs.
+# 3-job shape: attempt-1 and attempt-2 each run the review once; verify-verdict
+# then reads whichever attempt actually posted. The retry wrapper exists so a
+# review that dies on a transient failure (denial, model error) gets one
+# automatic re-run instead of leaving the PR unreviewed. This repo carries no
+# parity tests pinning the verdict-decision or cleanliness-gate logic against
+# another repo's copy — the two jobs are kept byte-identical by hand (see the
+# "Kept byte-identical" comments below); a divergence between them is not
+# mechanically caught here.
 name: Code Review
 
 on:
@@ -322,8 +320,8 @@ jobs:
           if-no-files-found: warn
 
       # Same cleanliness gate as attempt-1 — see the full policy note there
-      # (#1229). Kept byte-identical between the two attempt jobs; the parity
-      # guard tests/ci/test_canon_code_review_ran_cleanly_parity.py pins that.
+      # (#1229). Kept byte-identical between the two attempt jobs by hand;
+      # this repo has no parity test pinning that (#209).
       - name: Verify review ran cleanly
         if: always()
         env:
@@ -426,8 +424,8 @@ jobs:
       # (n_critical==0 AND n_major==0) so a clean-but-minor PR no longer
       # ping-pongs between rework and the merge gate (#976).
       #
-      # Hardened verdict contract (mirrors the jarvis reference workflow and
-      # tests/ci/test_code_review_verdict_guard.py):
+      # Hardened verdict contract (mirrors the jarvis reference workflow;
+      # this repo has no local test pinning it, #209):
       #   - SELECT the latest comment whose body carries a code-review title
       #     heading (1-6 #'s, optional "Claude", any case, anywhere in body).
       #   - FRESHNESS (#993): a comment is a verdict only for the CURRENT head
