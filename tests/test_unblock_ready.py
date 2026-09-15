@@ -4,7 +4,9 @@ import importlib.util
 from pathlib import Path
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / ".github" / "scripts").is_dir())
-_spec = importlib.util.spec_from_file_location("unblock_ready", _root / ".github" / "scripts" / "unblock_ready.py")
+_spec = importlib.util.spec_from_file_location(
+    "unblock_ready", _root / ".github" / "scripts" / "unblock_ready.py"
+)
 unblock_ready = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(unblock_ready)
 
@@ -13,7 +15,10 @@ def _issue(labels=(), open_blockers=0, state="open"):
     return {
         "state": state,
         "labels": [{"name": n} for n in labels],
-        "issue_dependencies_summary": {"blocked_by": open_blockers, "total_blocked_by": open_blockers + 1},
+        "issue_dependencies_summary": {
+            "blocked_by": open_blockers,
+            "total_blocked_by": open_blockers + 1,
+        },
     }
 
 
