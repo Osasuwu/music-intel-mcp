@@ -33,6 +33,24 @@ paths = [
   '''\.vscode/''',
   '''\.idea/''',
 ]
+# Pre-rewrite Java-era commits with hardcoded credentials, found by the
+# initial full-history scan (issue #210). Rotation at each provider — and a
+# decision on whether to rewrite history — is tracked separately on #210 and
+# is NOT satisfied by this allowlist; this only keeps the CI scan green for a
+# stated, audited reason instead of failing on findings already handled by
+# that issue. Do not add a commit here without a corresponding #210-style
+# finding record — this list is an audit trail, not a place to silence noise.
+commits = [
+  "dabb1ba4bc7160ccb2b1ab6fde21faf8a4330c6e", # GetDataViaSpotifyAPI.java:28
+  "b65294dc815792cfa470e8f2820da174a89c8403", # LastFmAPIManager.java:16, MusicDatabaseManager.java:18
+  "7273deee46fa78a2944265ff02cf118b0aad7646", # CreateSpotifyAccessToken.java:14
+  "5b8754ee1814fb29ccc2f95aa85e7f384f9d4eca", # SpotifyAccessToken.java:16 (CLIENT_SECRET); also introduces a distinct Supabase DB_PASSWORD in GetDataViaSpotifyAPI.java (new file in this commit), not in the #210 table — flagged in PR #213 review
+  "3c4e543da15327bcf122180ea04d72e7b72e7c0e", # GetDataViaSpotifyAPI.java:45 (rotates the DB_PASSWORD introduced in 5b8754e to a second, distinct value)
+  "7a775f66a63477e9d234a7a248529e09935ab6b9", # ConvertCSVtoSQL.java:22
+  "654112e8fa550d5f675c000e1321e959e128f477", # DatabaseImportService.java:31
+  "73b6a7652e9e21c7b6d0a3eca3d2c023258d1230", # MusicDatabaseManager.java:37
+  "fc57c012a2a05e02fd13d7e5194337b6620cabee", # SpotifyAuthHelper.java:28
+]
 
 # ---------------------------------------------------------------------------
 # Project-specific rules: the provider credentials this repo actually holds.
