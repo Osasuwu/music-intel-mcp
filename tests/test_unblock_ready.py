@@ -52,3 +52,17 @@ def test_already_ready_is_a_no_op():
 
 def test_missing_summary_is_treated_as_blocked():
     assert unblock_ready.plan({"state": "open", "labels": []}) == ([], [])
+
+
+def test_dependent_in_same_repo_is_processed():
+    dep = {"repository_url": "https://api.github.com/repos/Owner/Repo"}
+    assert unblock_ready.dependent_repo(dep, "owner/repo") == "owner/repo"
+
+
+def test_dependent_in_other_repo_is_skipped():
+    dep = {"repository_url": "https://api.github.com/repos/other/repo"}
+    assert unblock_ready.dependent_repo(dep, "owner/repo") is None
+
+
+def test_dependent_without_repository_url_is_skipped():
+    assert unblock_ready.dependent_repo({"number": 7}, "owner/repo") is None

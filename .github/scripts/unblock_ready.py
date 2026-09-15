@@ -34,6 +34,19 @@ def plan(issue):
     return add, remove
 
 
+def dependent_repo(dep, repo):
+    """Return `repo` if the dependent lives in it, else None.
+
+    Dependencies can cross repos, and `number` alone is ambiguous: jarvis#1162
+    blocking redrobot#1412 must not relabel jarvis#1412. GITHUB_TOKEN can only
+    write to its own repo, so cross-repo dependents are skipped.
+    """
+    url = dep.get("repository_url") or ""
+    if "/repos/" not in url:
+        return None
+    return repo if url.split("/repos/", 1)[1].lower() == repo.lower() else None
+
+
 def _api(method, path, body=None):
     req = urllib.request.Request(
         f"https://api.github.com/{path}",
@@ -59,6 +72,9 @@ def main():
             "GET", f"repos/{repo}/issues/{closed}/dependencies/blocking?per_page=100&page={page}"
         )
         for dep in batch:
+            if dependent_repo(dep, repo) is None:
+                print(f"skip {dep.get('html_url', dep.get('number'))}: outside {repo}")
+                continue
             # Re-fetch: the dependency summary is the source of truth for open blockers.
             issue = _api("GET", f"repos/{repo}/issues/{dep['number']}")
             add, remove = plan(issue)
