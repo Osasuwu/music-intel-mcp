@@ -1,4 +1,4 @@
-"""Label decisions of .github/scripts/unblock_ready.py (runs on issues: closed)."""
+"""Label decisions of .github/scripts/unblock_ready.py (issues: closed / unlabeled)."""
 
 import importlib.util
 from pathlib import Path
@@ -66,3 +66,21 @@ def test_dependent_in_other_repo_is_skipped():
 
 def test_dependent_without_repository_url_is_skipped():
     assert unblock_ready.dependent_repo({"number": 7}, "owner/repo") is None
+
+
+def test_open_needs_label_keeps_issue_unready():
+    assert unblock_ready.plan(_issue(["needs-safety-review"])) == ([], [])
+
+
+def test_needs_label_does_not_drop_blocked():
+    assert unblock_ready.plan(_issue(["status:blocked", "needs-triage"])) == ([], [])
+
+
+def test_issue_with_past_blocker_is_reevaluated():
+    assert unblock_ready.was_blocked(_issue()) is True
+
+
+def test_never_blocked_issue_is_not_promoted_on_unlabel():
+    issue = {"issue_dependencies_summary": {"blocked_by": 0, "total_blocked_by": 0}}
+    assert unblock_ready.was_blocked(issue) is False
+    assert unblock_ready.was_blocked({}) is False

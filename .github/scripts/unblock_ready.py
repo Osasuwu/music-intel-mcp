@@ -1,8 +1,13 @@
 """Promote issues to `status:ready` when their last open blocker closes.
 
-Runs from `.github/workflows/unblock-ready.yml` on `issues: closed`. Native
-blocked_by edges record a block but never flip the status label, so without
-this a slice stays unready after its blocker ships (closed by PR or by hand).
+Runs from `.github/workflows/unblock-ready.yml`. Native blocked_by edges record
+a block but never flip the status label, so without this a slice stays unready
+after its blocker ships (closed by PR or by hand).
+
+- `closed`: evaluate every issue the closed one was blocking.
+- `unlabeled` (a `needs-*` label): an issue skipped for an open `needs-*`
+  question is re-evaluated once that question is answered.
+
 Stdlib only: the job needs no dependency install.
 """
 
@@ -16,6 +21,9 @@ BLOCKED = "status:blocked"
 # Status labels that may coexist with ready; any other `status:*` means the
 # issue already moved past ready and must not be overwritten.
 COEXISTS_WITH_READY = {READY, BLOCKED, "status:owner-queue"}
+# `needs-grill`, `needs-triage`, `needs-safety-review`, ...: an open question
+# that must be answered before the issue is ready.
+NEEDS_PREFIX = "needs-"
 
 
 def plan(issue):
@@ -29,9 +37,20 @@ def plan(issue):
     labels = {label["name"] for label in issue.get("labels", [])}
     if any(n.startswith("status:") and n not in COEXISTS_WITH_READY for n in labels):
         return [], []
+    if any(n.startswith(NEEDS_PREFIX) for n in labels):
+        return [], []
     add = [] if READY in labels else [READY]
     remove = [BLOCKED] if BLOCKED in labels else []
     return add, remove
+
+
+def was_blocked(issue):
+    """True if the issue ever had a native blocker.
+
+    Only such issues are this workflow's to promote: an issue that never had a
+    blocker gets its status from triage, not from a `needs-*` label going away.
+    """
+    return (issue.get("issue_dependencies_summary") or {}).get("total_blocked_by", 0) > 0
 
 
 def dependent_repo(dep, repo):
@@ -63,9 +82,17 @@ def _api(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
-def main():
-    repo = os.environ["GITHUB_REPOSITORY"]
-    closed = os.environ["ISSUE_NUMBER"]
+def apply(repo, issue):
+    add, remove = plan(issue)
+    num = issue["number"]
+    if add:
+        _api("POST", f"repos/{repo}/issues/{num}/labels", {"labels": add})
+    for name in remove:
+        _api("DELETE", f"repos/{repo}/issues/{num}/labels/{urllib.parse.quote(name)}")
+    print(f"#{num}: add={add} remove={remove}")
+
+
+def promote_dependents(repo, closed):
     page = 1
     while True:
         batch = _api(
@@ -76,17 +103,26 @@ def main():
                 print(f"skip {dep.get('html_url', dep.get('number'))}: outside {repo}")
                 continue
             # Re-fetch: the dependency summary is the source of truth for open blockers.
-            issue = _api("GET", f"repos/{repo}/issues/{dep['number']}")
-            add, remove = plan(issue)
-            num = issue["number"]
-            if add:
-                _api("POST", f"repos/{repo}/issues/{num}/labels", {"labels": add})
-            for name in remove:
-                _api("DELETE", f"repos/{repo}/issues/{num}/labels/{urllib.parse.quote(name)}")
-            print(f"#{num}: add={add} remove={remove}")
+            apply(repo, _api("GET", f"repos/{repo}/issues/{dep['number']}"))
         if len(batch) < 100:
             break
         page += 1
+
+
+def main():
+    repo = os.environ["GITHUB_REPOSITORY"]
+    number = os.environ["ISSUE_NUMBER"]
+    action = os.environ.get("EVENT_ACTION", "closed")
+    if action == "closed":
+        promote_dependents(repo, number)
+    elif action == "unlabeled":
+        issue = _api("GET", f"repos/{repo}/issues/{number}")
+        if was_blocked(issue):
+            apply(repo, issue)
+        else:
+            print(f"#{number}: never blocked, status is triage's call")
+    else:
+        raise SystemExit(f"unexpected EVENT_ACTION={action!r}")
 
 
 if __name__ == "__main__":
