@@ -1,9 +1,11 @@
 # repo-baseline canon — unblock-ready.yml
-# Keeps status:* labels in step with the issue lifecycle:
-# - closed: strip status:* (except status:hardware-*), then promote each
+# Keeps status:* labels in step with the issue and PR lifecycle:
+# - issue closed: strip status:* (except status:hardware-*), then promote each
 #   dependent whose last open blocker it was to status:ready;
-# - reopened: drop stale in-progress/review, restore ready if nothing holds it;
+# - issue reopened: drop stale in-progress/review, restore ready if nothing holds it;
 # - needs-* removed: re-evaluate an issue that was skipped for it;
+# - PR opened / ready for review: issues it closes move to status:review;
+# - PR closed unmerged: those issues go back to ready;
 # - manual dispatch: one-off sweep of status:* on closed issues.
 # Label writes use GITHUB_TOKEN, so they trigger no other workflows.
 # Logic + label rules: .github/scripts/unblock_ready.py
@@ -12,16 +14,29 @@ name: Unblock Ready
 on:
   issues:
     types: [closed, reopened, unlabeled]
+  pull_request:
+    types: [opened, reopened, ready_for_review, edited, closed]
   workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
+  pull-requests: read
 
 jobs:
   promote:
-    # Every unlabel fires the event; only a needs-* removal is ours.
-    if: github.event.action != 'unlabeled' || startsWith(github.event.label.name, 'needs-')
+    # Every unlabel fires the event; only a needs-* removal is ours. Drafts
+    # aren't up for review yet, a merge closes the issue itself, and a fork's
+    # read-only token can't write labels.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'issues'
+          && (github.event.action != 'unlabeled' || startsWith(github.event.label.name, 'needs-')))
+      || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && (github.event.action == 'closed'
+              && !github.event.pull_request.merged
+              || github.event.action != 'closed' && !github.event.pull_request.draft))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -30,7 +45,9 @@ jobs:
       - name: Sync issue status labels
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          # workflow_dispatch has no event action: that run is the sweep.
-          EVENT_ACTION: ${{ github.event.action || 'sweep' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
         run: python3 .github/scripts/unblock_ready.py

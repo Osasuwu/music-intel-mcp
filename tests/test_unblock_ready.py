@@ -1,4 +1,4 @@
-"""Label decisions of .github/scripts/unblock_ready.py (issues: closed / reopened / unlabeled)."""
+"""Label decisions of .github/scripts/unblock_ready.py (issue and PR lifecycle events)."""
 
 import importlib.util
 from pathlib import Path
@@ -115,3 +115,44 @@ def test_reopen_hardware_issue_is_left_to_hardware_lifecycle():
 
 def test_reopen_keeps_existing_ready():
     assert unblock_ready.plan_reopen(_issue(["status:ready"])) == ([], [])
+
+
+def test_pr_up_moves_ready_issue_to_review():
+    expected = (["status:review"], ["status:ready"])
+    assert unblock_ready.plan_review(_issue(["status:ready"])) == expected
+
+
+def test_pr_up_replaces_in_progress_with_review():
+    issue = _issue(["status:in-progress", "status:owner-queue"])
+    assert unblock_ready.plan_review(issue) == (["status:review"], ["status:in-progress"])
+
+
+def test_pr_up_on_issue_already_in_review_is_a_no_op():
+    assert unblock_ready.plan_review(_issue(["status:review"])) == ([], [])
+
+
+def test_pr_up_leaves_closed_issue_alone():
+    assert unblock_ready.plan_review(_issue(["status:ready"], state="closed")) == ([], [])
+
+
+def test_pr_up_leaves_hardware_issue_to_hardware_lifecycle():
+    assert unblock_ready.plan_review(_issue(["status:hardware-testing"])) == ([], [])
+
+
+def _linked(number, repo="owner/repo", open_prs=0):
+    return {
+        "number": number,
+        "repository": {"nameWithOwner": repo},
+        "closedByPullRequestsReferences": {"nodes": [{"number": 9}] * open_prs},
+    }
+
+
+def test_pr_issues_skip_other_repos():
+    nodes = [_linked(1, "Owner/Repo"), _linked(2, "other/repo")]
+    assert unblock_ready.pr_issue_numbers(nodes, "owner/repo", dropped=False) == [1]
+
+
+def test_dropped_pr_skips_issue_another_open_pr_still_closes():
+    nodes = [_linked(1), _linked(2, open_prs=1)]
+    assert unblock_ready.pr_issue_numbers(nodes, "owner/repo", dropped=True) == [1]
+    assert unblock_ready.pr_issue_numbers(nodes, "owner/repo", dropped=False) == [1, 2]
