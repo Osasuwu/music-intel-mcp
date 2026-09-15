@@ -1,13 +1,18 @@
 # repo-baseline canon — unblock-ready.yml
-# When an issue closes, promote each dependent whose last open blocker it was
-# to status:ready (native blocked_by edges never flip the label themselves).
-# Issues with an open needs-* label are skipped, and re-evaluated when it is removed.
+# Keeps status:* labels in step with the issue lifecycle:
+# - closed: strip status:* (except status:hardware-*), then promote each
+#   dependent whose last open blocker it was to status:ready;
+# - reopened: drop stale in-progress/review, restore ready if nothing holds it;
+# - needs-* removed: re-evaluate an issue that was skipped for it;
+# - manual dispatch: one-off sweep of status:* on closed issues.
+# Label writes use GITHUB_TOKEN, so they trigger no other workflows.
 # Logic + label rules: .github/scripts/unblock_ready.py
 name: Unblock Ready
 
 on:
   issues:
-    types: [closed, unlabeled]
+    types: [closed, reopened, unlabeled]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,15 +21,16 @@ permissions:
 jobs:
   promote:
     # Every unlabel fires the event; only a needs-* removal is ours.
-    if: github.event.action == 'closed' || startsWith(github.event.label.name, 'needs-')
+    if: github.event.action != 'unlabeled' || startsWith(github.event.label.name, 'needs-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           sparse-checkout: .github/scripts
-      - name: Promote unblocked issues
+      - name: Sync issue status labels
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          EVENT_ACTION: ${{ github.event.action }}
+          # workflow_dispatch has no event action: that run is the sweep.
+          EVENT_ACTION: ${{ github.event.action || 'sweep' }}
         run: python3 .github/scripts/unblock_ready.py

@@ -1,12 +1,17 @@
-"""Promote issues to `status:ready` when their last open blocker closes.
+"""Keep `status:*` labels in step with the issue lifecycle.
 
 Runs from `.github/workflows/unblock-ready.yml`. Native blocked_by edges record
-a block but never flip the status label, so without this a slice stays unready
-after its blocker ships (closed by PR or by hand).
+a block but never flip the status label, and closing or reopening an issue never
+touches its status either, so without this labels drift from reality.
 
-- `closed`: evaluate every issue the closed one was blocking.
+- `closed`: strip the closed issue's `status:*` labels (a closed issue has no
+  work status; `status:hardware-*` belongs to the hardware lifecycle), then
+  promote every issue it was blocking whose last open blocker it was.
+- `reopened`: drop stale in-flight statuses and put the issue back to ready
+  when nothing holds it (open blocker, `needs-*`, another status).
 - `unlabeled` (a `needs-*` label): an issue skipped for an open `needs-*`
   question is re-evaluated once that question is answered.
+- `sweep` (manual dispatch): one-off cleanup of `status:*` on closed issues.
 
 Stdlib only: the job needs no dependency install.
 """
@@ -17,31 +22,60 @@ import urllib.parse
 import urllib.request
 
 READY = "status:ready"
-BLOCKED = "status:blocked"
 # Status labels that may coexist with ready; any other `status:*` means the
 # issue already moved past ready and must not be overwritten.
-COEXISTS_WITH_READY = {READY, BLOCKED, "status:owner-queue"}
+COEXISTS_WITH_READY = {READY, "status:owner-queue"}
+# Statuses of work that was under way when the issue closed; stale on reopen.
+IN_FLIGHT = {"status:in-progress", "status:review", "status:rework-in-progress"}
+# Set by a hardware lifecycle workflow on close/reopen; not ours to touch.
+HARDWARE_PREFIX = "status:hardware-"
 # `needs-grill`, `needs-triage`, `needs-safety-review`, ...: an open question
 # that must be answered before the issue is ready.
 NEEDS_PREFIX = "needs-"
 
 
+def _names(issue):
+    return {label["name"] for label in issue.get("labels", [])}
+
+
+def _held(labels):
+    """True if a label other than an open blocker keeps the issue from ready."""
+    if any(n.startswith("status:") and n not in COEXISTS_WITH_READY for n in labels):
+        return True
+    return any(n.startswith(NEEDS_PREFIX) for n in labels)
+
+
+def _unblocked(issue):
+    # `blocked_by` counts only OPEN blockers (`total_blocked_by` counts all).
+    return (issue.get("issue_dependencies_summary") or {}).get("blocked_by", 1) == 0
+
+
 def plan(issue):
     """Return (labels_to_add, labels_to_remove) for an issue the closed one was blocking."""
+    labels = _names(issue)
+    if issue.get("state") != "open" or not _unblocked(issue) or _held(labels):
+        return [], []
+    return ([] if READY in labels else [READY]), []
+
+
+def plan_close(issue):
+    """Strip work statuses from a closed issue."""
+    if issue.get("state") != "closed":
+        return [], []
+    names = _names(issue)
+    return [], sorted(
+        n for n in names if n.startswith("status:") and not n.startswith(HARDWARE_PREFIX)
+    )
+
+
+def plan_reopen(issue):
+    """Drop stale in-flight statuses and restore ready when nothing holds the issue."""
     if issue.get("state") != "open":
         return [], []
-    summary = issue.get("issue_dependencies_summary") or {}
-    # `blocked_by` counts only OPEN blockers (`total_blocked_by` counts all).
-    if summary.get("blocked_by", 1) != 0:
-        return [], []
-    labels = {label["name"] for label in issue.get("labels", [])}
-    if any(n.startswith("status:") and n not in COEXISTS_WITH_READY for n in labels):
-        return [], []
-    if any(n.startswith(NEEDS_PREFIX) for n in labels):
-        return [], []
-    add = [] if READY in labels else [READY]
-    remove = [BLOCKED] if BLOCKED in labels else []
-    return add, remove
+    labels = _names(issue)
+    rest = labels - IN_FLIGHT
+    add = [READY] if READY not in rest and _unblocked(issue) and not _held(rest) else []
+    return add, sorted(labels & IN_FLIGHT)
 
 
 def was_blocked(issue):
@@ -82,8 +116,8 @@ def _api(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
-def apply(repo, issue):
-    add, remove = plan(issue)
+def apply(repo, issue, planner=plan):
+    add, remove = planner(issue)
     num = issue["number"]
     if add:
         _api("POST", f"repos/{repo}/issues/{num}/labels", {"labels": add})
@@ -109,14 +143,39 @@ def promote_dependents(repo, closed):
         page += 1
 
 
+def sweep_closed(repo):
+    """Strip `status:*` from every closed issue, one status label at a time."""
+    names, page = [], 1
+    while True:
+        batch = _api("GET", f"repos/{repo}/labels?per_page=100&page={page}")
+        names += [label["name"] for label in batch]
+        if len(batch) < 100:
+            break
+        page += 1
+    for name in names:
+        if not name.startswith("status:") or name.startswith(HARDWARE_PREFIX):
+            continue
+        query = f"repos/{repo}/issues?state=closed&per_page=100&labels={urllib.parse.quote(name)}"
+        # Always page 1: every pass removes the label, so the result set shrinks.
+        while batch := _api("GET", query):
+            for issue in batch:
+                apply(repo, issue, plan_close)
+
+
 def main():
     repo = os.environ["GITHUB_REPOSITORY"]
-    number = os.environ["ISSUE_NUMBER"]
     action = os.environ.get("EVENT_ACTION", "closed")
+    if action == "sweep":
+        sweep_closed(repo)
+        return
+    number = os.environ["ISSUE_NUMBER"]
+    issue = _api("GET", f"repos/{repo}/issues/{number}")
     if action == "closed":
+        apply(repo, issue, plan_close)
         promote_dependents(repo, number)
+    elif action == "reopened":
+        apply(repo, issue, plan_reopen)
     elif action == "unlabeled":
-        issue = _api("GET", f"repos/{repo}/issues/{number}")
         if was_blocked(issue):
             apply(repo, issue)
         else:

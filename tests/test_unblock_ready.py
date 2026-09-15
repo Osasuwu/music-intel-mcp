@@ -1,4 +1,4 @@
-"""Label decisions of .github/scripts/unblock_ready.py (issues: closed / unlabeled)."""
+"""Label decisions of .github/scripts/unblock_ready.py (issues: closed / reopened / unlabeled)."""
 
 import importlib.util
 from pathlib import Path
@@ -38,10 +38,6 @@ def test_issue_past_ready_is_not_overwritten():
     assert unblock_ready.plan(_issue(["task", "status:in-progress"])) == ([], [])
 
 
-def test_blocked_label_is_swapped_for_ready():
-    assert unblock_ready.plan(_issue(["status:blocked"])) == (["status:ready"], ["status:blocked"])
-
-
 def test_owner_queue_issue_still_gets_ready():
     assert unblock_ready.plan(_issue(["status:owner-queue"])) == (["status:ready"], [])
 
@@ -72,8 +68,8 @@ def test_open_needs_label_keeps_issue_unready():
     assert unblock_ready.plan(_issue(["needs-safety-review"])) == ([], [])
 
 
-def test_needs_label_does_not_drop_blocked():
-    assert unblock_ready.plan(_issue(["status:blocked", "needs-triage"])) == ([], [])
+def test_needs_label_with_owner_queue_keeps_issue_unready():
+    assert unblock_ready.plan(_issue(["status:owner-queue", "needs-triage"])) == ([], [])
 
 
 def test_issue_with_past_blocker_is_reevaluated():
@@ -84,3 +80,38 @@ def test_never_blocked_issue_is_not_promoted_on_unlabel():
     issue = {"issue_dependencies_summary": {"blocked_by": 0, "total_blocked_by": 0}}
     assert unblock_ready.was_blocked(issue) is False
     assert unblock_ready.was_blocked({}) is False
+
+
+def test_close_strips_status_labels_but_keeps_hardware():
+    issue = _issue(
+        ["task", "status:in-progress", "status:owner-queue", "status:hardware-done"],
+        state="closed",
+    )
+    assert unblock_ready.plan_close(issue) == ([], ["status:in-progress", "status:owner-queue"])
+
+
+def test_close_cleanup_skips_issue_reopened_in_the_meantime():
+    assert unblock_ready.plan_close(_issue(["status:in-progress"])) == ([], [])
+
+
+def test_reopen_drops_in_flight_and_restores_ready():
+    issue = _issue(["task", "status:in-progress", "status:review"])
+    expected = (["status:ready"], ["status:in-progress", "status:review"])
+    assert unblock_ready.plan_reopen(issue) == expected
+
+
+def test_reopen_with_open_blocker_only_drops_in_flight():
+    issue = _issue(["status:in-progress"], open_blockers=1)
+    assert unblock_ready.plan_reopen(issue) == ([], ["status:in-progress"])
+
+
+def test_reopen_with_needs_label_is_not_ready():
+    assert unblock_ready.plan_reopen(_issue(["needs-grill"])) == ([], [])
+
+
+def test_reopen_hardware_issue_is_left_to_hardware_lifecycle():
+    assert unblock_ready.plan_reopen(_issue(["status:hardware-done"])) == ([], [])
+
+
+def test_reopen_keeps_existing_ready():
+    assert unblock_ready.plan_reopen(_issue(["status:ready"])) == ([], [])
