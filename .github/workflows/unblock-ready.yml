@@ -1,0 +1,26 @@
+# repo-baseline canon — unblock-ready.yml
+# When an issue closes, promote each dependent whose last open blocker it was
+# to status:ready (native blocked_by edges never flip the label themselves).
+# Logic + label rules: .github/scripts/unblock_ready.py
+name: Unblock Ready
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+      - name: Promote unblocked dependents
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python3 .github/scripts/unblock_ready.py
