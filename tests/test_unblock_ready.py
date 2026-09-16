@@ -184,3 +184,69 @@ def test_a_delete_failing_for_any_other_reason_still_raises(monkeypatch):
     issue = dict(_issue(["status:ready"], state="closed"), number=7)
     with pytest.raises(urllib.error.HTTPError):
         unblock_ready.apply("owner/repo", issue, unblock_ready.plan_close)
+
+
+def test_a_closed_issue_resolves_to_itself_plus_what_it_unblocks(monkeypatch):
+    def fake_api(method, path, body=None):
+        assert path.startswith("repos/owner/repo/issues/5/dependencies/blocking")
+        return [
+            {"number": 6, "repository_url": "https://api.github.com/repos/owner/repo"},
+            {"number": 7, "repository_url": "https://api.github.com/repos/other/repo"},
+        ]
+
+    monkeypatch.setattr(unblock_ready, "_api", fake_api)
+    assert unblock_ready.resolve_issue("owner/repo", "5", "closed") == [
+        {"issue": 5, "mode": "close"},
+        {"issue": 6, "mode": "promote"},
+    ]
+
+
+def test_reopen_and_unlabel_resolve_to_the_issue_alone():
+    assert unblock_ready.resolve_issue("owner/repo", "5", "reopened") == [
+        {"issue": 5, "mode": "reopen"}
+    ]
+    assert unblock_ready.resolve_issue("owner/repo", "5", "unlabeled") == [
+        {"issue": 5, "mode": "unlabel"}
+    ]
+
+
+def _fake_graphql(monkeypatch, nodes):
+    def fake_api(method, path, body=None):
+        assert (method, path) == ("POST", "graphql")
+        pr = {"closingIssuesReferences": {"nodes": nodes}}
+        return {"data": {"repository": {"pullRequest": pr}}}
+
+    monkeypatch.setattr(unblock_ready, "_api", fake_api)
+
+
+def test_a_pr_going_up_resolves_its_issues_to_review(monkeypatch):
+    _fake_graphql(monkeypatch, [_linked(1), _linked(2, "other/repo")])
+    targets = unblock_ready.resolve_pr("owner/repo", "3", "opened", merged=False)
+    assert targets == [{"issue": 1, "mode": "review"}]
+
+
+def test_a_dropped_pr_resolves_its_issues_back_as_a_reopen(monkeypatch):
+    _fake_graphql(monkeypatch, [_linked(1)])
+    targets = unblock_ready.resolve_pr("owner/repo", "3", "closed", merged=False)
+    assert targets == [{"issue": 1, "mode": "reopen"}]
+
+
+def test_a_merged_pr_resolves_to_nothing():
+    assert unblock_ready.resolve_pr("owner/repo", "3", "closed", merged=True) == []
+
+
+def test_every_mode_the_resolver_emits_has_a_planner(monkeypatch):
+    _fake_graphql(monkeypatch, [_linked(1)])
+    emitted = {t["mode"] for t in unblock_ready.resolve_pr("owner/repo", "3", "opened", False)}
+    emitted |= {t["mode"] for t in unblock_ready.resolve_pr("owner/repo", "3", "closed", False)}
+    dep = [{"number": 6, "repository_url": "https://api.github.com/repos/owner/repo"}]
+    monkeypatch.setattr(unblock_ready, "_api", lambda *a, **k: dep)
+    for action in ("closed", "reopened", "unlabeled"):
+        emitted |= {t["mode"] for t in unblock_ready.resolve_issue("owner/repo", "5", action)}
+    assert emitted == set(unblock_ready.PLANNERS)
+
+
+def test_an_unlabel_promotes_only_an_issue_that_was_once_blocked():
+    assert unblock_ready.plan_unlabeled(_issue(["task"])) == (["status:ready"], [])
+    never = {"state": "open", "labels": [], "issue_dependencies_summary": {"blocked_by": 0}}
+    assert unblock_ready.plan_unlabeled(never) == ([], [])

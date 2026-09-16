@@ -18,7 +18,17 @@ PR events (issues the PR closes via `Closes #N`, same repo only):
 - closed without merge: the issues go back as if reopened, unless another
   open PR still closes them. A merge needs nothing here: it closes the issue.
 
-`sweep` (manual dispatch): one-off cleanup of `status:*` on closed issues.
+The workflow runs this script in three modes, set by `MODE`:
+- `resolve`: work out which issues this event touches and with which planner,
+  and emit them as the matrix the `sync` job fans out over. Reads only the
+  event's own shape (linked issues, dependents) — never labels.
+- `apply`: one issue, one planner. Reads the issue's labels itself, so the
+  snapshot it plans from is taken inside its own concurrency group.
+- `sweep` (manual dispatch): one-off cleanup of `status:*` on closed issues.
+
+Splitting resolve from apply is what makes the per-issue concurrency group
+possible: a PR event's target issue numbers are only known after the GraphQL
+lookup, so the workflow cannot key a group on them until `resolve` has run.
 
 Stdlib only: the job needs no dependency install.
 """
@@ -110,6 +120,31 @@ def plan_review(issue):
     return ([] if REVIEW in labels else [REVIEW]), sorted(stale)
 
 
+def was_blocked(issue):
+    """True if the issue ever had a native blocker.
+
+    Only such issues are this workflow's to promote: an issue that never had a
+    blocker gets its status from triage, not from a `needs-*` label going away.
+    """
+    return (issue.get("issue_dependencies_summary") or {}).get("total_blocked_by", 0) > 0
+
+
+def plan_unlabeled(issue):
+    """A `needs-*` question was answered: promote, but only a once-blocked issue."""
+    if not was_blocked(issue):
+        return [], []
+    return plan(issue)
+
+
+PLANNERS = {
+    "close": plan_close,
+    "reopen": plan_reopen,
+    "review": plan_review,
+    "promote": plan,
+    "unlabel": plan_unlabeled,
+}
+
+
 def pr_issue_numbers(nodes, repo, dropped):
     """Same-repo issue numbers a PR closes.
 
@@ -124,15 +159,6 @@ def pr_issue_numbers(nodes, repo, dropped):
             continue
         numbers.append(node["number"])
     return numbers
-
-
-def was_blocked(issue):
-    """True if the issue ever had a native blocker.
-
-    Only such issues are this workflow's to promote: an issue that never had a
-    blocker gets its status from triage, not from a `needs-*` label going away.
-    """
-    return (issue.get("issue_dependencies_summary") or {}).get("total_blocked_by", 0) > 0
 
 
 def dependent_repo(dep, repo):
@@ -167,9 +193,10 @@ def _api(method, path, body=None):
 def _remove_label(repo, num, name):
     """Drop a label, tolerating a concurrent run that dropped it first.
 
-    Two runs on the same issue (a PR event and an issue event, say) can read the
-    same labels; the second DELETE then 404s on a label that is already gone.
-    That is the intended end state, not a failure.
+    Same-issue runs are serialised by the workflow's per-issue concurrency
+    group, but a `sweep` pass or a hand edit can still delete a label between
+    this run's read and its DELETE. An already-absent label is the intended end
+    state, not a failure.
     """
     try:
         _api("DELETE", f"repos/{repo}/issues/{num}/labels/{urllib.parse.quote(name)}")
@@ -191,8 +218,9 @@ def apply(repo, issue, planner=plan):
     print(f"#{num}: add={add} remove={remove}")
 
 
-def promote_dependents(repo, closed):
-    page = 1
+def blocking_dependents(repo, closed):
+    """Same-repo issue numbers the closed issue was blocking."""
+    numbers, page = [], 1
     while True:
         batch = _api(
             "GET", f"repos/{repo}/issues/{closed}/dependencies/blocking?per_page=100&page={page}"
@@ -201,25 +229,56 @@ def promote_dependents(repo, closed):
             if dependent_repo(dep, repo) is None:
                 print(f"skip {dep.get('html_url', dep.get('number'))}: outside {repo}")
                 continue
-            # Re-fetch: the dependency summary is the source of truth for open blockers.
-            apply(repo, _api("GET", f"repos/{repo}/issues/{dep['number']}"))
+            numbers.append(dep["number"])
         if len(batch) < 100:
             break
         page += 1
+    return numbers
 
 
-def sync_pr_issues(repo, pr, action, merged):
+def resolve_pr(repo, pr, action, merged):
+    """Matrix entries for a PR event: the issues it closes, and how to replan them."""
     if action == "closed" and merged:
         print(f"PR #{pr} merged: its issues close on their own")
-        return
+        return []
     dropped = action == "closed"
     owner, name = repo.split("/")
     variables = {"owner": owner, "name": name, "pr": int(pr)}
     data = _api("POST", "graphql", {"query": LINKED_ISSUES_QUERY, "variables": variables})
     nodes = data["data"]["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
-    for number in pr_issue_numbers(nodes, repo, dropped):
-        issue = _api("GET", f"repos/{repo}/issues/{number}")
-        apply(repo, issue, plan_reopen if dropped else plan_review)
+    mode = "reopen" if dropped else "review"
+    return [{"issue": n, "mode": mode} for n in pr_issue_numbers(nodes, repo, dropped)]
+
+
+def resolve_issue(repo, number, action):
+    """Matrix entries for an issue event: the issue itself, plus what it unblocks."""
+    number = int(number)
+    if action == "closed":
+        freed = blocking_dependents(repo, number)
+        return [{"issue": number, "mode": "close"}] + [
+            {"issue": n, "mode": "promote"} for n in freed
+        ]
+    if action == "reopened":
+        return [{"issue": number, "mode": "reopen"}]
+    if action == "unlabeled":
+        return [{"issue": number, "mode": "unlabel"}]
+    raise SystemExit(f"unexpected EVENT_ACTION={action!r}")
+
+
+def resolve(repo):
+    event = os.environ.get("EVENT_NAME", "issues")
+    action = os.environ.get("EVENT_ACTION", "closed")
+    if event == "pull_request":
+        targets = resolve_pr(
+            repo, os.environ["PR_NUMBER"], action, os.environ.get("PR_MERGED") == "true"
+        )
+    else:
+        targets = resolve_issue(repo, os.environ["ISSUE_NUMBER"], action)
+    print(f"targets: {targets}")
+    # A matrix caps at 256 entries. Truncating would silently skip an issue, so
+    # let an over-long fan-out fail the run visibly instead.
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+        out.write(f"targets={json.dumps(targets)}\n")
 
 
 def sweep_closed(repo):
@@ -243,28 +302,19 @@ def sweep_closed(repo):
 
 def main():
     repo = os.environ["GITHUB_REPOSITORY"]
-    event = os.environ.get("EVENT_NAME", "issues")
-    action = os.environ.get("EVENT_ACTION", "closed")
-    if event == "workflow_dispatch":
+    mode = os.environ.get("MODE", "resolve")
+    if mode == "resolve":
+        resolve(repo)
+    elif mode == "apply":
+        number = os.environ["TARGET_ISSUE"]
+        # Read labels here, inside this issue's concurrency group, so no other
+        # run can write between the read and the plan built from it.
+        issue = _api("GET", f"repos/{repo}/issues/{number}")
+        apply(repo, issue, PLANNERS[os.environ["TARGET_MODE"]])
+    elif mode == "sweep":
         sweep_closed(repo)
-        return
-    if event == "pull_request":
-        sync_pr_issues(repo, os.environ["PR_NUMBER"], action, os.environ.get("PR_MERGED") == "true")
-        return
-    number = os.environ["ISSUE_NUMBER"]
-    issue = _api("GET", f"repos/{repo}/issues/{number}")
-    if action == "closed":
-        apply(repo, issue, plan_close)
-        promote_dependents(repo, number)
-    elif action == "reopened":
-        apply(repo, issue, plan_reopen)
-    elif action == "unlabeled":
-        if was_blocked(issue):
-            apply(repo, issue)
-        else:
-            print(f"#{number}: never blocked, status is triage's call")
     else:
-        raise SystemExit(f"unexpected EVENT_ACTION={action!r}")
+        raise SystemExit(f"unexpected MODE={mode!r}")
 
 
 if __name__ == "__main__":

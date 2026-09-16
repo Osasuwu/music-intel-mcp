@@ -18,43 +18,68 @@ on:
     types: [opened, reopened, ready_for_review, edited, closed]
   workflow_dispatch:
 
-# Serialises repeats on one event source (a PR edited then closed, an issue
-# closed then reopened) and nothing wider: a PR event writes labels on the
-# issues it closes, whose numbers are only known after the GraphQL lookup, so
-# no expression can key a PR run to the same group as those issues' own events.
-# Going repo-wide instead would be worse than the race: with one group for
-# every event GitHub cancels the previously pending run whenever a third
-# arrives, silently dropping that issue's label update.
-# What keeps the unkeyable race harmless is that every write is idempotent —
-# adding a label already present is a no-op and `_remove_label` treats a 404 as
-# the intended end state — so interleaved runs converge instead of crashing.
-# Queue, never cancel: a cancelled run leaves the labels half-written.
-concurrency:
-  group: >-
-    unblock-ready-${{ github.event.issue.number
-    || github.event.pull_request.number
-    || github.run_id }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
   issues: write
   pull-requests: read
 
 jobs:
-  promote:
+  # Which issues does this event touch, and with which planner? A PR event
+  # writes labels on the issues it closes, and those numbers exist only after
+  # the GraphQL lookup — so the lookup has to happen in its own job before the
+  # writing job can key a concurrency group on them. This job reads the event's
+  # shape only (linked issues, dependents); it never reads or writes labels.
+  resolve:
     # Every unlabel fires the event; only a needs-* removal is ours. Drafts
     # aren't up for review yet, a merge closes the issue itself, and a fork's
     # read-only token can't write labels.
     if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'issues'
-          && (github.event.action != 'unlabeled' || startsWith(github.event.label.name, 'needs-')))
+      (github.event_name == 'issues'
+       && (github.event.action != 'unlabeled' || startsWith(github.event.label.name, 'needs-')))
       || (github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name == github.repository
           && (github.event.action == 'closed'
               && !github.event.pull_request.merged
               || github.event.action != 'closed' && !github.event.pull_request.draft))
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.resolve.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+      - name: Resolve affected issues
+        id: resolve
+        env:
+          MODE: resolve
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+        run: python3 .github/scripts/unblock_ready.py
+
+  # One matrix leg per affected issue, each holding that issue's own lock, so
+  # the read-plan-write cycle can't interleave with another run's. Keying the
+  # group on the event source instead would leave a reopen of #N and a PR event
+  # naming #N running side by side: both plan from the same pre-write snapshot
+  # and #N ends up carrying status:ready AND status:review at once. Idempotent
+  # writes don't save that case — each run's writes succeed, the combination is
+  # what's incoherent. A repo-wide group would be worse still: GitHub keeps one
+  # pending run per group, so a third event silently cancels the second.
+  # Queue, never cancel: a cancelled run leaves the labels half-written.
+  # fail-fast off — one issue's failure must not skip the others' updates.
+  sync:
+    needs: resolve
+    if: needs.resolve.result == 'success' && needs.resolve.outputs.targets != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.targets) }}
+    concurrency:
+      group: unblock-ready-issue-${{ matrix.issue }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -62,10 +87,27 @@ jobs:
           sparse-checkout: .github/scripts
       - name: Sync issue status labels
         env:
+          MODE: apply
+          TARGET_ISSUE: ${{ matrix.issue }}
+          TARGET_MODE: ${{ matrix.mode }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_MERGED: ${{ github.event.pull_request.merged }}
+        run: python3 .github/scripts/unblock_ready.py
+
+  # The one-off backfill: hundreds of closed issues, far past a matrix's 256
+  # legs, so it runs unfanned in its own group. It only strips labels from
+  # closed issues, which no lifecycle event is competing to write.
+  sweep:
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: unblock-ready-sweep
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+      - name: Sweep status labels off closed issues
+        env:
+          MODE: sweep
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 .github/scripts/unblock_ready.py
