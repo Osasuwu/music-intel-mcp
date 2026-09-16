@@ -18,10 +18,17 @@ on:
     types: [opened, reopened, ready_for_review, edited, closed]
   workflow_dispatch:
 
-# One run at a time per issue/PR: two runs racing on the same issue would read
-# the same labels and write conflicting sets. Queue, never cancel — a cancelled
-# run leaves the labels half-written. A dispatch sweep touches every issue, so
-# it gets its own group instead of sharing one.
+# Serialises repeats on one event source (a PR edited then closed, an issue
+# closed then reopened) and nothing wider: a PR event writes labels on the
+# issues it closes, whose numbers are only known after the GraphQL lookup, so
+# no expression can key a PR run to the same group as those issues' own events.
+# Going repo-wide instead would be worse than the race: with one group for
+# every event GitHub cancels the previously pending run whenever a third
+# arrives, silently dropping that issue's label update.
+# What keeps the unkeyable race harmless is that every write is idempotent —
+# adding a label already present is a no-op and `_remove_label` treats a 404 as
+# the intended end state — so interleaved runs converge instead of crashing.
+# Queue, never cancel: a cancelled run leaves the labels half-written.
 concurrency:
   group: >-
     unblock-ready-${{ github.event.issue.number
