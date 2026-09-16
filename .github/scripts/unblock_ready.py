@@ -25,6 +25,7 @@ Stdlib only: the job needs no dependency install.
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -163,13 +164,30 @@ def _api(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
+def _remove_label(repo, num, name):
+    """Drop a label, tolerating a concurrent run that dropped it first.
+
+    Two runs on the same issue (a PR event and an issue event, say) can read the
+    same labels; the second DELETE then 404s on a label that is already gone.
+    That is the intended end state, not a failure.
+    """
+    try:
+        _api("DELETE", f"repos/{repo}/issues/{num}/labels/{urllib.parse.quote(name)}")
+        return True
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        print(f"#{num}: {name} already gone")
+        return False
+
+
 def apply(repo, issue, planner=plan):
     add, remove = planner(issue)
     num = issue["number"]
     if add:
         _api("POST", f"repos/{repo}/issues/{num}/labels", {"labels": add})
     for name in remove:
-        _api("DELETE", f"repos/{repo}/issues/{num}/labels/{urllib.parse.quote(name)}")
+        _remove_label(repo, num, name)
     print(f"#{num}: add={add} remove={remove}")
 
 

@@ -1,7 +1,10 @@
 """Label decisions of .github/scripts/unblock_ready.py (issue and PR lifecycle events)."""
 
 import importlib.util
+import urllib.error
 from pathlib import Path
+
+import pytest
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / ".github" / "scripts").is_dir())
 _spec = importlib.util.spec_from_file_location(
@@ -156,3 +159,28 @@ def test_dropped_pr_skips_issue_another_open_pr_still_closes():
     nodes = [_linked(1), _linked(2, open_prs=1)]
     assert unblock_ready.pr_issue_numbers(nodes, "owner/repo", dropped=True) == [1]
     assert unblock_ready.pr_issue_numbers(nodes, "owner/repo", dropped=False) == [1, 2]
+
+
+def test_removing_a_label_a_racing_run_already_removed_is_not_an_error(monkeypatch):
+    calls = []
+
+    def fake_api(method, path, body=None):
+        calls.append((method, path))
+        if method == "DELETE":
+            raise urllib.error.HTTPError(path, 404, "Label does not exist", {}, None)
+        return None
+
+    monkeypatch.setattr(unblock_ready, "_api", fake_api)
+    issue = dict(_issue(["status:ready"], state="closed"), number=7)
+    unblock_ready.apply("owner/repo", issue, unblock_ready.plan_close)
+    assert calls == [("DELETE", "repos/owner/repo/issues/7/labels/status%3Aready")]
+
+
+def test_a_delete_failing_for_any_other_reason_still_raises(monkeypatch):
+    def fake_api(method, path, body=None):
+        raise urllib.error.HTTPError(path, 500, "boom", {}, None)
+
+    monkeypatch.setattr(unblock_ready, "_api", fake_api)
+    issue = dict(_issue(["status:ready"], state="closed"), number=7)
+    with pytest.raises(urllib.error.HTTPError):
+        unblock_ready.apply("owner/repo", issue, unblock_ready.plan_close)

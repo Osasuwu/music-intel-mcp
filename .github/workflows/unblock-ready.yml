@@ -18,6 +18,17 @@ on:
     types: [opened, reopened, ready_for_review, edited, closed]
   workflow_dispatch:
 
+# One run at a time per issue/PR: two runs racing on the same issue would read
+# the same labels and write conflicting sets. Queue, never cancel — a cancelled
+# run leaves the labels half-written. A dispatch sweep touches every issue, so
+# it gets its own group instead of sharing one.
+concurrency:
+  group: >-
+    unblock-ready-${{ github.event.issue.number
+    || github.event.pull_request.number
+    || github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   issues: write
