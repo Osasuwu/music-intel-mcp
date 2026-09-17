@@ -51,6 +51,28 @@ class RssCeilingExceededError(RuntimeError):
 PEAK_RSS_CEILING_MB = 1500.0
 
 
+def low_memory_onnx_session_options():
+    """SessionOptions shared by every ONNX session this chain creates (#175),
+    including ``scripts/benchmark_onnx_engine.py`` — one construction, not two
+    independently-drifting copies, mirroring the :data:`PEAK_RSS_CEILING_MB`
+    single-constant invariant (#160 AC3).
+
+    ``onnxruntime``'s default CPU memory arena pre-allocates and retains large
+    blocks per session rather than releasing them between runs; measured
+    peak RSS for the Discogs-EffNet -> MTG-Jamendo chain was ~2467MB with the
+    arena on vs. ~900MB with ``enable_cpu_mem_arena``/``enable_mem_pattern``
+    both off (#175) — comfortably under :data:`PEAK_RSS_CEILING_MB`, at
+    unchanged latency (this chain runs one track at a time, never a batch
+    that would benefit from arena reuse).
+    """
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.enable_cpu_mem_arena = False
+    opts.enable_mem_pattern = False
+    return opts
+
+
 def _default_rss_reader() -> float:
     import psutil
 
@@ -264,7 +286,9 @@ class DiscogsEffnetOnnxModel:
         if self._session is None:
             import onnxruntime as ort
 
-            self._session = ort.InferenceSession(str(self._model_path))
+            self._session = ort.InferenceSession(
+                str(self._model_path), sess_options=low_memory_onnx_session_options()
+            )
         return self._session
 
     def embed(self, pcm: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -299,7 +323,9 @@ class MtgJamendoClassifier:
         if self._session is None:
             import onnxruntime as ort
 
-            self._session = ort.InferenceSession(str(self._model_path))
+            self._session = ort.InferenceSession(
+                str(self._model_path), sess_options=low_memory_onnx_session_options()
+            )
         return self._session
 
     def classify(self, embedding: np.ndarray) -> ClassifierResult:

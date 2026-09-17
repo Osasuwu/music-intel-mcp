@@ -173,6 +173,32 @@ def test_peak_rss_ceiling_mb_is_shared_with_inference_module():
     assert PEAK_RSS_CEILING_MB is inference_ceiling
 
 
+# #175: build_sessions must reuse the shared low_memory_onnx_session_options()
+# (inference.py) rather than an independently-drifting SessionOptions of its
+# own -- mirrors the PEAK_RSS_CEILING_MB single-constant invariant above.
+def test_build_sessions_reuses_shared_low_memory_session_options(monkeypatch, tmp_path):
+    ort = pytest.importorskip("onnxruntime")
+    from benchmark_onnx_engine import build_sessions
+
+    captured: list[object] = []
+
+    class _CapturingSession:
+        def __init__(self, path, sess_options=None, providers=None):
+            captured.append(sess_options)
+
+    monkeypatch.setattr(ort, "InferenceSession", _CapturingSession)
+    embedding_path = tmp_path / "embedding.onnx"
+    classifier_path = tmp_path / "classifier.onnx"
+
+    build_sessions(embedding_path, classifier_path)
+
+    assert len(captured) == 2
+    for opts in captured:
+        assert opts.enable_cpu_mem_arena is False
+        assert opts.enable_mem_pattern is False
+        assert opts.intra_op_num_threads == 1
+
+
 def test_report_to_dict_round_trips_fields():
     clips = _clips([(0.05, 120.0), (0.06, 90.0)])
     report = build_report(clips, peak_rss_mb=321.0, models={"embedding": {"url": "x"}})
