@@ -339,9 +339,11 @@ class UserStore:
         input_rms: float | None = None,
     ) -> Path:
         """Write one live-capture inference result under the LOCAL store only
-        (#124 AC5). MTG-Jamendo outputs are licensing-gated local-only
-        (decision 29852699); ``UserStore`` never talks to Supabase/SharedStore,
-        so this path is structurally local-only, not just conventionally so.
+        (#124 AC5). ``UserStore`` never talks to Supabase/SharedStore, so this
+        path is structurally local-only, not just conventionally so. That is a
+        per-user-store property, not a licensing gate: MTG confirmed model
+        outputs are outside CC BY-NC-ND's no-derivatives scope (decision
+        ad39cbcd), so pooling happens through the pool root, not here.
 
         ``provenance`` (#139 AC5) is the live-capture sidecar — raw title/
         artist, source app id, capture timestamp, chromaprint fingerprint —

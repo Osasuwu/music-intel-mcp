@@ -70,7 +70,7 @@ $missing = $requiredFiles | Where-Object { -not (Test-Path (Join-Path $modelsDir
 Write-Host ""
 Write-Host "== One manual step left: the ONNX models ==" -ForegroundColor Yellow
 Write-Host "These are Essentia's Discogs-EffNet + MTG-Jamendo models, licensed"
-Write-Host "CC BY-NC-ND 4.0 (decision 29852699) -- this project never bundles or"
+Write-Host "CC BY-NC-ND 4.0 -- this project never bundles or"
 Write-Host "redistributes them, so you fetch them yourself from the official source:"
 Write-Host "  https://essentia.upf.edu/models.html"
 Write-Host "  (look for 'discogs-effnet-bsdynamic' and 'mtg_jamendo_top50tags')"
