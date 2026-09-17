@@ -1,6 +1,7 @@
 """Label decisions of .github/scripts/unblock_ready.py (issue and PR lifecycle events)."""
 
 import importlib.util
+import io
 import urllib.error
 from pathlib import Path
 
@@ -186,6 +187,82 @@ def test_a_delete_failing_for_any_other_reason_still_raises(monkeypatch):
         unblock_ready.apply("owner/repo", issue, unblock_ready.plan_close)
 
 
+def _http_error(status, body="", headers=None):
+    return urllib.error.HTTPError(
+        "https://api.github.com/x", status, body, headers or {}, io.BytesIO(body.encode())
+    )
+
+
+def _api_over(monkeypatch, responses):
+    """Drive `_api` against a scripted sequence, with a sleep that never blocks."""
+    slept, queue = [], list(responses)
+
+    def fake_request(method, path, body=None):
+        outcome = queue.pop(0)
+        if isinstance(outcome, urllib.error.HTTPError):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(unblock_ready, "_request", fake_request)
+    return slept, lambda: queue
+
+
+def test_a_throttled_call_backs_off_and_then_succeeds(monkeypatch):
+    slept, _ = _api_over(
+        monkeypatch,
+        [_http_error(403, "You have exceeded a secondary rate limit"), {"ok": True}],
+    )
+    result = unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
+    assert result == {"ok": True}
+    assert slept == [1]
+
+
+def test_a_403_that_is_not_a_throttle_raises_without_retrying(monkeypatch):
+    slept, remaining = _api_over(monkeypatch, [_http_error(403, "Resource not accessible")])
+    with pytest.raises(urllib.error.HTTPError):
+        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
+    assert slept == []
+    assert remaining() == []
+
+
+def test_retry_after_sets_the_delay_and_is_capped(monkeypatch):
+    slept, _ = _api_over(monkeypatch, [_http_error(429, "slow down", {"Retry-After": "999"}), None])
+    unblock_ready._api("POST", "repos/o/r/issues/1/labels", sleep=slept.append)
+    assert slept == [unblock_ready.MAX_BACKOFF_SECONDS]
+
+
+def test_an_exhausted_primary_limit_waits_for_its_reset(monkeypatch):
+    headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000"}
+    slept, _ = _api_over(monkeypatch, [_http_error(403, "rate limit", headers), None])
+    monkeypatch.setattr(unblock_ready.time, "time", lambda: 970)
+    unblock_ready._api("POST", "repos/o/r/issues/1/labels", sleep=slept.append)
+    assert slept == [30]
+
+
+def test_a_throttle_that_never_clears_gives_up_after_the_attempt_cap(monkeypatch):
+    throttled = [_http_error(429, "slow down") for _ in range(unblock_ready.MAX_ATTEMPTS)]
+    slept, remaining = _api_over(monkeypatch, throttled)
+    with pytest.raises(urllib.error.HTTPError):
+        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
+    assert len(slept) == unblock_ready.MAX_ATTEMPTS - 1
+    assert remaining() == []
+
+
+def test_a_404_is_left_for_the_caller_to_tolerate(monkeypatch):
+    slept, _ = _api_over(monkeypatch, [_http_error(404, "Label does not exist")])
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
+    assert caught.value.code == 404
+    assert slept == []
+
+
+def test_a_failing_call_logs_its_response_body(monkeypatch, capsys):
+    slept, _ = _api_over(monkeypatch, [_http_error(403, "Resource not accessible by integration")])
+    with pytest.raises(urllib.error.HTTPError):
+        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
+    assert "Resource not accessible by integration" in capsys.readouterr().out
+
+
 def test_a_closed_issue_resolves_to_itself_plus_what_it_unblocks(monkeypatch):
     def fake_api(method, path, body=None):
         assert path.startswith("repos/owner/repo/issues/5/dependencies/blocking")
@@ -244,6 +321,59 @@ def test_every_mode_the_resolver_emits_has_a_planner(monkeypatch):
     for action in ("closed", "reopened", "unlabeled"):
         emitted |= {t["mode"] for t in unblock_ready.resolve_issue("owner/repo", "5", action)}
     assert emitted == set(unblock_ready.PLANNERS)
+
+
+def _sweep_api(pages, calls):
+    """Stub `_api` for a sweep: one status label, then `pages` of results.
+
+    `pages` maps a 1-based page number to the list that page returns; a page
+    with no entry returns []. Every DELETE is recorded in `calls`.
+    """
+
+    def fake_api(method, path, body=None):
+        calls.append((method, path))
+        if method == "DELETE":
+            # The real API drops the label, so that issue leaves the result set.
+            number = int(path.split("/issues/", 1)[1].split("/", 1)[0])
+            for items in pages.values():
+                items[:] = [i for i in items if i["number"] != number]
+            return None
+        if "/labels?" in path:
+            return [{"name": "status:review"}]
+        page = int(path.rsplit("page=", 1)[1])
+        return pages.get(page, [])
+
+    return fake_api
+
+
+def _closed(number, is_pr=False):
+    item = {"number": number, "state": "closed", "labels": [{"name": "status:review"}]}
+    if is_pr:
+        item["pull_request"] = {"url": f"https://api.github.com/repos/owner/repo/pulls/{number}"}
+    return item
+
+
+def test_sweep_leaves_pull_requests_alone(monkeypatch):
+    # `GET /issues` lists PRs too, and a label DELETE on a PR needs
+    # `pull-requests: write` — the sweep job only has `issues: write`, so
+    # touching one dies with 403 "Resource not accessible by integration".
+    calls = []
+    pages = {1: [_closed(1833, is_pr=True), _closed(1840)]}
+    monkeypatch.setattr(unblock_ready, "_api", _sweep_api(pages, calls))
+    unblock_ready.sweep_closed("owner/repo")
+    deletes = [path for method, path in calls if method == "DELETE"]
+    assert deletes == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
+
+
+def test_sweep_pages_past_a_full_page_of_pull_requests(monkeypatch):
+    # Page 1 never shrinks — nothing on it is ours to relabel — so re-asking
+    # for it would spin forever. The issues behind it must still get swept.
+    calls = []
+    pages = {1: [_closed(n, is_pr=True) for n in range(100)], 2: [_closed(1840)]}
+    monkeypatch.setattr(unblock_ready, "_api", _sweep_api(pages, calls))
+    unblock_ready.sweep_closed("owner/repo")
+    deletes = [path for method, path in calls if method == "DELETE"]
+    assert deletes == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
 
 
 def test_an_unlabel_promotes_only_an_issue_that_was_once_blocked():
