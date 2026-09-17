@@ -35,6 +35,7 @@ Stdlib only: the job needs no dependency install.
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +49,11 @@ COEXISTS_WITH_READY = {READY, "status:owner-queue"}
 IN_FLIGHT = {"status:in-progress", REVIEW, "status:rework-in-progress"}
 # Set by a hardware lifecycle workflow on close/reopen; not ours to touch.
 HARDWARE_PREFIX = "status:hardware-"
+# Throttle handling: a sweep's burst of mutations trips GitHub's secondary rate
+# limit, which answers 403 with no machine-readable marker beyond this phrase.
+SECONDARY_LIMIT_HINT = "secondary rate limit"
+MAX_ATTEMPTS = 5
+MAX_BACKOFF_SECONDS = 60
 # `needs-grill`, `needs-triage`, `needs-safety-review`, ...: an open question
 # that must be answered before the issue is ready.
 NEEDS_PREFIX = "needs-"
@@ -174,7 +180,39 @@ def dependent_repo(dep, repo):
     return repo if url.split("/repos/", 1)[1].lower() == repo.lower() else None
 
 
-def _api(method, path, body=None):
+def _throttle_delay(status, headers, payload, attempt, now=None):
+    """Seconds to wait before retrying a throttled request, or None if it isn't one.
+
+    A `sweep` pass fires a long burst of mutations, and GitHub answers a burst
+    with the *secondary* rate limit — which shares its status code with a plain
+    permission failure, so the code alone can't tell them apart. The headers
+    can: `Retry-After` is what the secondary limiter sends, and an exhausted
+    primary limit sends `x-ratelimit-remaining: 0` with a reset epoch. Absent
+    both, a 403 whose body doesn't name the secondary limit is a real 403 and
+    must surface rather than be retried into silence. A 429 is unambiguous.
+    """
+    headers = headers or {}
+    retry_after = _positive_int(headers.get("Retry-After"))
+    if retry_after is not None:
+        return min(retry_after, MAX_BACKOFF_SECONDS)
+    if headers.get("x-ratelimit-remaining") == "0":
+        reset = _positive_int(headers.get("x-ratelimit-reset"))
+        now = int((now or time.time)())
+        return min(max(reset - now, 1), MAX_BACKOFF_SECONDS) if reset else MAX_BACKOFF_SECONDS
+    if status == 429 or SECONDARY_LIMIT_HINT in (payload or "").lower():
+        return min(2**attempt, MAX_BACKOFF_SECONDS)
+    return None
+
+
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _request(method, path, body=None):
     req = urllib.request.Request(
         f"https://api.github.com/{path}",
         method=method,
@@ -188,6 +226,30 @@ def _api(method, path, body=None):
     with urllib.request.urlopen(req) as resp:
         raw = resp.read()
     return json.loads(raw) if raw else None
+
+
+def _api(method, path, body=None, attempts=MAX_ATTEMPTS, sleep=time.sleep):
+    """Call the REST API, backing off while GitHub throttles us.
+
+    Every call this script makes is idempotent (add a label it may already
+    carry, drop one that may already be gone), so a retry can only repeat work,
+    never corrupt it. Anything that isn't a throttle propagates with its body
+    logged: a bare status line leaves the operator unable to tell a rate limit
+    from a permission problem, which is the whole reason this helper exists.
+    """
+    for attempt in range(attempts):
+        try:
+            return _request(method, path, body)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise
+            payload = exc.read().decode("utf-8", "replace")
+            delay = _throttle_delay(exc.code, exc.headers, payload, attempt)
+            if delay is None or attempt == attempts - 1:
+                print(f"{method} {path} -> HTTP {exc.code}: {' '.join(payload.split())[:500]}")
+                raise
+            print(f"{method} {path} -> HTTP {exc.code}, throttled; retrying in {delay}s")
+            sleep(delay)
 
 
 def _remove_label(repo, num, name):
@@ -282,7 +344,14 @@ def resolve(repo):
 
 
 def sweep_closed(repo):
-    """Strip `status:*` from every closed issue, one status label at a time."""
+    """Strip `status:*` from every closed issue, one status label at a time.
+
+    `GET /issues` lists pull requests alongside issues, and a label DELETE on a
+    PR needs `pull-requests: write`, which this workflow deliberately does not
+    grant — GitHub answers `403 Resource not accessible by integration` and the
+    sweep dies on the first such PR. A PR's labels aren't this script's business
+    anyway (it tracks the issue lifecycle), so PRs are skipped.
+    """
     names, page = [], 1
     while True:
         batch = _api("GET", f"repos/{repo}/labels?per_page=100&page={page}")
@@ -294,10 +363,20 @@ def sweep_closed(repo):
         if not name.startswith("status:") or name.startswith(HARDWARE_PREFIX):
             continue
         query = f"repos/{repo}/issues?state=closed&per_page=100&labels={urllib.parse.quote(name)}"
-        # Always page 1: every pass removes the label, so the result set shrinks.
-        while batch := _api("GET", query):
-            for issue in batch:
+        page = 1
+        while batch := _api("GET", f"{query}&page={page}"):
+            issues = [item for item in batch if "pull_request" not in item]
+            for issue in issues:
                 apply(repo, issue, plan_close)
+            if issues:
+                # The page shrank by what we just relabelled, so page `page`
+                # refills from behind: ask for it again rather than stepping on.
+                continue
+            if len(batch) < 100:
+                break
+            # A full page of nothing but PRs never shrinks, so asking for it
+            # again would loop forever. Step past it to the issues behind it.
+            page += 1
 
 
 def main():
