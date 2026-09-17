@@ -376,6 +376,18 @@ def test_sweep_pages_past_a_full_page_of_pull_requests(monkeypatch):
     assert deletes == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
 
 
+def test_sweep_stops_on_a_page_it_changed_nothing_on(monkeypatch):
+    # GitHub keeps serving an issue under a label for seconds after the DELETE
+    # that cleared it. Those repeats plan to nothing, so the page never shrinks
+    # — a loop that re-asks while the page merely *has* issues spins forever.
+    calls = []
+    stale = {"number": 1840, "state": "closed", "labels": []}
+    monkeypatch.setattr(unblock_ready, "_api", _sweep_api({1: [stale]}, calls))
+    unblock_ready.sweep_closed("owner/repo")
+    assert [path for method, path in calls if method == "DELETE"] == []
+    assert sum(1 for _, path in calls if "state=closed" in path) == 1  # no re-ask
+
+
 def test_an_unlabel_promotes_only_an_issue_that_was_once_blocked():
     assert unblock_ready.plan_unlabeled(_issue(["task"])) == (["status:ready"], [])
     never = {"state": "open", "labels": [], "issue_dependencies_summary": {"blocked_by": 0}}
