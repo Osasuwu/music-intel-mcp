@@ -96,6 +96,72 @@ def test_check_rss_ceiling_does_not_raise_when_under_ceiling() -> None:
     check_rss_ceiling(ceiling_mb=100.0, rss_reader=lambda: 50.0)
 
 
+# #175: onnxruntime's default CPU memory arena drove peak RSS for this chain to
+# ~2467MB, ~65% over PEAK_RSS_CEILING_MB -- disabling the arena/mem-pattern
+# brought a real measured run to ~900MB (see scripts/benchmark_onnx_engine.py
+# docstring / CONTEXT.md for the full re-measurement). Asserted here on the
+# SessionOptions object itself, not by re-running the real (network+model,
+# onnx-bench-extra-only) benchmark in the default unit-test suite.
+def test_low_memory_onnx_session_options_disables_arena_and_mem_pattern() -> None:
+    pytest.importorskip("onnxruntime")
+    from music_intel_mcp.inference import low_memory_onnx_session_options
+
+    opts = low_memory_onnx_session_options()
+
+    assert opts.enable_cpu_mem_arena is False
+    assert opts.enable_mem_pattern is False
+
+
+class _CapturingSession:
+    """Fake standing in for ``onnxruntime.InferenceSession`` — records the
+    ``sess_options`` it was constructed with so tests can assert on it without
+    a real ONNX model file or network access."""
+
+    captured_options: list[object] = []
+
+    def __init__(self, path, sess_options=None, **kwargs) -> None:
+        _CapturingSession.captured_options.append(sess_options)
+
+    def get_inputs(self):
+        raise NotImplementedError("not exercised by the low-memory-options tests")
+
+
+def test_discogs_effnet_model_builds_session_with_low_memory_options(monkeypatch, tmp_path) -> None:
+    ort = pytest.importorskip("onnxruntime")
+    from music_intel_mcp.inference import DiscogsEffnetOnnxModel
+
+    _CapturingSession.captured_options = []
+    monkeypatch.setattr(ort, "InferenceSession", _CapturingSession)
+    model_path = tmp_path / "discogs-effnet.onnx"
+    model_path.write_bytes(b"")
+
+    DiscogsEffnetOnnxModel(model_path=model_path)._ensure_session()
+
+    assert len(_CapturingSession.captured_options) == 1
+    opts = _CapturingSession.captured_options[0]
+    assert opts.enable_cpu_mem_arena is False
+    assert opts.enable_mem_pattern is False
+
+
+def test_mtg_jamendo_classifier_builds_session_with_low_memory_options(
+    monkeypatch, tmp_path
+) -> None:
+    ort = pytest.importorskip("onnxruntime")
+    from music_intel_mcp.inference import MtgJamendoClassifier
+
+    _CapturingSession.captured_options = []
+    monkeypatch.setattr(ort, "InferenceSession", _CapturingSession)
+    model_path = tmp_path / "mtg-jamendo.onnx"
+    model_path.write_bytes(b"")
+
+    MtgJamendoClassifier(model_path=model_path, labels=["a"])._ensure_session()
+
+    assert len(_CapturingSession.captured_options) == 1
+    opts = _CapturingSession.captured_options[0]
+    assert opts.enable_cpu_mem_arena is False
+    assert opts.enable_mem_pattern is False
+
+
 def _tone(seconds: float = 1.0, sample_rate: int = 16000, gain: float = 1.0) -> np.ndarray:
     # float64 throughout the trig, casting to float32 only at the very end (as
     # a real captured recording would already be quantized) -- computing sin()

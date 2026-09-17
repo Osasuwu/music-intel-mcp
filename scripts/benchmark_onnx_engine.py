@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from music_intel_mcp.inference import PEAK_RSS_CEILING_MB
+from music_intel_mcp.inference import PEAK_RSS_CEILING_MB, low_memory_onnx_session_options
 
 SAMPLE_RATE = 16_000  # required by both ONNX graphs (models' "inference.sample_rate")
 N_MELS = 96
@@ -204,7 +204,9 @@ def waveform_to_patches(wave, sample_rate: int):
 def build_sessions(embedding_path: Path, classifier_path: Path):
     import onnxruntime as ort
 
-    opts = ort.SessionOptions()
+    # Shared with the production model classes in inference.py (#175) — one
+    # SessionOptions construction, not two independently-drifting copies.
+    opts = low_memory_onnx_session_options()
     opts.intra_op_num_threads = 1  # single-track-at-a-time is the real usage pattern
     embedding_session = ort.InferenceSession(
         str(embedding_path), sess_options=opts, providers=["CPUExecutionProvider"]
