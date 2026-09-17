@@ -23,8 +23,9 @@ for provenance/reproducibility (AC4) — trust-on-first-use, not verification
 against a pinned expected hash (no expected hash is pinned in ``MODELS``; see
 the comment above that dict for why). Sourced from
 https://essentia.upf.edu/models/ on 2026-08-19 (CC BY-NC-ND 4.0 per that
-directory's LICENSE file; local-only use here matches the storage/licensing
-gate in decision ``29852699``).
+directory's LICENSE file; the model files are never redistributed, while
+their outputs are outside the no-derivatives scope per MTG, decision
+``ad39cbcd``).
 
 Usage::
 
@@ -73,7 +74,7 @@ MODELS: dict[str, dict[str, str]] = {
         "framework": "ONNX",
         "framework_version": "1.10.1",
         "license": (
-            "CC BY-NC-ND 4.0 (essentia.upf.edu/models/LICENSE) — local-only per decision 29852699"
+            "CC BY-NC-ND 4.0 (essentia.upf.edu/models/LICENSE) — model files not redistributed"
         ),
         # Actual ONNX graph input name, confirmed via onnxruntime InferenceSession
         # against the downloaded file — the essentia.upf.edu .json metadata
@@ -94,7 +95,7 @@ MODELS: dict[str, dict[str, str]] = {
         "framework": "ONNX (converted from TensorFlow 2.8.0)",
         "framework_version": "1.10.1",
         "license": (
-            "CC BY-NC-ND 4.0 (essentia.upf.edu/models/LICENSE) — local-only per decision 29852699"
+            "CC BY-NC-ND 4.0 (essentia.upf.edu/models/LICENSE) — model files not redistributed"
         ),
         # See the "melspectrogram" comment above — same discrepancy applies here.
         "input_name": "embeddings",
