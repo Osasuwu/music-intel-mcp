@@ -271,6 +271,7 @@ def _remove_label(repo, num, name):
 
 
 def apply(repo, issue, planner=plan):
+    """Run the planner's verdict against the API. True when anything changed."""
     add, remove = planner(issue)
     num = issue["number"]
     if add:
@@ -278,6 +279,7 @@ def apply(repo, issue, planner=plan):
     for name in remove:
         _remove_label(repo, num, name)
     print(f"#{num}: add={add} remove={remove}")
+    return bool(add or remove)
 
 
 def blocking_dependents(repo, closed):
@@ -365,17 +367,21 @@ def sweep_closed(repo):
         query = f"repos/{repo}/issues?state=closed&per_page=100&labels={urllib.parse.quote(name)}"
         page = 1
         while batch := _api("GET", f"{query}&page={page}"):
-            issues = [item for item in batch if "pull_request" not in item]
-            for issue in issues:
-                apply(repo, issue, plan_close)
-            if issues:
+            changed = False
+            for item in batch:
+                if "pull_request" in item:
+                    continue
+                changed |= apply(repo, item, plan_close)
+            if changed:
                 # The page shrank by what we just relabelled, so page `page`
                 # refills from behind: ask for it again rather than stepping on.
                 continue
+            # Nothing on this page was ours to change — skipped PRs, or issues
+            # the label index is still serving for a few seconds after the
+            # DELETE that cleared them. Either way the page will not shrink, so
+            # re-asking for it would spin forever; move on instead.
             if len(batch) < 100:
                 break
-            # A full page of nothing but PRs never shrinks, so asking for it
-            # again would loop forever. Step past it to the issues behind it.
             page += 1
 
 
