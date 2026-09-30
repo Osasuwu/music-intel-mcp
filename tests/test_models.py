@@ -37,10 +37,20 @@ def test_canonical_example_round_trips(canonical_profile_dict):
     assert again == profile
 
 
-def test_method_params_defaults_match_canonical():
+def test_method_params_defaults_match_canonical(canonical_profile_dict):
     """Default method_params equal the canonical example's threshold set —
     they are the single V0 source of truth (calibrated later in #66)."""
     mp = MethodParams()
+    # The comparison the name promises: every default against the example file.
+    # scene.K_selected is a per-run result (None by default, chosen in the
+    # example), so it is the one key excluded.
+    defaults = mp.model_dump(mode="json")
+    example = RootProfile.model_validate(canonical_profile_dict).method_params.model_dump(
+        mode="json"
+    )
+    assert defaults["scene"].pop("K_selected") is None
+    example["scene"].pop("K_selected")
+    assert defaults == example
     assert mp.validation.N_THRESHOLD == 1000
     assert mp.validation.T_THRESHOLD_DAYS == 180
     assert mp.validation.confidence_floor == 0.6

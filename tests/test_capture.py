@@ -32,11 +32,15 @@ def test_ring_buffer_never_opens_a_file(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_ring_buffer_drops_oldest_frames_past_capacity() -> None:
     sink = RingBufferSink(max_seconds=1.0, sample_rate=100, channels=1)
-    sink.write(_frame(60, sample_rate=100))
-    sink.write(_frame(60, sample_rate=100))
+    oldest = AudioFrame(samples=np.full((60, 1), 1.0, dtype=np.float32), sample_rate=100)
+    newest = AudioFrame(samples=np.full((60, 1), 2.0, dtype=np.float32), sample_rate=100)
+    sink.write(oldest)
+    sink.write(newest)
 
-    assert sink.duration_s <= 1.0
-    assert sink.read_all().shape[0] <= 100
+    # 120 samples exceed the 100-sample capacity: the oldest frame goes, the
+    # newest one survives whole (not an empty buffer, not the older audio).
+    assert sink.duration_s == 0.6
+    np.testing.assert_array_equal(sink.read_all(), newest.samples)
 
 
 def test_ring_buffer_read_all_empty_is_honest_empty() -> None:

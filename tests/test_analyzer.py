@@ -593,7 +593,10 @@ def test_temporal_plays_logs_unshifted_count_split_by_source(caplog):
     with caplog.at_level(logging.INFO, logger="music_intel_mcp.analyzer"):
         _temporal_plays(events, None, {})
     msg = " ".join(r.getMessage() for r in caplog.records)
-    assert "ifttt" in msg and "2" in msg
+    # Both IFTTT plays are counted under their source; the shifted
+    # spotify_extended play is not part of the unshifted split at all.
+    assert "'ifttt': 2" in msg
+    assert "spotify_extended" not in msg
 
 
 # --------------------------------------------------------------------------- #

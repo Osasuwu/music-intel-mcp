@@ -28,7 +28,6 @@ import respx
 
 from music_intel_mcp.acousticbrainz import (
     AB_HIGHLEVEL_URL,
-    AB_LOWLEVEL_URL,
     AcousticBrainzApiClient,
     build_acousticbrainz_index,
     extract_ab_scalars,
@@ -124,7 +123,11 @@ def test_client_fetch_highlevel_parses_offset_zero_and_skips_mbid_mapping():
         "mbid_mapping": {"whatever": 1},  # the API's own bookkeeping key — ignore
     }
     with respx.mock(assert_all_called=False) as router:
-        router.get(AB_HIGHLEVEL_URL).mock(return_value=httpx.Response(200, json=body))
+        # Literal endpoint on purpose: every other route here is keyed on the
+        # production constant, so a wrong URL in it would otherwise go unseen.
+        router.get("https://acousticbrainz.org/api/v1/high-level").mock(
+            return_value=httpx.Response(200, json=body)
+        )
         out = client.fetch_highlevel([_M1])
     assert set(out) == {_M1}
     assert out[_M1]["highlevel"]["mood_happy"]["all"]["happy"] == 0.5
@@ -134,7 +137,9 @@ def test_client_batches_at_twenty_five_and_semicolon_joins():
     client = AcousticBrainzApiClient(sleep=lambda _s: None)
     ids = [f"mbid-{i:03d}" for i in range(30)]
     with respx.mock(assert_all_called=False) as router:
-        route = router.get(AB_LOWLEVEL_URL).mock(return_value=httpx.Response(200, json={}))
+        route = router.get("https://acousticbrainz.org/api/v1/low-level").mock(
+            return_value=httpx.Response(200, json={})
+        )
         client.fetch_lowlevel(ids)
         # 30 ids -> two GET calls (25 + 5); each batch <= 25, ';'-joined.
         assert route.call_count == 2

@@ -478,7 +478,11 @@ def test_write_fingerprint_sanitizes_track_id(tmp_path):
     store = UserStore(root=tmp_path)
     path = store.write_fingerprint(track_id="mbid:abc/def", fingerprint=[1], duration_s=1.0)
 
-    assert "/" not in path.name
+    # Exact sanitized path: ":" and "/" both collapse to "_" and the file stays
+    # a direct child of fingerprints/ (a bare `"/" not in path.name` holds for
+    # any Path and would pass with the sanitizer removed).
+    assert path == tmp_path / "fingerprints" / "mbid_abc_def.json"
+    assert path.exists()
 
 
 def test_read_fingerprint_round_trips(tmp_path):

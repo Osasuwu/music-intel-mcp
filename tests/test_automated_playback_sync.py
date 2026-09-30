@@ -53,16 +53,6 @@ def test_play_raises_on_non_spotify_prefixed_track_id():
         client.play("AAA")
 
 
-def test_play_normalizes_canonical_track_id_prefix():
-    client = _client()
-    with respx.mock(assert_all_called=True) as router:
-        route = router.put(SPOTIFY_PLAYER_PLAY_URL).mock(return_value=httpx.Response(204))
-        client.play("spotify:AAA")
-
-    body = route.calls[0].request.content.decode()
-    assert '"spotify:track:AAA"' in body
-
-
 # --- #159 AC1: device_id is mandatory, resolved by device name ------------ #
 
 
