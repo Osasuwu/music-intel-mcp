@@ -551,8 +551,11 @@ jobs:
             # `cancelled` is matched alongside `failure` (this repo's addition
             # to the ported check): a run cancelled mid-review leaves attempt-1
             # `cancelled` and attempt-2 `skipped`, this job still runs under
-            # `always()`, and the PR is just as unreviewed. The legitimate
-            # skips below only ever come from `success` / `skipped` attempts.
+            # `always()`, and the PR is just as unreviewed. The pass at the end
+            # of this branch is then reachable only from `success` / `skipped`
+            # attempts. NOT covered here (#226): an attempt that is `success`
+            # because claude-code-action skipped on workflow validation — it
+            # never reviewed either, and still falls through to that pass.
             # Pinned by tests/test_code_review_verdict.py.
             if [ "$ATTEMPT_RESULT_1" = "failure" ] || [ "$ATTEMPT_RESULT_2" = "failure" ] \
               || [ "$ATTEMPT_RESULT_1" = "cancelled" ] || [ "$ATTEMPT_RESULT_2" = "cancelled" ]; then

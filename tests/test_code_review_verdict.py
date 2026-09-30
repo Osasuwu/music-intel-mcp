@@ -144,18 +144,25 @@ def test_unreviewed_pr_fails_closed_when_own_attempts_did_not_complete(
     assert "legitimately skipped" not in result.stdout
 
 
-@pytest.mark.parametrize(
-    ("attempt_1", "attempt_2"),
-    [
-        ("success", "skipped"),  # plugin declined (draft / not eligible / no substantive code)
-        ("skipped", "skipped"),  # attempt-1's own `if` excluded the PR (fork, dependabot)
-    ],
-)
-def test_genuine_skip_still_passes(tmp_path, attempt_1, attempt_2):
-    result = _run_verdict(tmp_path, attempt_1=attempt_1, attempt_2=attempt_2)
+def test_pr_excluded_by_the_attempt_job_condition_still_passes(tmp_path):
+    # attempt-1's own `if` excluded the PR (fork, dependabot), so nothing was asked to review it.
+    result = _run_verdict(tmp_path, attempt_1="skipped", attempt_2="skipped")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "legitimately skipped" in result.stdout
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="#226: claude-code-action exits 0 without reviewing when the workflow file differs "
+    "from the default branch; the gate still reads that as a legitimate skip",
+)
+def test_attempt_that_succeeded_without_executing_a_review_fails_closed(tmp_path):
+    # Seen live on the PR that introduced this file: attempt-1 `success`, no execution log, no
+    # comment, verify-verdict green. Not fixed by #224 — kept here so the hole stays visible.
+    result = _run_verdict(tmp_path, attempt_1="success", attempt_2="skipped")
+
+    assert result.returncode == 1, result.stdout + result.stderr
 
 
 def test_post_factum_run_on_a_merged_pr_still_passes(tmp_path):
