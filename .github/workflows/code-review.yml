@@ -425,7 +425,8 @@ jobs:
       # ping-pongs between rework and the merge gate (#976).
       #
       # Hardened verdict contract (mirrors the jarvis reference workflow;
-      # this repo has no local test pinning it, #209):
+      # this repo pins only the no-comment own-attempt check locally, in
+      # tests/test_code_review_verdict.py — the rest is untested here, #209):
       #   - SELECT the latest comment whose body carries a code-review title
       #     heading (1-6 #'s, optional "Claude", any case, anywhere in body).
       #   - FRESHNESS (#993): a comment is a verdict only for the CURRENT head
@@ -463,6 +464,16 @@ jobs:
           # instead of a raw file check.
           EXEC_RAN_1: ${{ needs.attempt-1.outputs.execution_ran }}
           EXEC_RAN_2: ${{ needs.attempt-2.outputs.execution_ran }}
+          # #224 (port of like-current-song#69): the head-lineage probe below
+          # only sees OTHER workflow runs (it excludes $GITHUB_RUN_ID by
+          # design, #1228) — it can never see THIS run's own attempt jobs
+          # dying before they post. A same-run failure (e.g. plugin-install
+          # crash) was reaching the bottom "plugin legitimately skipped" pass
+          # with zero lineage to catch it on a PR's very first review run.
+          # Surfacing job `result` directly closes that hole without an API
+          # round-trip.
+          ATTEMPT_RESULT_1: ${{ needs.attempt-1.result }}
+          ATTEMPT_RESULT_2: ${{ needs.attempt-2.result }}
           # #133: anchors for the commit-free-rerun override below — when
           # each attempt job started, so the override can tell "no verdict
           # posted since this run began" from "no verdict ever".
@@ -526,6 +537,27 @@ jobs:
             if [ "$PR_STATE" != "OPEN" ]; then
               echo "::notice::PR is $PR_STATE and has no /code-review comment; nothing left to gate on a post-factum run. Treating as pass."
               exit 0
+            fi
+
+            # (0) THIS run's own attempt jobs (#224, port of
+            # like-current-song#69). Checked before the lineage probe below,
+            # which structurally cannot see it: a job that dies before the
+            # review step even starts (e.g. plugin marketplace/install
+            # failure) never gets a chance to post a verdict, and on a PR's
+            # first-ever review run there is no prior lineage entry to catch
+            # it either — that combination let like-current-song#71 merge with
+            # a SUCCESS verdict despite both attempts failing outright.
+            #
+            # `cancelled` is matched alongside `failure` (this repo's addition
+            # to the ported check): a run cancelled mid-review leaves attempt-1
+            # `cancelled` and attempt-2 `skipped`, this job still runs under
+            # `always()`, and the PR is just as unreviewed. The legitimate
+            # skips below only ever come from `success` / `skipped` attempts.
+            # Pinned by tests/test_code_review_verdict.py.
+            if [ "$ATTEMPT_RESULT_1" = "failure" ] || [ "$ATTEMPT_RESULT_2" = "failure" ] \
+              || [ "$ATTEMPT_RESULT_1" = "cancelled" ] || [ "$ATTEMPT_RESULT_2" = "cancelled" ]; then
+              echo "::error::attempt-1=$ATTEMPT_RESULT_1 attempt-2=$ATTEMPT_RESULT_2 and no /code-review verdict comment exists. This run's own review attempt(s) did not complete — the PR was never reviewed. Failing closed (#224); fix the failing attempt and re-review."
+              exit 1
             fi
 
             # Head-lineage probe. Intersect this workflow's runs with the PR's
