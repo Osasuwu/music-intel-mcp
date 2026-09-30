@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from music_intel_mcp import account_data, account_history, ingest, spotify_extended, youtube_music
 from music_intel_mcp.automated_playback import (
     AUTOMATED_PLAYBACK_SOURCE,
     TrackSkipped,
@@ -227,7 +228,12 @@ def test_build_automated_play_event_uses_distinct_source():
     assert event.played_at == played_at
 
 
-def test_automated_playback_source_is_distinct_from_other_known_sources():
-    # "ifttt" / "lastfm" style sources are genuine user-initiated plays;
-    # the automated-playback source must never collide with them.
-    assert AUTOMATED_PLAYBACK_SOURCE not in {"ifttt", "lastfm", "spotify_extended_history"}
+def test_automated_playback_source_is_distinct_from_every_importer_source():
+    # Each importer stamps genuine user-initiated plays with its own SOURCE;
+    # the automated-playback source must never collide with one, or the
+    # analyzer's origin filter would drop real plays as agent-originated.
+    importer_sources = {
+        module.SOURCE
+        for module in (account_data, account_history, ingest, spotify_extended, youtube_music)
+    }
+    assert AUTOMATED_PLAYBACK_SOURCE not in importer_sources

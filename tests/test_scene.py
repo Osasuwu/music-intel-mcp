@@ -19,7 +19,6 @@ from music_intel_mcp.scene import (
     InMemoryTagSource,
     MusicBrainzGenreSource,
     SceneDerivation,
-    TagEnrichmentReport,
     derive_scene_roots,
     enrich_tags,
 )
@@ -519,8 +518,3 @@ def test_partial_tag_coverage_is_reported():
     )
     assert d.n_tagged == 9
     assert d.coverage == 9 / 12
-
-
-def test_report_is_a_dataclass_instance():
-    # guards the public surface used by analyzer wiring
-    assert isinstance(TagEnrichmentReport(), TagEnrichmentReport)

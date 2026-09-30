@@ -34,8 +34,12 @@ def _run_hook(payload: dict) -> subprocess.CompletedProcess:
     )
 
 
-def test_hook_file_exists():
-    assert HOOK_PATH.exists(), ".claude/hooks/secret-scanner.py must exist"
+def _assert_denied(result: subprocess.CompletedProcess) -> None:
+    """Exit code 2 alone is not proof of a block: the interpreter also exits 2
+    when it cannot open the hook script. Require the deny decision itself."""
+    assert result.returncode == 2, result.stdout + result.stderr
+    decision = json.loads(result.stdout)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny", result.stdout
 
 
 def test_hook_is_wired_on_every_intended_surface():
@@ -60,8 +64,7 @@ def test_blocks_bash_command_carrying_a_key():
         "tool_input": {"command": "export AWS_KEY=" + _FAKE_AWS_KEY},
     }
     result = _run_hook(payload)
-    assert result.returncode == 2, result.stdout + result.stderr
-    assert "hookSpecificOutput" in result.stdout
+    _assert_denied(result)
 
 
 def test_blocks_file_write_carrying_a_key():
@@ -73,7 +76,7 @@ def test_blocks_file_write_carrying_a_key():
         },
     }
     result = _run_hook(payload)
-    assert result.returncode == 2, result.stdout + result.stderr
+    _assert_denied(result)
 
 
 def test_blocks_provider_credential_assignment():
@@ -86,7 +89,7 @@ def test_blocks_provider_credential_assignment():
         },
     }
     result = _run_hook(payload)
-    assert result.returncode == 2, result.stdout + result.stderr
+    _assert_denied(result)
 
 
 def test_blocks_issue_body_carrying_a_key():
@@ -99,7 +102,7 @@ def test_blocks_issue_body_carrying_a_key():
         },
     }
     result = _run_hook(payload)
-    assert result.returncode == 2, result.stdout + result.stderr
+    _assert_denied(result)
 
 
 def test_blocks_env_file_exfiltration():
@@ -108,7 +111,7 @@ def test_blocks_env_file_exfiltration():
         "tool_input": {"command": "cat .env | base64"},
     }
     result = _run_hook(payload)
-    assert result.returncode == 2, result.stdout + result.stderr
+    _assert_denied(result)
 
 
 def test_allows_reading_the_env_example():

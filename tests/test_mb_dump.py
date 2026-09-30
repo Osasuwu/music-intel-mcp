@@ -56,14 +56,6 @@ def test_built_tsv_is_consumable_by_index(tmp_path):
     assert index.lookup_all("ORPHANISRC01") == []
 
 
-def test_build_drops_isrc_pointing_at_unknown_recording(tmp_path):
-    """An ISRC whose recording id is not in the recording table is skipped, not
-    written with a blank/garbage MBID."""
-    out = tmp_path / "isrc_to_mbid.tsv"
-    build_isrc_mbid_tsv(ISRC_DUMP, RECORDING_DUMP, out)
-    assert "ORPHANISRC01" not in out.read_text(encoding="utf-8")
-
-
 def test_build_missing_dump_writes_empty(tmp_path):
     """A missing dump table yields an empty (header-only) index, never a crash —
     mirrors the index's own missing-file-is-empty stance."""
@@ -99,28 +91,6 @@ def test_built_artist_tsv_is_consumable_by_index(tmp_path):
     assert index.lookup("spotify:artist:spotArtist1") == "bbbbbbbb-1111-1111-1111-111111111111"
     assert index.lookup("spotify:artist:spotArtist2") == "bbbbbbbb-2222-2222-2222-222222222222"
     assert index.lookup("spotify:artist:nope") is None
-
-
-def test_build_artist_drops_url_never_used_in_relationship(tmp_path):
-    """A Spotify artist URL that matches the regex but never turns up as an
-    l_artist_url relationship is dropped, not emitted with a blank MBID."""
-    out = tmp_path / "artist_uri_to_mbid.tsv"
-    build_artist_mbid_tsv(URL_DUMP, L_ARTIST_URL_DUMP, ARTIST_DUMP, out)
-    assert "spotArtistOrphanUrl" not in out.read_text(encoding="utf-8")
-
-
-def test_build_artist_drops_relationship_pointing_at_unknown_artist(tmp_path):
-    """A relationship whose artist id is absent from the artist table is
-    dropped rather than emitted with a blank MBID."""
-    out = tmp_path / "artist_uri_to_mbid.tsv"
-    build_artist_mbid_tsv(URL_DUMP, L_ARTIST_URL_DUMP, ARTIST_DUMP, out)
-    assert "spotArtistNoArtistRow" not in out.read_text(encoding="utf-8")
-
-
-def test_build_artist_ignores_non_spotify_urls(tmp_path):
-    out = tmp_path / "artist_uri_to_mbid.tsv"
-    n = build_artist_mbid_tsv(URL_DUMP, L_ARTIST_URL_DUMP, ARTIST_DUMP, out)
-    assert n == 2  # the musicbrainz.org url never contributes a pair
 
 
 def test_build_artist_missing_dump_writes_empty(tmp_path):

@@ -207,7 +207,9 @@ def test_credentials_read_from_env_when_not_passed(tmp_path, monkeypatch):
         assert source.lookup("A") == "USABC0000001"
         # the token call carried a Basic auth header derived from the env creds
         assert token.called
-        assert token.calls[0].request.headers["Authorization"].startswith("Basic ")
+        # (base64 of "envid:envsecret" -- a bare "Basic " prefix check passes for
+        # any credentials, including the wrong env var)
+        assert token.calls[0].request.headers["Authorization"] == "Basic ZW52aWQ6ZW52c2VjcmV0"
 
 
 # --- SpotifySearchApiSource (#139 AC2) -------------------------------------- #
@@ -239,9 +241,13 @@ def test_search_returns_none_for_no_results():
         assert source.search(title="Nonexistent", artist="Nobody") is None
 
 
-def test_search_reuses_composed_isrc_source_credentials():
+def test_search_reuses_composed_isrc_source_credentials(monkeypatch):
     """Default-constructing without ``isrc_source`` still requires credentials --
     the composed :class:`SpotifyApiIsrcSource` owns that check."""
+    # client_id=None falls back to the environment; without this the test calls
+    # the live token endpoint on any machine that has real credentials exported.
+    monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SPOTIFY_CLIENT_SECRET", raising=False)
     empty_isrc_source = SpotifyApiIsrcSource(client_id=None, client_secret=None)
     source = SpotifySearchApiSource(isrc_source=empty_isrc_source)
     try:
