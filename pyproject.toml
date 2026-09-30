@@ -54,6 +54,10 @@ dev = [
   # Mocks httpx at the transport layer so spotify_api.py tests never hit the live
   # Spotify API (#87 AC-A). Test-only.
   "respx>=0.21",
+  # tests/test_code_review_verdict.py lifts the verify-verdict script out of
+  # .github/workflows/code-review.yml to run it (#224). Already present
+  # transitively via pre-commit; declared because the test imports it directly.
+  "pyyaml>=6.0",
   # #194's gain-invariance tests call _mel_patches directly and unconditionally
   # (tests/test_inference.py), which imports librosa -- no longer "never
   # exercised by the default unit-test suite" (see the onnx-bench/live-capture
