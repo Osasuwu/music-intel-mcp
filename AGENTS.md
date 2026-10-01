@@ -1,7 +1,7 @@
 # AGENTS.md — music-intel-mcp
 
 Three-way split (mirrors Jarvis convention):
-- **`AGENTS.md`** (this file) — *rules*: process, conventions, what to do, what NOT to do. `CLAUDE.md` is kept as a bare `@AGENTS.md` import so existing Claude-specific links keep working.
+- **`AGENTS.md`** (this file) — *rules*: process, conventions, what to do, what NOT to do. It is the sole project-rules file; Claude Code reads it natively, so there is deliberately no `CLAUDE.md` (any `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` would shadow it).
 - **`CONTEXT.md`** — *domain model*: glossary, invariants, architectural decisions. Grows inline through `/grill`. Authoritative source for product terminology. Its `## Invariants` section is extracted into `INVARIANTS.md` (imported below) so the domain invariants arrive in every session without an agent having to go fetch `CONTEXT.md`.
 - Identity (`SOUL.md`) — inherited from user-level `~/.claude/SOUL.md`. No per-repo override yet.
 

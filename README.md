@@ -14,7 +14,7 @@ Scope, acceptance criteria and architectural decisions are pending `/grill` — 
 
 ## Repo conventions
 
-- `AGENTS.md` — rules and process for AI agents working in this repo. `CLAUDE.md` is kept as a bare import pointing to it, for tools that only look for that filename.
+- `AGENTS.md` — rules and process for AI agents working in this repo. It is the only rules file: Claude Code reads it natively, so the repo has no `CLAUDE.md`.
 - `CONTEXT.md` — domain model (glossary, architecture). Grows inline.
 - `INVARIANTS.md` — extracted `CONTEXT.md` invariants, imported into every agent session.
 - `src/music_intel_mcp/` — Python package.

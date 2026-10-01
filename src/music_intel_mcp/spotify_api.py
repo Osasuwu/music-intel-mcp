@@ -7,7 +7,7 @@ grandfathered) app is allowed: ``GET /v1/tracks``, which returns
 identity.SpotifyIsrcSource` seam (``lookup(spotify_id) -> str | None``) and adds a
 :meth:`SpotifyApiIsrcSource.warm` prefetch that batches the lookups 50-at-a-time.
 
-Cost discipline (CLAUDE.md — the API is rate-limited and costs real money):
+Cost discipline (AGENTS.md — the API is rate-limited and costs real money):
 
 - **Client-credentials flow.** One token (POST ``accounts.spotify.com/api/token``,
   HTTP Basic on the client id/secret), cached in memory until just before expiry.

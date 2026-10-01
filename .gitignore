@@ -63,3 +63,5 @@ native/**/*.ilk
 # Claude Code — per-machine local state, never shared
 .claude/settings.local.json
 .claude/worktrees/
+# CLAUDE.local.md (like any CLAUDE.md) would shadow AGENTS.md, Claude Code native rules file
+CLAUDE.local.md

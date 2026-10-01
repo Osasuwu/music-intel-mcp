@@ -24,7 +24,7 @@ _DISCOGS_EFFNET_MODEL_PATH_ENV = "DISCOGS_EFFNET_MODEL_PATH"
 _MTG_JAMENDO_MODEL_PATH_ENV = "MTG_JAMENDO_MODEL_PATH"
 
 # .scratch/ is the repo's existing convention for gitignored, env-pointed
-# external artifacts (see CLAUDE.md — AcousticBrainz/MusicBrainz dumps).
+# external artifacts (see AGENTS.md — AcousticBrainz/MusicBrainz dumps).
 # When the env vars above aren't set, fall back to the model files here
 # (as downloaded from essentia.upf.edu) so `capture-spike` works without
 # per-session env exports.

@@ -1,7 +1,7 @@
 """Distil the raw MusicBrainz dump into small join TSVs (#87 AC-B, #102).
 
 The full MusicBrainz export is tens of millions of rows and lives OUTSIDE the
-repo (env-pointed, never committed — see CLAUDE.md). Neither
+repo (env-pointed, never committed — see AGENTS.md). Neither
 :class:`~music_intel_mcp.identity.MusicBrainzIsrcIndex` nor
 :class:`~music_intel_mcp.artist_identity.MusicBrainzArtistUrlIndex` reads the
 raw dump directly; this module builds their compact TSV extracts once,

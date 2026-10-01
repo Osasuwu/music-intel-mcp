@@ -14,7 +14,7 @@ Three layers, tested bottom-up:
    :class:`AudioFeatures` per the recorded field mapping. Fixtures mirror the real
    captured AB payload; no network.
 2. **API client** — ``AcousticBrainzApiClient`` batches ``;``-joined lookups and
-   backs off on 429/503. Mocked with ``respx`` (CLAUDE.md forbids live API in CI).
+   backs off on 429/503. Mocked with ``respx`` (AGENTS.md forbids live API in CI).
 3. **Builder** — ``build_acousticbrainz_index`` drives the client with a resumable
    raw cache and projects the features JSONL. Driven by a fake client.
 """
