@@ -65,6 +65,12 @@ dev = [
   # onnxruntime/WASAPI dependency needed for these tests, so it belongs here
   # rather than pulling in a whole extra.
   "librosa>=0.10",
+  # #175's low-memory session-option tests (tests/test_inference.py,
+  # tests/test_benchmark_onnx_engine.py) build real SessionOptions and swap
+  # InferenceSession for a fake -- no model file, no inference. They skipped on
+  # every CI run while onnxruntime lived only in onnx-bench (#229). The
+  # real-inference benchmark itself still needs the onnx-bench extra.
+  "onnxruntime>=1.17",
 ]
 # Production shared-metadata store. Network-only (SupabaseSharedStore); CI uses
 # the in-memory store, so this stays out of the default/dev install.

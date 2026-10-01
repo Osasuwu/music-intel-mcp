@@ -177,7 +177,7 @@ def test_peak_rss_ceiling_mb_is_shared_with_inference_module():
 # (inference.py) rather than an independently-drifting SessionOptions of its
 # own -- mirrors the PEAK_RSS_CEILING_MB single-constant invariant above.
 def test_build_sessions_reuses_shared_low_memory_session_options(monkeypatch, tmp_path):
-    ort = pytest.importorskip("onnxruntime")
+    import onnxruntime as ort
     from benchmark_onnx_engine import build_sessions
 
     captured: list[object] = []
