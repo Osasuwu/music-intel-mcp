@@ -6,18 +6,14 @@ root gets its own history/analyses/token/consent.
 
 from __future__ import annotations
 
+import sys
 import threading
+import types
 
 import pytest
 
 import music_intel_mcp.desktop_app as desktop_app
 from music_intel_mcp.store import UserStore
-
-# desktop_app.main() imports pystray internally; it ships in the Windows-only
-# `desktop` extra (pyproject.toml), deliberately excluded from CI's `dev`
-# install the same way live-capture's winsdk/onnxruntime are. Skip rather than
-# fail where it isn't installed.
-pytest.importorskip("pystray")
 
 
 class _FakeIcon:
@@ -31,14 +27,29 @@ class _FakeIcon:
         return
 
 
-def test_data_dir_flag_threads_to_userstore_root(tmp_path, monkeypatch):
+@pytest.fixture
+def fake_tray(monkeypatch):
+    """desktop_app.main() imports pystray and draws the icon with Pillow, both
+    from the Windows-only `desktop` extra that CI's `dev` install leaves out.
+    Installing pystray would not help on a Linux runner either: with no display
+    its import raises Xlib's DisplayNameError (#229). The tests only need main()
+    to reach the icon, so a fake module stands in for pystray and the icon
+    image is stubbed."""
+    fake_pystray = types.ModuleType("pystray")
+    fake_pystray.Icon = _FakeIcon
+    fake_pystray.Menu = lambda *items: items
+    fake_pystray.MenuItem = lambda *args, **kwargs: (args, kwargs)
+    monkeypatch.setitem(sys.modules, "pystray", fake_pystray)
+    monkeypatch.setattr(desktop_app, "_build_icon_image", lambda color: None)
+
+
+def test_data_dir_flag_threads_to_userstore_root(tmp_path, monkeypatch, fake_tray):
     captured: dict[str, UserStore] = {}
 
     def fake_run_loop(stop_event: threading.Event, status, store: UserStore) -> None:
         captured["store"] = store
 
     monkeypatch.setattr(desktop_app, "_run_loop", fake_run_loop)
-    monkeypatch.setattr("pystray.Icon", _FakeIcon)
 
     rc = desktop_app.main(["--data-dir", str(tmp_path)])
 
@@ -46,14 +57,13 @@ def test_data_dir_flag_threads_to_userstore_root(tmp_path, monkeypatch):
     assert captured["store"].root == tmp_path
 
 
-def test_no_data_dir_flag_defaults_to_resolve_data_root(monkeypatch):
+def test_no_data_dir_flag_defaults_to_resolve_data_root(monkeypatch, fake_tray):
     captured: dict[str, UserStore] = {}
 
     def fake_run_loop(stop_event: threading.Event, status, store: UserStore) -> None:
         captured["store"] = store
 
     monkeypatch.setattr(desktop_app, "_run_loop", fake_run_loop)
-    monkeypatch.setattr("pystray.Icon", _FakeIcon)
     monkeypatch.delenv("MUSIC_INTEL_DATA_DIR", raising=False)
 
     rc = desktop_app.main([])

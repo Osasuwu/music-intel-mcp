@@ -103,7 +103,6 @@ def test_check_rss_ceiling_does_not_raise_when_under_ceiling() -> None:
 # SessionOptions object itself, not by re-running the real (network+model,
 # onnx-bench-extra-only) benchmark in the default unit-test suite.
 def test_low_memory_onnx_session_options_disables_arena_and_mem_pattern() -> None:
-    pytest.importorskip("onnxruntime")
     from music_intel_mcp.inference import low_memory_onnx_session_options
 
     opts = low_memory_onnx_session_options()
@@ -127,7 +126,8 @@ class _CapturingSession:
 
 
 def test_discogs_effnet_model_builds_session_with_low_memory_options(monkeypatch, tmp_path) -> None:
-    ort = pytest.importorskip("onnxruntime")
+    import onnxruntime as ort
+
     from music_intel_mcp.inference import DiscogsEffnetOnnxModel
 
     _CapturingSession.captured_options = []
@@ -146,7 +146,8 @@ def test_discogs_effnet_model_builds_session_with_low_memory_options(monkeypatch
 def test_mtg_jamendo_classifier_builds_session_with_low_memory_options(
     monkeypatch, tmp_path
 ) -> None:
-    ort = pytest.importorskip("onnxruntime")
+    import onnxruntime as ort
+
     from music_intel_mcp.inference import MtgJamendoClassifier
 
     _CapturingSession.captured_options = []
