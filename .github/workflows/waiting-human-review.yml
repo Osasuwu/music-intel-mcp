@@ -1,0 +1,55 @@
+name: Waiting for human review
+
+# The merge hold, ported from Osasuwu/jarvis#1892 (#235). Red while a review
+# request is pending, or — since a solo developer cannot request a review from
+# themselves — while the `waiting-human-review` label is on the PR. Required on
+# `main`, so it blocks auto-merge too. Replaces `owner-queue-guard`.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+      - review_requested
+      - review_request_removed
+      - labeled
+      - unlabeled
+  pull_request_review:
+    types:
+      - submitted
+
+jobs:
+  waiting-human-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            const prNumber = context.payload.pull_request.number;
+            const LABEL_NAME = 'waiting-human-review';
+
+            // Re-fetch rather than trust the event payload: a review_submitted
+            // event's payload.pull_request is a snapshot that may not yet
+            // reflect GitHub clearing the submitting reviewer from
+            // requested_reviewers.
+            const { data: pr } = await github.rest.pulls.get({
+              ...repo,
+              pull_number: prNumber,
+            });
+
+            const reviewersPending =
+              (pr.requested_reviewers && pr.requested_reviewers.length > 0) ||
+              (pr.requested_teams && pr.requested_teams.length > 0);
+            const labelPresent = (pr.labels || []).some((l) => l.name === LABEL_NAME);
+
+            if (reviewersPending) {
+              core.setFailed('A review has been requested and is still pending — a human look is owed.');
+            } else if (labelPresent) {
+              core.setFailed(`The \`${LABEL_NAME}\` label is present — a human look is owed.`);
+            } else {
+              console.log('No pending review request and no waiting-human-review label — check passes.');
+            }
