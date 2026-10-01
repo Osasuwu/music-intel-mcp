@@ -1,6 +1,6 @@
 """Live Spotify Web API ISRC source (#87 AC-A).
 
-Every test mocks the network with ``respx`` — CLAUDE.md forbids live API calls in
+Every test mocks the network with ``respx`` — AGENTS.md forbids live API calls in
 CI, and the real client-credentials flow costs a token + rate budget. The source
 under test owns a persistent JSONL cache (positive *and* negative), batches the
 ``GET /v1/tracks`` calls at 50, and backs off on 429/503 — all verified here

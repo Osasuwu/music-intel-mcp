@@ -43,7 +43,7 @@ from .shared_store import AudioFeatures, SharedStore, TrackMetadataRecord
 from .validation import Candidate, DatasetContext, ValidationOutcome, Validator
 
 # Env metadata for the production AcousticBrainz dump (the dump itself lives
-# outside the repo — see CLAUDE.md). Values resolve at lookup time; missing →
+# outside the repo — see AGENTS.md). Values resolve at lookup time; missing →
 # an empty index, so an uninstalled dump degrades to honest low coverage.
 _AB_DUMP_PATH_ENV = "ACOUSTICBRAINZ_FEATURES_INDEX"
 _AB_DUMP_DIR_ENV = "ACOUSTICBRAINZ_DUMP_DIR"
