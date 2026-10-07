@@ -49,7 +49,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=7.4",
-  "ruff>=0.3",
+  # Exact pin, must equal the ruff-pre-commit `rev` in .pre-commit-config.yaml
+  # (v0.15.12): CI installs this extra, the contributor's hook runs the rev. A
+  # floor let the two drift apart (0.16 also formats Python blocks in .md files,
+  # 0.15 does not), so the hook and CI fight over formatter output. Bump both together.
+  "ruff==0.15.12",
   "pre-commit>=3.6",
   # Mocks httpx at the transport layer so spotify_api.py tests never hit the live
   # Spotify API (#87 AC-A). Test-only.
