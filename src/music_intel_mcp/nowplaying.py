@@ -41,7 +41,7 @@ DEFAULT_DROP_LOG_FILENAME = "smtc_drops.jsonl"
 # lowercased, extension-stripped — same normalization as _process_id_for_app)
 # are ever captured. A browser's AUMID identifies the browser process, not the
 # tab/site, so a browser candidate additionally needs the resolvability gate
-# below (see _select_now_playing) — see CONTEXT.md "Live capture pipeline".
+# below (see _select_now_playing) — see docs/domain/live-capture-pipeline.md.
 DEFAULT_SPOTIFY_APP_STEM = "spotify"
 DEFAULT_BROWSER_APP_STEMS = frozenset({"chrome", "msedge", "firefox", "brave", "opera", "vivaldi"})
 
@@ -204,7 +204,7 @@ def _is_resolvable(
     bare name match. This gate runs pre-capture (no PCM yet), so it only ever
     reaches the waterfall's text rungs (spotify_search, mb_name) — the
     ``fingerprint=None`` AcoustID rung is a no-op here (#145). See
-    CONTEXT.md "Live capture pipeline" for why an allowlist alone can't do
+    docs/domain/live-capture-pipeline.md for why an allowlist alone can't do
     this.
 
     ``admission_memo`` caches the verdict per ``(title, artist, app_id)`` for

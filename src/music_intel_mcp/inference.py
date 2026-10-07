@@ -211,7 +211,7 @@ _MEL_LOG_SCALE = 10000.0
 _PATCH_FRAMES = 128
 
 # #194: gain-invariance target and degenerate-signal floor. RMS (not peak, not
-# LUFS) to a fixed -20 dBFS -- see CONTEXT.md "Gain-invariant mel front-end"
+# LUFS) to a fixed -20 dBFS -- see docs/domain/gain-invariant-mel.md
 # (decision f0f66484) for why the alternatives were rejected.
 _RMS_NORMALIZATION_TARGET = 0.1
 _RMS_DEGENERATE_FLOOR = 1e-6

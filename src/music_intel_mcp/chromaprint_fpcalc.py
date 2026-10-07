@@ -84,7 +84,8 @@ def compute_raw_fingerprint(
     A second, separate ``fpcalc`` call (``-raw -json``) from
     :func:`compute_fingerprint`'s compressed-string call — the raw array is
     evidence for offline near-duplicate comparison only, never an AcoustID
-    identity lookup key (CONTEXT.md "Offline fingerprint comparison").
+    identity lookup key (docs/domain/near-duplicate-reconciliation.md, "Offline
+    fingerprint comparison").
 
     Raises :class:`FpcalcNotFoundError` if ``fpcalc`` isn't installed, and
     ``RuntimeError`` if it exits non-zero or emits unparseable output.

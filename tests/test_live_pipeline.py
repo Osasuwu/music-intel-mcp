@@ -226,9 +226,10 @@ def test_run_live_capture_spike_key_recognized_by_backfill_selector(tmp_path) ->
 
 def test_run_live_capture_spike_name_level_key_uses_normalized_name(tmp_path) -> None:
     """#158 AC1 must not regress the #139 AC4 normalization invariant
-    (CONTEXT.md 'Normalization (AC4)'): when the waterfall bottoms out at the
-    name rung, the stored key has to be built from the *normalized* name_key
-    (feat./official-video/lyrics/remaster noise stripped), not the raw OS
+    (docs/domain/live-capture-identity.md, 'Normalization (AC4)'): when the
+    waterfall bottoms out at the name rung, the stored key has to be built
+    from the *normalized* name_key (feat./official-video/lyrics/remaster noise
+    stripped), not the raw OS
     media-session title -- otherwise two plays of the same track with a
     cosmetically different title (e.g. an "(Official Video)" suffix) get
     different keys and are re-analyzed instead of deduped."""

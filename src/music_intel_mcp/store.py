@@ -480,7 +480,8 @@ class UserStore:
     # comparison, never an identity key) live in their own sidecar directory
     # beside wherever the corresponding audio_analysis record actually landed
     # (root or pool) -- the #161 AudioAnalysisRecord/pool-record schema is
-    # deliberately left untouched (CONTEXT.md "Post-CRITIC refinements").
+    # deliberately left untouched (docs/domain/near-duplicate-reconciliation.md,
+    # "Post-CRITIC refinements").
 
     @property
     def fingerprints_dir(self) -> Path:

@@ -197,8 +197,8 @@ def run_live_capture_spike(
     # using the live waterfall's *normalized* name key, not canonical_track_id's
     # plain-casefold name rung over the raw OS media-session title —
     # canonical_track_id() doesn't strip feat./"(Official Video)"/remaster
-    # noise the way normalize_track_name() does (CONTEXT.md "Normalization
-    # (AC4)"), so re-deriving through TrackRef would silently re-fragment
+    # noise the way normalize_track_name() does (docs/domain/live-capture-identity.md,
+    # "Normalization (AC4)"), so re-deriving through TrackRef would silently re-fragment
     # cosmetically-different titles of the same recording.
     if identity.name_key is not None:
         track_id = f"name:{identity.name_key}"
@@ -248,7 +248,7 @@ def run_live_capture_spike(
     # recording even though it didn't win: a score-gated winner (acoustid/
     # isrc/mbid) is trustworthy enough to alias the history youtube_id to; a
     # non-score-gated winner (spotify_search/mb_name) is not, so it is only
-    # journaled as a near-miss (CONTEXT.md #170 grill decision
+    # journaled as a near-miss (docs/domain/youtube-music-stream-decode.md, #170 grill decision
     # 4c0041b5-cb93-4106-a92a-fcc03fb8ba41). The youtube rung itself winning,
     # or nothing resolving past the name key, needs no action here -- there
     # is no separate winner key to relate the history match to. Runs only
