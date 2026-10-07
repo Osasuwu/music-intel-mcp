@@ -24,9 +24,9 @@ Row shape (fields this adapter reads; the export carries a few more)::
                  a trailing " - Topic" suffix (stripped here)
     time         ISO-8601 UTC "...Z" timestamp, same shape as Spotify's ts
 
-**No-duration validity rule (documented in CONTEXT.md):** Takeout carries no
-play-duration signal at all — a YouTube Music entry counts as a play with no
-``ms_played``, so ``ListenEvent.context`` is always ``None`` for this source.
+**No-duration validity rule (documented in docs/domain/youtube-music-takeout.md):**
+Takeout carries no play-duration signal at all — a YouTube Music entry counts as
+a play with no ``ms_played``, so ``ListenEvent.context`` is always ``None`` for this source.
 
 **Self-referential supersede:** no prior source overlaps YouTube Music watch
 history, so ``SUPERSEDES`` only ever displaces a prior run of this importer

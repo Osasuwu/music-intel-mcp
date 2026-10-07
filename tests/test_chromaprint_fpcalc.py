@@ -81,7 +81,8 @@ def test_compute_fingerprint_raises_on_unparseable_output(monkeypatch):
 def test_compute_raw_fingerprint_parses_fpcalc_raw_json(monkeypatch):
     """AC1: the raw uint32 array is fetched with a *second*, separate fpcalc
     invocation (``-raw -json``), never reused from the compressed-string call
-    (#140 CONTEXT.md "Offline fingerprint comparison" — evidence-only, never
+    (#140 docs/domain/near-duplicate-reconciliation.md, "Offline fingerprint
+    comparison" — evidence-only, never
     identity, so it must not share the AcoustID-facing compressed encoding)."""
     monkeypatch.setattr(
         "music_intel_mcp.chromaprint_fpcalc.shutil.which", lambda _name: "/usr/bin/fpcalc"

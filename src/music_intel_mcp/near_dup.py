@@ -8,8 +8,8 @@ batch, over a ``UserStore`` root: it never touches the live capture path.
 Two-tier decision: embedding cosine distance proposes candidate pairs, raw
 chromaprint fingerprints (from ``chromaprint_fpcalc.compute_raw_fingerprint``,
 written by ``store.write_fingerprint`` per #140 AC1) either confirm or veto
-them. See CONTEXT.md "Offline embedding-space near-duplicate batch merge"
-for the full decision-tree writeup this module implements piece by piece.
+them. See docs/domain/near-duplicate-reconciliation.md for the full decision-tree
+writeup this module implements piece by piece.
 """
 
 from __future__ import annotations
@@ -92,8 +92,8 @@ def match_fingerprints(fp_a: list[int], fp_b: list[int]) -> FingerprintMatchResu
 
 # How many nearest neighbours (by cosine distance) each record is compared
 # against. Pilot-scale batches don't need an ANN index -- a chunked brute
-# force over top-K candidates per record is enough (CONTEXT.md "Near-duplicate
-# key reconciliation").
+# force over top-K candidates per record is enough
+# (docs/domain/near-duplicate-reconciliation.md).
 TOP_K_CANDIDATES = 5
 
 # A pair confirmed by a matching raw fingerprint can tolerate a looser
@@ -101,7 +101,8 @@ TOP_K_CANDIDATES = 5
 COSINE_DISTANCE_THRESHOLD_FINGERPRINT_EMBEDDING = 0.15
 COSINE_DISTANCE_THRESHOLD_EMBEDDING_ONLY = 0.05
 
-# Hub guard (CONTEXT.md "Post-CRITIC refinements"): a record with this many
+# Hub guard (docs/domain/near-duplicate-reconciliation.md, "Post-CRITIC
+# refinements"): a record with this many
 # neighbours at ~zero distance is almost certainly a degenerate capture
 # (silence/ad) that mean-pools to one vector, not a genuine cluster of
 # duplicates -- every pair touching it is rejected rather than proposed.
@@ -298,8 +299,8 @@ def scan(
 
 # --- AC4: near-dup apply ------------------------------------------------- #
 
-# Winner-selection prefix rank (CONTEXT.md "Offline embedding-space
-# near-duplicate batch merge" -- AC4): earlier wins. ``youtube:`` is out of
+# Winner-selection prefix rank (docs/domain/near-duplicate-reconciliation.md
+# -- AC4): earlier wins. ``youtube:`` is out of
 # scope for #140's pool membership rules but still ranked here per the
 # issue's own winner-rank waterfall.
 _WINNER_PREFIX_RANK = ("mbid:", "isrc:", "spotify:", "youtube:", "name:")

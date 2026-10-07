@@ -462,7 +462,8 @@ def test_has_audio_analysis_pool_hit_ignores_file_mtime(tmp_path):
 # #140 AC1: raw chromaprint arrays live in a sidecar directory beside
 # whichever audio_analysis/ the record actually landed in (root or pool) --
 # never inside the AudioAnalysisRecord/pool-record schema itself
-# (CONTEXT.md "Post-CRITIC refinements" -- #161's exact schema stays untouched).
+# (docs/domain/near-duplicate-reconciliation.md, "Post-CRITIC refinements" --
+# #161's exact schema stays untouched).
 def test_write_fingerprint_writes_sidecar_under_local_root(tmp_path):
     store = UserStore(root=tmp_path)
     path = store.write_fingerprint(track_id="mbid-1", fingerprint=[1, 2, 3], duration_s=12.0)

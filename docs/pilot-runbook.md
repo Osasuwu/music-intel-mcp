@@ -1,6 +1,6 @@
 # Multi-user pilot runbook
 
-Operational procedure for the closed pilot described in [`CONTEXT.md` §Multi-user pilot](../CONTEXT.md#multi-user-pilot--centralized-processing-node-grill-2026-09-0506-ac-locked). This is the node operator's checklist, not product documentation — it exists so onboarding, the day-0 data request, and teardown happen the same way every time, and so a participant's data is never kept around longer than the pilot requires.
+Operational procedure for the closed pilot described in [`docs/domain/multi-user-pilot.md`](domain/multi-user-pilot.md). This is the node operator's checklist, not product documentation — it exists so onboarding, the day-0 data request, and teardown happen the same way every time, and so a participant's data is never kept around longer than the pilot requires.
 
 Two participant types, per CONTEXT.md:
 

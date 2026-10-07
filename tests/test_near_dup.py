@@ -37,8 +37,9 @@ def test_match_fingerprints_identical_arrays_zero_offset_zero_ber():
 
 def test_match_fingerprints_shifted_arrays_finds_offset():
     """A recording that starts 10 frames later than the other is still
-    recognized once the offset search re-aligns them (CONTEXT.md 'Offline
-    fingerprint comparison' -- offset search ±len/2 frames)."""
+    recognized once the offset search re-aligns them
+    (docs/domain/near-duplicate-reconciliation.md, 'Offline fingerprint comparison'
+    -- offset search ±len/2 frames)."""
     base = _fp(300)
     shift = 10
     # fp_b[i] == fp_a[i + shift] for i in range(len(fp_a) - shift): fp_b is
