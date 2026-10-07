@@ -29,19 +29,24 @@ PR = 7
 @pytest.mark.parametrize(
     "path",
     [
-        "docs/guide.md",
-        "docs/decisions/2026-Q3.md",
+        # music-intel-mcp: docs/domain/ is cosmetic (product docs)
+        "docs/domain/agent-play-exclusion.md",
+        "docs/domain/analyze-cli.md",
+        "docs/domain/audio-root-pipeline.md",
+        "docs/domain/nested/deep.md",
+        # Images anywhere: cosmetic
         "docs/img/arch.png",
-        "docs/deep/nested/shot.webp",
+        "docs/domain/deep/nested/shot.webp",
+        "assets/logo.png",
+        "src/pkg/icon.jpg",
+        "anim.gif",
+        "pic.webp",
+        # Root cosmetic
         "README.md",
         "SECURITY.md",
         "LICENSE",
         "LICENSE-APACHE",
         "THIRD_PARTY_LICENSES",
-        "assets/logo.png",
-        "src/pkg/icon.jpg",
-        "anim.gif",
-        "pic.webp",
     ],
 )
 def test_cosmetic_paths(path):
@@ -51,19 +56,33 @@ def test_cosmetic_paths(path):
 @pytest.mark.parametrize(
     "path",
     [
+        # Behavior-carrying docs: code
         "docs/reference/github-repo-setup.md",
+        "docs/COLLECTOR_SETUP.md",
         "docs/notes.txt",
         "docs/diagram.svg",
+        # Root .md: AGENTS/CONTEXT/INVARIANTS are code (affect domain/behavior)
         "AGENTS.md",
         "INVARIANTS.md",
         "CONTEXT.md",
+        # Non-root README: code
         "sub/README.md",
+        # Config files: code
         "notes.txt",
         "logo.svg",
-        ".claude/skills/x/SKILL.md",
+        # Agent/gate behavior: code
+        ".claude/hooks/secret-scanner.py",
+        ".claude/marketplace/.claude-plugin/marketplace.json",
+        ".claude/settings.json",
+        # Gate machinery: code
         ".github/workflows/pytest.yml",
+        ".github/scripts/code_gate_verdict.py",
+        # Product code: code
         "src/music_intel_mcp/app.py",
         "tests/test_inference.py",
+        "native/wasapi_loopback_helper/helper.cpp",
+        "schemas/findings.json",
+        # Config files: code
         ".env.example",
         "pyproject.toml",
     ],
@@ -73,8 +92,11 @@ def test_code_paths(path):
 
 
 def test_classify_preserves_input_order_in_each_bucket():
-    got = gate.classify_paths(["b.py", "docs/a.md", "a.py", "docs/b.md"])
-    assert got == {"code": ["b.py", "a.py"], "cosmetic": ["docs/a.md", "docs/b.md"]}
+    got = gate.classify_paths(["b.py", "docs/domain/a.md", "a.py", "docs/reference/b.md"])
+    assert got == {
+        "code": ["b.py", "a.py", "docs/reference/b.md"],
+        "cosmetic": ["docs/domain/a.md"],
+    }
 
 
 # --- changed_paths --------------------------------------------------------
@@ -86,8 +108,13 @@ def test_rename_is_judged_on_both_paths():
 
 
 def test_rename_of_code_into_docs_is_not_all_cosmetic():
-    files = [{"filename": "docs/new.md", "previous_filename": "src/old.py", "status": "renamed"}]
-    assert gate.classify_paths(gate.changed_paths(files))["code"] == ["src/old.py"]
+    # Rename into docs/domain/ (cosmetic) and docs/ (code) both matter
+    files = [
+        {"filename": "docs/domain/new.md", "previous_filename": "src/old.py", "status": "renamed"}
+    ]
+    classified = gate.classify_paths(gate.changed_paths(files))
+    assert classified["code"] == ["src/old.py"]
+    assert classified["cosmetic"] == ["docs/domain/new.md"]
 
 
 def test_deleted_file_keeps_its_path():

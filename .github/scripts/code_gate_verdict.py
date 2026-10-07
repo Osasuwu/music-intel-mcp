@@ -72,17 +72,24 @@ RUN_TITLE = re.compile(r"^Code review PR #(\d+) @ ([0-9a-f]{40})$")
 
 # The change set the gate itself is made of. A PR touching any of it is judged
 # by a human, never by its own review.
+# music-intel-mcp: gate machinery + anything affecting agent/gate behavior
 GATE_MACHINERY_FILES = frozenset(
     {
         REVIEW_WORKFLOW,
         ".github/workflows/code-gate-verdict.yml",
         ".github/scripts/code_gate_verdict.py",
+        # Agent/gate behavior files (must be reviewed by human if changed)
+        ".claude/hooks/secret-scanner.py",
+        ".claude/marketplace/.claude-plugin/marketplace.json",
+        ".claude/settings.json",
     }
 )
 GATE_MACHINERY_PREFIXES = (".github/actions/",)
 
 _IMAGE_EXT = (".png", ".jpg", ".gif", ".webp")
 _DOC_EXT = (".md",) + _IMAGE_EXT
+# Root-level cosmetic files: docs/readme only. AGENTS.md, CONTEXT.md, INVARIANTS.md
+# are code (affect domain model and gate behavior).
 _ROOT_COSMETIC = frozenset({"README.md", "SECURITY.md", "THIRD_PARTY_LICENSES"})
 
 # Runs that finished without producing a verdict: no evidence either way.
@@ -107,14 +114,23 @@ class Verdict(NamedTuple):
 
 
 def is_cosmetic(path):
-    """One path against the allow-list. Anything not listed is code."""
+    """One path against the allow-list. Anything not listed is code.
+
+    music-intel-mcp rules:
+    - Images anywhere: cosmetic
+    - docs/domain/: product docs, cosmetic
+    - docs/reference/: behavior-carrying, code
+    - Root .md: README only (cosmetic); AGENTS.md, CONTEXT.md, INVARIANTS.md are code
+    - .claude/*: code (affects gate/agent behavior)
+    """
     if path.startswith("/") or "\\" in path or ".." in path.split("/"):
         return False
     if path.endswith(_IMAGE_EXT):
         return True
     if "/" not in path:
         return path in _ROOT_COSMETIC or path.startswith("LICENSE")
-    if path.startswith("docs/") and not path.startswith("docs/reference/"):
+    # docs/domain/: cosmetic. docs/ otherwise: code
+    if path.startswith("docs/domain/"):
         return path.endswith(_DOC_EXT)
     return False
 
