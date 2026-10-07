@@ -7,6 +7,7 @@ repos:
         stages: [pre-commit]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Must equal the `ruff==` pin in pyproject.toml's dev extra (CI's ruff); bump both together.
     rev: v0.15.12
     hooks:
       - id: ruff
