@@ -1,0 +1,93 @@
+name: Code Gate Verdict
+
+# Decides the `verify-verdict` check from review EVIDENCE. Rule: "Review evidence" —
+# docs/reference/github-repo-setup.md §3; logic: .github/scripts/code_gate_verdict.py.
+#
+# Runs from the DEFAULT BRANCH (`pull_request_target` / `workflow_run` both
+# resolve the workflow file there) and never checks out PR code: the only thing
+# checked out is `.github/scripts` at the default branch. A PR cannot change the
+# rule that judges it. PR-controlled values reach steps through `env:` only.
+#
+# `verify-verdict` is posted by the `osasuwu-ci` GitHub App (branch protection binds
+# the check to that app_id), so no other workflow can satisfy the gate by
+# creating a same-named check. The App key lives in the `code-gate-verdict`
+# environment, restricted to deployments from the default branch.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  # Re-run hook: evidence landing after the first evaluation re-decides the SHA.
+  workflow_run:
+    workflows: ["Code Review"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  # No network, no secrets: parses event data into (pr_number, head_sha). An
+  # empty output means the event is not bound to a PR (e.g. a fork's
+  # `pull_request` run, whose `pull_requests[]` is empty) and nothing follows.
+  resolve:
+    # `edited` fires on every title/body edit; only a base-branch change alters
+    # the evaluation.
+    if: github.event_name != 'pull_request_target' || github.event.action != 'edited' || github.event.changes.base
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+    steps:
+      # Base-pinned: default branch, scripts only. Never the PR head.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Resolve PR and head SHA
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+        run: python .github/scripts/code_gate_verdict.py resolve
+
+  verdict:
+    needs: resolve
+    if: needs.resolve.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    # Serialize per (PR, SHA) without cancelling: a verdict that is mid-post must
+    # finish, and the next event for the same SHA simply re-decides it.
+    concurrency:
+      group: code-gate-${{ needs.resolve.outputs.pr_number }}-${{ needs.resolve.outputs.head_sha }}
+      cancel-in-progress: false
+    environment: code-gate-verdict
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Mint osasuwu-ci installation token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.GATE_APP_ID }}
+          private-key: ${{ secrets.GATE_APP_PRIVATE_KEY }}
+          permission-checks: write
+
+      - name: Decide and post verify-verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATE_TOKEN: ${{ steps.app.outputs.token }}
+          GATE_APP_ID: ${{ secrets.GATE_APP_ID }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+        run: python .github/scripts/code_gate_verdict.py verdict
