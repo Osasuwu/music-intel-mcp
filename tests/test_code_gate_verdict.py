@@ -8,6 +8,7 @@ files) and every expected value is a literal worked out from the locked design,
 not read back from the module.
 """
 
+import base64
 import http.client
 import importlib.util
 import json
@@ -50,7 +51,10 @@ PR = 7
         "README.md",
         "SECURITY.md",
         "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
         "LICENSE-APACHE",
+        "LICENSE-MIT",
         "THIRD_PARTY_LICENSES",
     ],
 )
@@ -70,6 +74,11 @@ def test_cosmetic_paths(path):
         "AGENTS.md",
         "INVARIANTS.md",
         "CONTEXT.md",
+        "CLAUDE.md",  # behaviour-carrying markdown is reviewed by path
+        "SOUL.md",
+        # docs/domain/ is cosmetic only for markdown and raster images
+        "docs/domain/x.py",
+        "docs/domain/x.svg",
         # Non-root README: code
         "sub/README.md",
         # Config files: code
@@ -79,6 +88,8 @@ def test_cosmetic_paths(path):
         ".claude/hooks/secret-scanner.py",
         ".claude/marketplace/.claude-plugin/marketplace.json",
         ".claude/settings.json",
+        ".claude/skills/x/SKILL.md",
+        ".claude/agents/planner.md",
         # Gate machinery: code
         ".github/workflows/pytest.yml",
         ".github/scripts/code_gate_verdict.py",
@@ -87,9 +98,13 @@ def test_cosmetic_paths(path):
         "tests/test_inference.py",
         "native/wasapi_loopback_helper/helper.cpp",
         "schemas/findings.json",
+        "supabase/migrations/20260609000000_shared_metadata.sql",  # schema is code
+        "scripts/install.ps1",  # PowerShell is code
         # Config files: code
         ".env.example",
         "pyproject.toml",
+        "LICENSE.py",  # LICENSE is matched by exact name, not as a prefix
+        "LICENSE-check.sh",
     ],
 )
 def test_code_paths(path):
@@ -141,6 +156,8 @@ def test_deleted_file_keeps_its_path():
         ".claude/hooks/secret-scanner.py",
         ".claude/marketplace/.claude-plugin/marketplace.json",
         ".claude/settings.json",
+        # Any hook runs in the reviewer's harness, so the whole directory is machinery
+        ".claude/hooks/other.py",
     ],
 )
 def test_gate_machinery_paths(path):
@@ -155,7 +172,6 @@ def test_gate_machinery_paths(path):
         "tests/test_code_gate_verdict.py",
         "docs/reference/github-repo-setup.md",
         ".claude/skills/x/SKILL.md",
-        ".claude/hooks/other.py",
     ],
 )
 def test_non_machinery_paths(path):
@@ -307,7 +323,7 @@ def test_skipped_evidence_shape():
     }
 
 
-# --- run_qualifies: provenance (real run-API shape) -----------------------
+# --- run_provenance (real run-API shape) ---------------------------------
 
 
 def _pr_run(**over):
@@ -334,6 +350,7 @@ def _pr_run(**over):
 
 
 def _dispatch_run(**over):
+    """A dispatch run as `gather_entries` hands it on: the history fact is set."""
     run = {
         "id": 2002,
         "name": "Code review",
@@ -345,68 +362,105 @@ def _dispatch_run(**over):
         "head_sha": OTHER_SHA,  # the default branch tip, not the PR head
         "display_title": f"Code review PR #{PR} @ {SHA}",
         "pull_requests": [],
+        "_in_default_history": True,
     }
     run.update(over)
     return run
 
 
 def _q(run):
-    return gate.run_qualifies(run, pr_number=PR, head_sha=SHA, default_branch="main")
+    return gate.run_provenance(run, pr_number=PR, head_sha=SHA, default_branch="main")
+
+
+def _listed(number, base):
+    return {"number": number, "base": {"ref": base}, "head": {"sha": SHA}}
 
 
 def test_pull_request_run_bound_to_pr_qualifies():
-    assert _q(_pr_run()) is True
+    assert _q(_pr_run()) == "bound"
 
 
 def test_pull_request_run_for_another_pr_is_excluded():
-    run = _pr_run(pull_requests=[{"number": 8, "base": {"ref": "main"}, "head": {"sha": SHA}}])
-    assert _q(run) is False
+    assert _q(_pr_run(pull_requests=[_listed(8, "main")])) == ""
 
 
 def test_pull_request_run_with_no_pull_requests_is_excluded():
     """A fork's pull_request run carries an empty pull_requests[]."""
-    assert _q(_pr_run(pull_requests=[])) is False
+    assert _q(_pr_run(pull_requests=[])) == ""
 
 
-def test_pull_request_run_into_a_non_default_base_is_excluded():
-    run = _pr_run(pull_requests=[{"number": PR, "base": {"ref": "release"}, "head": {"sha": SHA}}])
-    assert _q(run) is False
+def test_pull_request_run_into_a_non_default_base_is_foreign():
+    assert _q(_pr_run(pull_requests=[_listed(PR, "release")])) == "foreign-base"
+
+
+@pytest.mark.parametrize("order", ["foreign-first", "foreign-last"])
+def test_pull_request_run_also_listing_a_pr_into_another_base_is_foreign(order):
+    """like-current-song#241: the run lists every open PR on its head, and may have run the other
+    base's copy of the workflow — whichever order the list comes in."""
+    listed = [_listed(PR, "main"), _listed(8, "release")]
+    if order == "foreign-first":
+        listed.reverse()
+    assert _q(_pr_run(pull_requests=listed)) == "foreign-base"
+
+
+def test_pull_request_run_also_listing_another_pr_into_the_default_base_is_bound():
+    run = _pr_run(pull_requests=[_listed(8, "main"), _listed(PR, "main")])
+    assert _q(run) == "bound"
+
+
+def test_foreign_pull_request_run_for_an_older_head_sha_is_excluded():
+    run = _pr_run(head_sha=OTHER_SHA, pull_requests=[_listed(PR, "release")])
+    assert _q(run) == ""
 
 
 def test_pull_request_run_for_an_older_head_sha_is_excluded():
-    assert _q(_pr_run(head_sha=OTHER_SHA)) is False
+    assert _q(_pr_run(head_sha=OTHER_SHA)) == ""
 
 
-def test_dispatch_run_from_default_branch_qualifies():
-    assert _q(_dispatch_run()) is True
+def test_dispatch_run_from_default_branch_history_qualifies():
+    assert _q(_dispatch_run()) == "bound"
 
 
-def test_dispatch_run_from_a_feature_branch_is_excluded():
-    assert _q(_dispatch_run(head_branch="feat/x")) is False
+@pytest.mark.parametrize("fact", [False, None, "true", 1], ids=["false", "absent", "str", "int"])
+def test_dispatch_run_off_default_branch_history_is_excluded(fact):
+    """like-current-song#241: a tag or branch named like the default one does not put a commit in
+    its history; only an exact True set by gather_entries does."""
+    run = _dispatch_run()
+    if fact is None:
+        del run["_in_default_history"]
+    else:
+        run["_in_default_history"] = fact
+    assert _q(run) == ""
+
+
+def test_dispatch_run_bound_by_history_not_by_head_branch():
+    """head_branch is spoofable (a tag named `main`), so it decides nothing."""
+    assert _q(_dispatch_run(head_branch="feat/x")) == "bound"
+    assert _q(_dispatch_run(head_branch="main", _in_default_history=False)) == ""
 
 
 def test_dispatch_run_titled_for_another_sha_is_excluded():
-    assert _q(_dispatch_run(display_title=f"Code review PR #{PR} @ {OTHER_SHA}")) is False
+    assert _q(_dispatch_run(display_title=f"Code review PR #{PR} @ {OTHER_SHA}")) == ""
 
 
 def test_dispatch_run_titled_for_another_pr_is_excluded():
-    assert _q(_dispatch_run(display_title=f"Code review PR #8 @ {SHA}")) is False
+    assert _q(_dispatch_run(display_title=f"Code review PR #8 @ {SHA}")) == ""
 
 
 def test_dispatch_run_with_unparseable_title_is_excluded():
-    assert _q(_dispatch_run(display_title="Code review")) is False
+    assert _q(_dispatch_run(display_title="Code review")) == ""
 
 
 def test_run_of_another_workflow_is_excluded():
-    assert _q(_pr_run(path=".github/workflows/pytest.yml")) is False
+    assert _q(_pr_run(path=".github/workflows/pytest.yml")) == ""
 
 
 def test_run_path_with_ref_suffix_is_still_the_review_workflow():
-    assert _q(_pr_run(path=".github/workflows/code-review.yml@refs/heads/main")) is True
+    assert _q(_pr_run(path=".github/workflows/code-review.yml@refs/heads/main")) == "bound"
 
 
 def test_other_event_types_are_excluded():
-    assert _q(_pr_run(event="push")) is False
+    assert _q(_pr_run(event="push")) == ""
 
 
 # --- evaluate_evidence ----------------------------------------------------
@@ -509,6 +563,10 @@ _SUPERSEDABLE_REDS = {
     "evidence-invalid": lambda run: _entry(run, _artifact(blocking=True, findings=[])),
     "evidence-sha-mismatch": lambda run: _entry(run, _artifact(sha=OTHER_SHA)),
     "evidence-base-mismatch": lambda run: _entry(run, _artifact(base_ref="release")),
+    # like-current-song#241: clean evidence from a run that also lists a PR into another base.
+    "evidence-foreign-base": lambda run: _entry(
+        {**run, "pull_requests": [_listed(PR, "main"), _listed(8, "release")]}
+    ),
 }
 
 
@@ -530,6 +588,30 @@ def test_blocking_stays_sticky_next_to_supersedable_reds_and_a_clean_run():
         ]
     )
     assert (got.green, got.code) == (False, "evidence-blocking")
+
+
+def test_blocking_evidence_from_a_foreign_base_run_still_sticks():
+    """A foreign run cannot clear the PR, but its blocking verdict is only stricter."""
+    foreign = _pr_run(id=1, pull_requests=[_listed(PR, "main"), _listed(8, "release")])
+    got = _ev([_entry(foreign, _artifact(**_BLOCKING)), _entry(_dispatch_run(id=2))])
+    assert (got.green, got.code) == (False, "evidence-blocking")
+
+
+def test_foreign_base_verdict_says_why():
+    """The summary the PR author reads names the cause (like-current-song#241)."""
+    foreign = _pr_run(pull_requests=[_listed(PR, "main"), _listed(8, "release")])
+    got = _ev([_entry(foreign)])
+    assert got.message == (
+        "A review run for this commit also lists an open PR into another base branch, "
+        "so it may have run that branch's copy of the review workflow; it is evidence "
+        "for no PR. Close or retarget that PR, or have a maintainer re-dispatch the review."
+    )
+
+
+def test_foreign_base_outranks_other_supersedable_reds():
+    foreign = _pr_run(id=1, pull_requests=[_listed(PR, "main"), _listed(8, "release")])
+    got = _ev([_entry(foreign), _entry(_pr_run(id=2), _artifact(sha=OTHER_SHA))])
+    assert (got.green, got.code) == (False, "evidence-foreign-base")
 
 
 def test_worst_supersedable_red_reported_when_no_clean_run():
@@ -790,24 +872,61 @@ def test_trusted_code_change_is_reviewed():
 # --- resolve_run_target ---------------------------------------------------
 
 
+def _resolve(event, title, head_sha, pull_requests):
+    return gate.resolve_run_target(event, title, head_sha, pull_requests, "main")
+
+
 def test_resolve_dispatch_target_from_the_run_title():
-    got = gate.resolve_run_target(
-        "workflow_dispatch", f"Code review PR #{PR} @ {SHA}", OTHER_SHA, []
-    )
+    got = _resolve("workflow_dispatch", f"Code review PR #{PR} @ {SHA}", OTHER_SHA, [])
     assert got == (7, SHA)
 
 
 def test_resolve_pull_request_target_from_pull_requests():
-    got = gate.resolve_run_target("pull_request", "x", SHA, [{"number": 7}])
+    got = _resolve("pull_request", "x", SHA, [_listed(7, "main")])
     assert got == (7, SHA)
 
 
+@pytest.mark.parametrize("order", ["default-first", "default-last"])
+def test_resolve_picks_the_pr_into_the_default_branch(order):
+    """like-current-song#230: the list holds every open PR on the head, in no promised order."""
+    listed = [_listed(7, "main"), _listed(8, "release")]
+    if order == "default-last":
+        listed.reverse()
+    assert _resolve("pull_request", "x", SHA, listed) == (7, SHA)
+
+
+def test_resolve_run_listing_only_prs_into_other_bases_is_unbound():
+    assert _resolve("pull_request", "x", SHA, [_listed(8, "release")]) is None
+
+
+def test_resolve_command_binds_the_pr_into_the_repos_default_branch(monkeypatch, tmp_path):
+    """The workflow's DEFAULT_BRANCH decides, not a hard-coded `main`."""
+    out = tmp_path / "out"
+    env = {
+        "EVENT_NAME": "workflow_run",
+        "RUN_EVENT": "pull_request",
+        "RUN_HEAD_SHA": SHA,
+        "RUN_PULL_REQUESTS": json.dumps([_listed(8, "main"), _listed(7, "trunk")]),
+        "DEFAULT_BRANCH": "trunk",
+        "GITHUB_OUTPUT": str(out),
+    }
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert gate.cmd_resolve(None) == 0
+    assert out.read_text(encoding="utf-8") == f"pr_number=7\nhead_sha={SHA}\n"
+
+
 def test_resolve_fork_pull_request_run_is_unbound():
-    assert gate.resolve_run_target("pull_request", "x", SHA, []) is None
+    assert _resolve("pull_request", "x", SHA, []) is None
 
 
 def test_resolve_unparseable_dispatch_title_is_unbound():
-    assert gate.resolve_run_target("workflow_dispatch", "Code review", SHA, []) is None
+    assert _resolve("workflow_dispatch", "Code review", SHA, []) is None
+
+
+def test_resolve_push_run_is_unbound_even_with_pull_requests():
+    """Only `pull_request` and `workflow_dispatch` runs carry review evidence."""
+    assert _resolve("push", "x", SHA, [_listed(7, "main")]) is None
 
 
 # --- read_evidence_zip ----------------------------------------------------
@@ -1133,6 +1252,103 @@ def test_gather_then_evaluate_keeps_blocking_from_an_earlier_attempt():
     assert (got.green, got.code) == (False, "evidence-blocking")
 
 
+RUNS_PATH = "repos/o/r/actions/workflows/code-review.yml/runs"
+COMPARE_PATH = f"repos/o/r/compare/main...{OTHER_SHA}"
+DISPATCH_ARTIFACTS = "repos/o/r/actions/runs/2002/artifacts"
+
+
+def _payload_dispatch(**over):
+    """A dispatch run as the runs API returns it: no history fact."""
+    run = _dispatch_run(**over)
+    if "_in_default_history" not in over:
+        del run["_in_default_history"]
+    return run
+
+
+def _gather(runs, compare):
+    api = FakeApi(
+        {
+            COMPARE_PATH: compare,
+            RUNS_PATH: {"workflow_runs": runs},
+            DISPATCH_ARTIFACTS: {"artifacts": [_art(1, "review-evidence-1")]},
+        },
+        blobs={1: _evidence_zip()},
+    )
+    return api, gate.gather_entries(api, "o/r", PR, SHA, "main")
+
+
+def _compares(api):
+    return [path for _, path, _ in api.calls if path.startswith("repos/o/r/compare/")]
+
+
+@pytest.mark.parametrize("status", ["identical", "behind"])
+def test_dispatch_run_in_default_history_is_evidence(status):
+    """'behind': the default branch moved on past the run's head, and the run still
+    counts (like-current-song#241)."""
+    api, entries = _gather([_payload_dispatch()], {"status": status})
+    assert _compares(api) == [f"{COMPARE_PATH}?per_page=1"]
+    got = _ev(entries)
+    assert (got.green, got.code) == (True, "evidence-clean")
+
+
+@pytest.mark.parametrize("status", ["ahead", "diverged"])
+def test_dispatch_run_off_default_history_is_not_loaded(status):
+    """A tag or branch named `main` puts the run on `branch=main`, not in its history."""
+    api, entries = _gather([_payload_dispatch()], {"status": status})
+    assert _compares(api) == [f"{COMPARE_PATH}?per_page=1"]
+    assert entries == []
+    assert _downloads(api) == []
+
+
+def test_spoofed_history_key_in_the_run_payload_is_ignored():
+    _, entries = _gather([_payload_dispatch(_in_default_history=True)], {"status": "diverged"})
+    assert entries == []
+
+
+def test_history_is_checked_only_for_dispatch_runs_titled_for_this_pr_and_sha():
+    runs = [
+        _payload_dispatch(id=2003, display_title=f"Code review PR #8 @ {SHA}"),
+        _payload_dispatch(id=2004, display_title=f"Code review PR #{PR} @ {OTHER_SHA}"),
+        _pr_run(),
+    ]
+    api = FakeApi(
+        {
+            RUNS_PATH: {"workflow_runs": runs},
+            ARTIFACTS_PATH: {"artifacts": [_art(1, "review-evidence-1")]},
+        },
+        blobs={1: _evidence_zip()},
+    )
+    entries = gate.gather_entries(api, "o/r", PR, SHA, "main")
+    assert _compares(api) == []
+    assert [e["run"]["id"] for e in entries] == [1001]
+
+
+def test_gather_loads_a_foreign_base_run_so_its_blocking_verdict_sticks():
+    foreign = _pr_run(pull_requests=[_listed(PR, "main"), _listed(8, "release")])
+    api = FakeApi(
+        {
+            RUNS_PATH: {"workflow_runs": [foreign]},
+            ARTIFACTS_PATH: {"artifacts": [_art(1, "review-evidence-1")]},
+        },
+        blobs={1: _evidence_zip(blocking=True)},
+    )
+    got = _ev(gate.gather_entries(api, "o/r", PR, SHA, "main"))
+    assert (got.green, got.code) == (False, "evidence-blocking")
+
+
+@pytest.mark.parametrize("code", [404, 422])
+def test_unknown_or_unrelated_commit_is_not_in_default_history(code):
+    err = urllib.error.HTTPError(COMPARE_PATH, code, "x", {}, None)
+    assert gate.in_default_history(FakeApi({COMPARE_PATH: err}), "o/r", "main", OTHER_SHA) is False
+
+
+def test_compare_server_error_is_raised_not_read_as_off_history():
+    err = urllib.error.HTTPError(COMPARE_PATH, 502, "x", {}, None)
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        gate.in_default_history(FakeApi({COMPARE_PATH: err}), "o/r", "main", OTHER_SHA)
+    assert caught.value.code == 502
+
+
 # --- fetch_pr_snapshot ----------------------------------------------------
 
 
@@ -1218,14 +1434,21 @@ def _patched(write):
     return [(path, body) for m, path, body in write.calls if m == "PATCH"]
 
 
-def _snapshot_responses(**extra):
-    pr = _pr(changed_files=1)
-    return {
-        **extra,
-        f"repos/o/r/pulls/{PR}/files": [{"filename": "a.py", "status": "modified"}],
-        f"repos/o/r/pulls/{PR}": pr,
-        "repos/o/r": {"default_branch": "main"},
-    }
+OPEN_PULLS = "repos/o/r/pulls?state=open&base=main"
+
+
+def _snapshot_responses(pr=None, **extra):
+    pr = pr or _pr(changed_files=1)
+    responses = {**extra}
+    responses.setdefault(OPEN_PULLS, [pr])
+    responses.update(
+        {
+            f"repos/o/r/pulls/{PR}/files": [{"filename": "a.py", "status": "modified"}],
+            f"repos/o/r/pulls/{PR}": pr,
+            "repos/o/r": {"default_branch": "main"},
+        }
+    )
+    return responses
 
 
 @pytest.mark.parametrize(
@@ -1272,6 +1495,67 @@ def test_a_completed_verdict_posts_its_result(monkeypatch):
     assert body["output"]["title"] == "verify-verdict: evidence-blocking"
 
 
+def test_a_pr_into_another_base_posts_no_verdict(monkeypatch):
+    """like-current-song#230: the check belongs to the commit, so a verdict for a PR into `release`
+    would land on a PR into the default branch that shares the head."""
+    pr = _pr(changed_files=1, base={"ref": "release", "repo": {"full_name": "o/r"}})
+    write = _run_verdict(monkeypatch, _snapshot_responses(pr=pr))
+    assert gate.cmd_verdict(None) == 0
+    assert write.calls == []
+
+
+def test_a_head_that_moved_past_the_event_sha_posts_no_verdict(monkeypatch):
+    """The newer SHA has its own evaluation; a verdict here would land on a stale commit."""
+    pr = _pr(head={"sha": OTHER_SHA, "repo": {"full_name": "o/r"}})
+    write = _run_verdict(monkeypatch, _snapshot_responses(pr=pr))
+    assert gate.cmd_verdict(None) == 0
+    assert write.calls == []
+
+
+def test_two_open_prs_on_one_head_post_shared_head(monkeypatch):
+    responses = _snapshot_responses(
+        **{OPEN_PULLS: [_pr(changed_files=1), _pr(number=8, changed_files=1)]}
+    )
+    write = _run_verdict(monkeypatch, responses)
+    assert gate.cmd_verdict(None) == 0
+    ((_, body),) = _patched(write)
+    assert (body["conclusion"], body["output"]["title"]) == (
+        "failure",
+        "verify-verdict: shared-head",
+    )
+
+
+def test_an_open_pr_listing_too_long_to_read_whole_fails_closed(monkeypatch):
+    page = [_pr(number=100 + i, head={"sha": OTHER_SHA}) for i in range(100)]
+    write = _run_verdict(monkeypatch, _snapshot_responses(**{OPEN_PULLS: page}))
+    with pytest.raises(RuntimeError, match="too many open PRs"):
+        gate.cmd_verdict(None)
+    ((_, body),) = _patched(write)
+    assert body["output"]["title"] == "verify-verdict: verdict-error"
+
+
+# --- shared_head_verdict --------------------------------------------------
+
+
+def _open(number, sha=SHA, base="main"):
+    return _pr(number=number, head={"sha": sha}, base={"ref": base})
+
+
+def test_shared_head_names_every_other_pr_on_the_commit():
+    got = gate.shared_head_verdict(_open(PR), [_open(9), _open(PR), _open(8)])
+    assert (got.green, got.code) == (False, "shared-head")
+    assert got.message.startswith("Open PR(s) #8, #9 into the same base have this same head commit")
+
+
+@pytest.mark.parametrize(
+    "others",
+    [[], [_open(8, sha=OTHER_SHA)], [_open(8, base="release")]],
+    ids=["alone", "other-head", "other-base"],
+)
+def test_no_shared_head_without_another_pr_on_the_same_commit_and_base(others):
+    assert gate.shared_head_verdict(_open(PR), [_open(PR), *others]) is None
+
+
 # --- safe_relpath / build_diff --------------------------------------------
 
 
@@ -1303,3 +1587,17 @@ def test_build_diff_labels_added_removed_and_renamed_files():
         "diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
         "diff --git a/a.py b/b.py\n--- a/a.py\n+++ b/b.py\n@@ -1 +1 @@\n-x\n+y\n"
     )
+
+
+# --- write_head_data ------------------------------------------------------
+
+
+def test_head_files_are_written_inert_under_a_pr_suffix(tmp_path):
+    """A PR-controlled `.claude/settings.json` must not land under a name the
+    reviewer's harness would load as config."""
+    blob = {"size": 2, "content": base64.b64encode(b"{}").decode()}
+    api = FakeApi({"repos/o/r/git/blobs/s1": blob})
+    files = [{"filename": ".claude/settings.json", "status": "modified", "sha": "s1"}]
+    gate.write_head_data(api, "o/r", files, str(tmp_path))
+    assert (tmp_path / ".claude" / "settings.json.pr").read_bytes() == b"{}"
+    assert not (tmp_path / ".claude" / "settings.json").exists()

@@ -29,8 +29,9 @@ permissions:
 
 jobs:
   # No network, no secrets: parses event data into (pr_number, head_sha). An
-  # empty output means the event is not bound to a PR (e.g. a fork's
-  # `pull_request` run, whose `pull_requests[]` is empty) and nothing follows.
+  # empty output means the event is not bound to a PR into the default branch
+  # (e.g. a fork's `pull_request` run, whose `pull_requests[]` is empty) and
+  # nothing follows.
   resolve:
     # `edited` fires on every title/body edit; only a base-branch change alters
     # the evaluation.
@@ -57,6 +58,7 @@ jobs:
           RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python -I .github/scripts/code_gate_verdict.py resolve
 
   verdict:

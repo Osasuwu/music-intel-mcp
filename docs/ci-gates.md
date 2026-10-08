@@ -4,7 +4,7 @@
 
 The `verify-verdict` check is green iff:
 
-1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run attempt is blocking; or
+1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run attempt is blocking, has an artifact that cannot be read, or is still in progress; or
 2. Every changed file is cosmetic (documentation, images, licenses).
 
 The gate never reads the PR comment, timestamp, or heading. The artifact is the machine-readable verdict; the comment is for humans only.
@@ -23,7 +23,7 @@ The gate never reads the PR comment, timestamp, or heading. The artifact is the 
 
 **Triggers:** Pull request events + `workflow_dispatch` for Dependabot/fork dispatch
 
-**Runs on:** PR's BASE branch (never PR head code is executed)
+**Runs on:** a `pull_request` run takes the workflow YAML from the PR's merge ref, so a PR can change its own review workflow (which is why that file is gate machinery). The job's workspace is the PR's BASE SHA; PR head code is never checked out or executed.
 
 **Single job:** `review`
 
@@ -36,7 +36,7 @@ The gate never reads the PR comment, timestamp, or heading. The artifact is the 
 **Reviewer sandbox:**
 - The job token is read-only (`contents: read`, `pull-requests: read`; no `id-token`), and it is the token handed to the action.
 - The reviewer gets an exact read-verb allowlist (`Read`, `Grep`, `Glob`, read-only `git`/`gh` verbs, `py_compile`), not `git:*`, `bash -n` or `node --check`. `tests/test_code_review_allowed_tools.py` pins it.
-- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` keeps the secrets out of the reviewer's subprocesses.
+- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` scrubs Anthropic, cloud and Actions secrets from the reviewer's subprocess environments. It is best-effort, not a guarantee, and it needs bubblewrap: the job installs it (and lifts Ubuntu's AppArmor restriction on unprivileged user namespaces) in a plain step before the reviewer, and fails at that step, by name, if it cannot. The scrub is never switched off to get a run through.
 - Two reviewer attempts; the second reseeds the findings file. If both fail validation, the job fails and uploads no evidence.
 
 **Finding classes (judgment, not mechanical):**
@@ -49,7 +49,7 @@ The gate never reads the PR comment, timestamp, or heading. The artifact is the 
 - `design-modularity` — real erosion of module boundaries
 - `performance` — N+1 or O(n²) added in the diff
 
-**Dispatch path (Dependabot, forks):** Must provide both `pr_number` and `head_sha` inputs; runs on default branch with CLAUDE_CODE_OAUTH_TOKEN available in `untrusted-review` environment.
+**Dispatch path (Dependabot, forks):** Must provide both `pr_number` and `head_sha` inputs and be dispatched on the default branch. It runs in the `untrusted-review` environment, which holds no secrets: it exists for its required reviewer and its default-branch deployment policy. `CLAUDE_CODE_OAUTH_TOKEN` is a repository secret, used by every review run.
 
 ### code-gate-verdict.yml (Verdict — Base-Pinned)
 
@@ -67,20 +67,24 @@ The gate never reads the PR comment, timestamp, or heading. The artifact is the 
 
 ## Provenance & Safety
 
-**Run qualification:** A `pull_request` run counts only when `run.pull_requests[]` contains the PR and that PR's base is the default branch. A fork's `pull_request` run carries an empty `pull_requests[]` and is excluded. A `workflow_dispatch` run counts only when it ran from the default branch and its `display_title` embeds both the PR number and head SHA (the run-name does this).
+**Run qualification:** A `pull_request` run counts only when `run.pull_requests[]` contains the PR and that PR's base is the default branch. A fork's `pull_request` run carries an empty `pull_requests[]` and is excluded. If the run also lists an open PR into another base on the same commit, it may have run that branch's copy of the review workflow, so it is evidence for no PR: red `evidence-foreign-base` until that PR is closed or retargeted, or a maintainer re-dispatches. A blocking artifact it carries still sticks.
+
+A `workflow_dispatch` run counts only when its `display_title` embeds both the PR number and head SHA (the run-name does this) and the commit it ran from is the default branch's tip or one of its ancestors, checked through the compare API (`behind` or `identical`), never through the run's `head_branch`, which the dispatcher chooses. So a dispatch keeps counting after the default branch moves on, and a dispatch from any other ref counts for nothing.
+
+**Other bases and shared heads:** Only a PR into the default branch gets a `verify-verdict`; a PR into another base gets none, because the check belongs to the commit and would land on any PR into the default branch that shares the head. Two open PRs into the default branch on the same head commit are red `shared-head` until one is closed or gets its own commit.
 
 **Artifact binding:** The artifact's own `sha` and `base_ref` must equal the evaluated SHA and PR's base. A mismatch is red.
 
-**Gate machinery protection:** A PR touching `code-review.yml`, `code-gate-verdict.yml`, `.github/scripts/code_gate_verdict.py`, anything under `.github/actions/`, or the agent behavior files `.claude/settings.json`, `.claude/hooks/secret-scanner.py` and `.claude/marketplace/.claude-plugin/marketplace.json` is always red. Other `.claude/` and `.github/scripts/` files are ordinary code and go through review. The sanctioned unblock is a human review-blind admin-merge backed by a fresh-session `/code-review` posted with the final SHA.
+**Gate machinery protection:** A PR touching `code-review.yml`, `code-gate-verdict.yml`, `.github/scripts/code_gate_verdict.py`, anything under `.github/actions/` or `.claude/hooks/` (any hook runs in the reviewer's harness), or the agent behavior files `.claude/settings.json` and `.claude/marketplace/.claude-plugin/marketplace.json` is always red. Other `.claude/` and `.github/scripts/` files are ordinary code and go through review. The sanctioned unblock is a human review-blind admin-merge backed by a fresh-session `/code-review` posted with the final SHA.
 
 **Cosmetic allow-list (music-intel-mcp):**
 - Images anywhere: `*.png`, `*.jpg`, `*.gif`, `*.webp`
-- Root level: `README.md`, `LICENSE*`, `SECURITY.md`, `THIRD_PARTY_LICENSES`
-- `docs/domain/` markdown and images (product documentation, not behavior-carrying)
+- Root level, by exact name: `README.md`, `SECURITY.md`, `THIRD_PARTY_LICENSES`, `LICENSE`, `LICENSE.md`, `LICENSE.txt`, `LICENSE-APACHE`, `LICENSE-MIT`. A name merely starting with `LICENSE` (`LICENSE.py`) is code.
+- `docs/domain/` markdown and images at any depth (product documentation, not behavior-carrying)
 
 **Code (requires review):**
-- Anything in `docs/` except `docs/domain/*.md`
-- All root `.md` files except `README.md` and `LICENSE*` (includes `AGENTS.md`, `CONTEXT.md`, `INVARIANTS.md`)
+- Anything in `docs/` except markdown and images under `docs/domain/`
+- Every root file not named in the allow-list above (includes `AGENTS.md`, `CONTEXT.md`, `INVARIANTS.md`, `CLAUDE.md`)
 - `.claude/` configuration and hooks
 - `.github/` workflows and scripts
 - `src/`, `tests/`, `native/`, `schemas/`, and all production code
@@ -99,15 +103,16 @@ See the decision function `is_cosmetic()` in `.github/scripts/code_gate_verdict.
      - `GATE_APP_PRIVATE_KEY`
    - `untrusted-review`: Required reviewer (human approval before dispatch); no secrets in this environment. CLAUDE_CODE_OAUTH_TOKEN available only if dispatch path needs it.
 
-3. **Branch protection:** Bind `verify-verdict` check to the osasuwu-ci app ID. Mark as required.
+3. **Branch protection:** Require `verify-verdict` bound to the osasuwu-ci App's app id, with `strict: true` (a PR must be up to date with the default branch). Land the workflows first and let the App post `verify-verdict` once: a required check bound to an App that has never posted it deadlocks every PR.
 
-4. **Canary testing:** Before enabling, test on 5 representative PRs:
-   - Plain code change (should block on any finding)
+4. **Canary testing:** Before enabling, test on 7 representative PRs:
+   - Plain code change with a clean review (should pass)
    - Cosmetic-only change (should pass)
    - Blocking finding (should fail)
    - Mid-run push (should cancel in-flight review and start over)
    - Re-run of a blocking run that comes back clean (should stay red)
    - Gate machinery change (should fail unconditionally)
+   - Fork or Dependabot PR (should fail until a maintainer dispatches the review for its head SHA, then pass on a clean dispatch)
 
 ## Canonical Description
 

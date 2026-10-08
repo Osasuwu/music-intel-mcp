@@ -19,12 +19,20 @@ The gate never reads the PR comment, a timestamp, a heading or a lineage: the
 comment is for humans, the artifact is the machine-readable verdict.
 
 Run provenance. A `pull_request` run counts only when `run.pull_requests[]`
-contains the PR and that PR's base is the default branch (a fork's run carries
-an empty list). A `workflow_dispatch` run counts only when it ran from the
-default branch and its `display_title` — the workflow's own `run-name`, which
-embeds `pr_number` and the `head_sha` input — names this PR and this SHA. The
-artifact's own `sha` and `base_ref` must equal the evaluated SHA and the PR's
-base: a mismatch is red.
+contains the PR and every PR it lists is into the default branch (a fork's run
+carries an empty list). `pull_requests[]` lists the open PRs on the run's head,
+not the PR that triggered it, so a run listing any PR into another base may be
+running that base's copy of the workflow: it is evidence for no PR, and the
+verdict says so (like-current-song#241). A `workflow_dispatch` run counts only when its head
+commit is in the default branch's history (`head_branch` is not enough: a tag
+named like the branch reads the same, like-current-song#241) and its `display_title` — the
+workflow's own `run-name`, which embeds `pr_number` and the `head_sha` input —
+names this PR and this SHA. The artifact's own `sha` and `base_ref` must equal
+the evaluated SHA and the PR's base: a mismatch is red.
+
+One commit, one check. `verify-verdict` attaches to the head commit, not the PR
+(like-current-song#230): a PR into another base posts nothing, and two open PRs into the default
+branch on one head SHA make the check red until one of them moves or closes.
 
 Gate machinery. A PR touching the review workflow, the verdict workflow, this
 script or a local action is always red: its own review cannot be trusted, since
@@ -95,13 +103,24 @@ GATE_MACHINERY_FILES = frozenset(
         ".claude/settings.json",
     }
 )
-GATE_MACHINERY_PREFIXES = (".github/actions/",)
+GATE_MACHINERY_PREFIXES = (".github/actions/", ".claude/hooks/")
 
 _IMAGE_EXT = (".png", ".jpg", ".gif", ".webp")
 _DOC_EXT = (".md",) + _IMAGE_EXT
 # Root-level cosmetic files: docs/readme only. AGENTS.md, CONTEXT.md, INVARIANTS.md
 # are code (affect domain model and gate behavior).
-_ROOT_COSMETIC = frozenset({"README.md", "SECURITY.md", "THIRD_PARTY_LICENSES"})
+_ROOT_COSMETIC = frozenset(
+    {
+        "README.md",
+        "SECURITY.md",
+        "THIRD_PARTY_LICENSES",
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+    }
+)
 
 # Runs that finished without producing a verdict: no evidence either way.
 _IGNORED_CONCLUSIONS = frozenset(
@@ -109,6 +128,7 @@ _IGNORED_CONCLUSIONS = frozenset(
 )
 
 MAX_RUN_PAGES = 3
+MAX_PR_PAGES = 10
 MAX_FILE_PAGES = 30  # the PR files API serves at most 3000 files
 MAX_HEAD_FILES = 200
 MAX_HEAD_FILE_BYTES = 1 << 20
@@ -139,7 +159,7 @@ def is_cosmetic(path):
     if path.endswith(_IMAGE_EXT):
         return True
     if "/" not in path:
-        return path in _ROOT_COSMETIC or path.startswith("LICENSE")
+        return path in _ROOT_COSMETIC
     # docs/domain/: cosmetic. docs/ otherwise: code
     if path.startswith("docs/domain/"):
         return path.endswith(_DOC_EXT)
@@ -256,40 +276,58 @@ def review_skip_reason(pr, files, event_name):
     return ""
 
 
-def resolve_run_target(event, display_title, head_sha, pull_requests):
-    """(pr_number, head_sha) a completed review run was for, or None."""
+def resolve_run_target(event, display_title, head_sha, pull_requests, default_branch):
+    """(pr_number, head_sha) a completed review run was for, or None.
+
+    A `pull_request` run resolves to the PR it lists into the default branch: the
+    list holds every open PR on the run's head, in no promised order, and only a
+    PR into the default branch has a `verify-verdict` to decide (like-current-song#230).
+    """
     if event == "workflow_dispatch":
         m = RUN_TITLE.match(display_title or "")
         return (int(m.group(1)), m.group(2)) if m else None
-    if event == "pull_request" and pull_requests:
-        return (pull_requests[0]["number"], head_sha)
+    if event == "pull_request":
+        for p in pull_requests or []:
+            if (p.get("base") or {}).get("ref") == default_branch:
+                return (p["number"], head_sha)
     return None
 
 
 # --- run provenance and evidence ------------------------------------------
 
 
-def run_qualifies(run, pr_number, head_sha, default_branch):
-    """Is this run bound to this PR at this SHA through something it cannot forge?"""
+# Set on a dispatch run by `gather_entries` (never taken from the API payload):
+# is the run's head commit the default branch's tip or one of its ancestors?
+IN_DEFAULT_HISTORY = "_in_default_history"
+
+
+def run_provenance(run, pr_number, head_sha, default_branch):
+    """How this run binds to this PR at this SHA, through something it cannot forge.
+
+    'bound': it is evidence. 'foreign-base': a `pull_request` run that lists this
+    PR and also a PR into another base, so it may have run that base's copy of the
+    workflow; it is evidence for no PR. '': it is not about this PR at this SHA.
+    """
     if (run.get("path") or "").split("@")[0] != REVIEW_WORKFLOW:
-        return False
+        return ""
     event = run.get("event")
     if event == "pull_request":
-        if run.get("head_sha") != head_sha:
-            return False
-        return any(
-            p.get("number") == pr_number and (p.get("base") or {}).get("ref") == default_branch
-            for p in run.get("pull_requests") or []
-        )
+        listed = run.get("pull_requests") or []
+        if run.get("head_sha") != head_sha or not any(p.get("number") == pr_number for p in listed):
+            return ""
+        if any((p.get("base") or {}).get("ref") != default_branch for p in listed):
+            return "foreign-base"
+        return "bound"
     if event == "workflow_dispatch":
-        if run.get("head_branch") != default_branch:
-            return False
         m = RUN_TITLE.match(run.get("display_title") or "")
-        return bool(m) and int(m.group(1)) == pr_number and m.group(2) == head_sha
-    return False
+        if not m or int(m.group(1)) != pr_number or m.group(2) != head_sha:
+            return ""
+        return "bound" if run.get(IN_DEFAULT_HISTORY) is True else ""
+    return ""
 
 
 _WORST_FIRST = (
+    "evidence-foreign-base",
     "evidence-sha-mismatch",
     "evidence-base-mismatch",
     "evidence-invalid",
@@ -302,6 +340,11 @@ _EVIDENCE_MESSAGES = {
     "evidence-pending": (
         "A bound review run is not finished (or awaits approval). "
         "Wait for it, or approve/cancel it."
+    ),
+    "evidence-foreign-base": (
+        "A review run for this commit also lists an open PR into another base branch, "
+        "so it may have run that branch's copy of the review workflow; it is evidence "
+        "for no PR. Close or retarget that PR, or have a maintainer re-dispatch the review."
     ),
     "evidence-sha-mismatch": (
         "A review artifact is stamped for a different commit than the one evaluated. "
@@ -361,7 +404,8 @@ def evaluate_evidence(entries, pr_number, head_sha, base_ref, default_branch):
     clean = 0
     for e in entries:
         run = e["run"]
-        if not run_qualifies(run, pr_number, head_sha, default_branch):
+        provenance = run_provenance(run, pr_number, head_sha, default_branch)
+        if not provenance:
             continue
         if run.get("status") != "completed" or run.get("conclusion") == "action_required":
             return _verdict("evidence-pending")
@@ -375,6 +419,13 @@ def evaluate_evidence(entries, pr_number, head_sha, base_ref, default_branch):
             result = "evidence-missing"
         else:
             result = _judge_artifact(e["artifact"], head_sha, base_ref)
+        if provenance == "foreign-base":
+            # Its evidence cannot clear this PR; a blocking verdict it carries can
+            # only be stricter, so that one still sticks.
+            reds.add(
+                "evidence-blocking" if result == "evidence-blocking" else "evidence-foreign-base"
+            )
+            continue
         if run.get("conclusion") != "success":
             # The run's latest attempt failed or was cancelled. Blocking evidence an
             # earlier attempt left still counts; nothing else from the run does.
@@ -614,8 +665,66 @@ def gather_entries(api, repo, pr_number, head_sha, default_branch):
     for q in queries:
         for run in paged(api, f"{base}?{q}", key="workflow_runs", max_pages=MAX_RUN_PAGES):
             seen[run["id"]] = run
-    runs = [r for r in seen.values() if run_qualifies(r, pr_number, head_sha, default_branch)]
-    return [e for r in runs for e in load_entries(api, repo, r)]
+    entries = []
+    for run in seen.values():
+        # The history fact is always the compare's, whatever the payload carried: a
+        # dispatch run that would be bound if in history gets it set here, and any
+        # other run is never bound through it.
+        if (
+            run.get("event") == "workflow_dispatch"
+            and run_provenance(
+                {**run, IN_DEFAULT_HISTORY: True}, pr_number, head_sha, default_branch
+            )
+            == "bound"
+        ):
+            run[IN_DEFAULT_HISTORY] = in_default_history(
+                api, repo, default_branch, run.get("head_sha") or ""
+            )
+        # A foreign-base run is loaded too: a blocking artifact it carries still sticks.
+        if run_provenance(run, pr_number, head_sha, default_branch):
+            entries.extend(load_entries(api, repo, run))
+    return entries
+
+
+def in_default_history(api, repo, default_branch, sha):
+    """Is `sha` the default branch's tip or one of its ancestors? Holds after the
+    branch moves on; false for a tag or any ref off that history."""
+    try:
+        cmp = api(
+            "GET",
+            f"repos/{repo}/compare/{urllib.parse.quote(default_branch)}...{sha}?per_page=1",
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 422):  # unknown commit, or no common history
+            return False
+        raise
+    return cmp.get("status") in ("behind", "identical")
+
+
+def shared_head_verdict(pr, open_prs):
+    """Red when another open PR into the same base has the same head SHA, else None.
+
+    The check attaches to the commit, so two such PRs would overwrite each other's
+    verdict and either could show the other's green (like-current-song#230). The conservative
+    combination: the commit is red until one PR moves or closes.
+    """
+    others = sorted(
+        p["number"]
+        for p in open_prs
+        if p["number"] != pr["number"]
+        and p["head"]["sha"] == pr["head"]["sha"]
+        and p["base"]["ref"] == pr["base"]["ref"]
+    )
+    if not others:
+        return None
+    listed = ", ".join(f"#{n}" for n in others)
+    return Verdict(
+        False,
+        "shared-head",
+        f"Open PR(s) {listed} into the same base have this same head commit, and the "
+        "check belongs to the commit, so it cannot carry one verdict per PR. Close all "
+        "but one, or push a distinct commit to each.",
+    )
 
 
 def post_check(api, repo, head_sha, verdict, app_id):
@@ -826,6 +935,7 @@ def cmd_resolve(_args):
             os.environ.get("RUN_TITLE", ""),
             os.environ.get("RUN_HEAD_SHA", ""),
             json.loads(os.environ.get("RUN_PULL_REQUESTS") or "[]"),
+            os.environ["DEFAULT_BRANCH"],
         )
     if target is None:
         print("event is not bound to a PR; nothing to evaluate")
@@ -849,8 +959,21 @@ def cmd_verdict(_args):
             print("PR head moved past the event's SHA; the newer SHA has its own evaluation")
             return 0
         default_branch = read("GET", f"repos/{repo}")["default_branch"]
-        entries = gather_entries(read, repo, number, head_sha, default_branch)
-        verdict = evaluate_pr(pr, files, entries, default_branch)
+        if pr["base"]["ref"] != default_branch:
+            # The check belongs to the commit: a verdict for this PR would land on a
+            # PR into the default branch that shares the head (like-current-song#230).
+            print(f"PR is into {pr['base']['ref']}, not {default_branch}; no verdict to post")
+            return 0
+        open_prs = paged(
+            read,
+            f"repos/{repo}/pulls?state=open&base={urllib.parse.quote(default_branch)}",
+            max_pages=MAX_PR_PAGES,
+        )
+        if len(open_prs) >= 100 * MAX_PR_PAGES:
+            raise RuntimeError("too many open PRs to check for a shared head")
+        verdict = shared_head_verdict(pr, open_prs) or evaluate_pr(
+            pr, files, gather_entries(read, repo, number, head_sha, default_branch), default_branch
+        )
     except Exception as exc:
         # Fail closed: a crash must not leave an earlier green check standing for
         # this SHA (attempt 1 clean, the re-run blocking, its listing reset).

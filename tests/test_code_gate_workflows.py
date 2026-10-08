@@ -218,3 +218,35 @@ def test_decision_rests_on_the_findings_file_not_on_reviewer_outcome():
             "if", ""
         )
     assert "permission_denials" not in yaml.safe_dump(REVIEW)
+
+
+def test_resolve_step_gets_the_default_branch():
+    """resolve_run_target picks the listed PR into the default branch (like-current-song#230); the
+    step reads DEFAULT_BRANCH, so without it every workflow_run resolve fails."""
+    (step,) = [s for s in VERDICT["jobs"]["resolve"]["steps"] if s.get("id") == "resolve"]
+    assert step["env"]["DEFAULT_BRANCH"] == "${{ github.event.repository.default_branch }}"
+
+
+SCRUB = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+
+def test_bubblewrap_is_installed_before_the_reviewer_with_the_scrub_on():
+    """like-current-song#240: the scrub needs bwrap, which the runner lacks. The install is a plain
+    step before the first reviewer attempt — a failure is a named red step, never
+    swallowed — and the scrub stays on rather than being switched off to pass."""
+    steps = REVIEW["jobs"]["review"]["steps"]
+    ids = [s.get("id") for s in steps]
+    (bwrap,) = [s for s in steps if s.get("name") == "Install subprocess isolation (bubblewrap)"]
+    at = steps.index(bwrap)
+    assert ids.index("prepare") < at < ids.index("review1")
+    assert bwrap["if"] == "steps.prepare.outputs.skip_reason == ''"
+    assert "continue-on-error" not in bwrap
+    lines = [line.strip() for line in bwrap["run"].splitlines()]
+    assert lines[0] == "set -euo pipefail"
+    (install,) = [line for line in lines if "apt-get install" in line]
+    assert "bubblewrap" in install.split()
+    assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in lines
+    assert lines[-1] == "bwrap --ro-bind / / --unshare-all true"
+    assert REVIEW["jobs"]["review"]["env"][SCRUB] == "1"
+    overrides = [s.get("name") for s in steps if SCRUB in (s.get("env") or {})]
+    assert overrides == []
