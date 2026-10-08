@@ -2,12 +2,14 @@
 
 ## Rule: "Review Evidence"
 
-The `verify-verdict` check is green iff:
+The `verify-verdict` check is green iff the PR is out of draft, its full changed-file list was read and is non-empty, and it touches no gate machinery; and then either:
 
 1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run attempt is blocking, has an artifact that cannot be read, or is still in progress; or
-2. Every changed file is cosmetic (documentation, images, licenses).
+2. Every changed file is on the cosmetic allow-list below: images, a few named root files, and markdown and images under `docs/domain/`. Other documentation is code.
 
-The gate never reads the PR comment, timestamp, or heading. The artifact is the machine-readable verdict; the comment is for humans only.
+The preconditions fail as red `draft`, `files-incomplete` (the files API serves at most 3000), `files-empty` and `gate-machinery`. Two more reds come from provenance, not evidence: `shared-head`, and `untrusted-needs-dispatch` for a fork or Dependabot PR with no evidence yet (see below).
+
+The gate never reads PR comments, timestamps or headings, and the reviewer cannot comment (`gh pr comment` is disallowed). The artifact is the whole verdict.
 
 **Which red wins:**
 - **Blocking is sticky.** A blocking artifact stays in force for its commit even if a later run, or a re-run of the same run, is clean, and even if that re-run failed or was cancelled. The fix is a new commit. Known limit ([like-current-song#236](https://github.com/Osasuwu/like-current-song/issues/236)): this holds only while the blocking artifact is retained (90 days); once it expires, a clean result for the same SHA turns the check green.
@@ -101,7 +103,8 @@ See the decision function `is_cosmetic()` in `.github/scripts/code_gate_verdict.
    - `code-gate-verdict`: Deployment restrictions to default branch only. Secrets:
      - `GATE_APP_ID`
      - `GATE_APP_PRIVATE_KEY`
-   - `untrusted-review`: Required reviewer (human approval before dispatch); no secrets in this environment. CLAUDE_CODE_OAUTH_TOKEN available only if dispatch path needs it.
+   - `untrusted-review`: Required reviewer (human approval before dispatch) and a default-branch deployment policy; no secrets.
+   - `CLAUDE_CODE_OAUTH_TOKEN` is a repository secret, used by every review run, dispatched or not.
 
 3. **Branch protection:** Require `verify-verdict` bound to the osasuwu-ci App's app id, with `strict: true` (a PR must be up to date with the default branch). Land the workflows first and let the App post `verify-verdict` once: a required check bound to an App that has never posted it deadlocks every PR.
 
