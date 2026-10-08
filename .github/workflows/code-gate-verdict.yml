@@ -1,15 +1,16 @@
 name: Code Gate Verdict
 
-# Decides the `verify-verdict` check from review EVIDENCE. Rule: "Review evidence" —
-# docs/reference/github-repo-setup.md §3; logic: .github/scripts/code_gate_verdict.py.
+# Decides the `verify-verdict` check from review EVIDENCE. Rule: "Review
+# evidence" — docs/ci-gates.md; logic: .github/scripts/code_gate_verdict.py.
+# Design: Osasuwu/jarvis#1964, ported in #226.
 #
 # Runs from the DEFAULT BRANCH (`pull_request_target` / `workflow_run` both
 # resolve the workflow file there) and never checks out PR code: the only thing
 # checked out is `.github/scripts` at the default branch. A PR cannot change the
 # rule that judges it. PR-controlled values reach steps through `env:` only.
 #
-# `verify-verdict` is posted by the `osasuwu-ci` GitHub App (branch protection binds
-# the check to that app_id), so no other workflow can satisfy the gate by
+# `verify-verdict` is posted by the `osasuwu-ci` GitHub App (branch protection
+# binds the check to that app_id), so no other workflow can satisfy the gate by
 # creating a same-named check. The App key lives in the `code-gate-verdict`
 # environment, restricted to deployments from the default branch.
 
@@ -56,7 +57,7 @@ jobs:
           RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
-        run: python .github/scripts/code_gate_verdict.py resolve
+        run: python -I .github/scripts/code_gate_verdict.py resolve
 
   verdict:
     needs: resolve
@@ -90,4 +91,4 @@ jobs:
           GATE_APP_ID: ${{ secrets.GATE_APP_ID }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
-        run: python .github/scripts/code_gate_verdict.py verdict
+        run: python -I .github/scripts/code_gate_verdict.py verdict

@@ -4,10 +4,18 @@
 
 The `verify-verdict` check is green iff:
 
-1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run is blocking, unfinished, expired, or missing its artifact (sticky-worst); or
+1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run attempt is blocking; or
 2. Every changed file is cosmetic (documentation, images, licenses).
 
 The gate never reads the PR comment, timestamp, or heading. The artifact is the machine-readable verdict; the comment is for humans only.
+
+**Which red wins:**
+- **Blocking is sticky.** A blocking artifact stays in force for its commit even if a later run, or a re-run of the same run, is clean, and even if that re-run failed or was cancelled. The fix is a new commit. Known limit ([like-current-song#236](https://github.com/Osasuwu/like-current-song/issues/236)): this holds only while the blocking artifact is retained (90 days); once it expires, a clean result for the same SHA turns the check green.
+- **Unreadable is sticky until re-read.** An artifact the verdict could not download (cut-off body, size mismatch, oversized, network error) is red `evidence-unreadable` whatever else is clean, until the verdict job is re-run and reads it. Only a blocking artifact outranks it.
+- **Every other red clears on a clean run.** Missing, expired or malformed evidence is superseded as soon as a run for the same SHA comes back clean.
+- **A run still in progress holds the check at `evidence-pending`**, whatever the other runs say.
+- **A failed or cancelled run counts only for blocking evidence** an earlier attempt of it left; nothing else from it counts either way.
+- **A verdict crash is red.** If the verdict script itself raises, it posts red `verify-verdict: verdict-error` before failing the job; it never leaves the check unset or green.
 
 ## Two-Workflow Architecture
 
@@ -23,7 +31,13 @@ The gate never reads the PR comment, timestamp, or heading. The artifact is the 
 - Stages PR content as inert data under `.pr-head/` (not executable)
 - Runs the reviewer (Claude Code with 8 finding classes only)
 - Validates and stamps findings into `review-evidence.json`
-- Uploads artifact with 90-day retention, overwritable
+- Uploads it as `review-evidence-<run_attempt>`, one artifact per run attempt, never overwritten (`overwrite: false`), 90-day retention. A re-run cannot replace an earlier attempt's evidence; the verdict reads all of them.
+
+**Reviewer sandbox:**
+- The job token is read-only (`contents: read`, `pull-requests: read`; no `id-token`), and it is the token handed to the action.
+- The reviewer gets an exact read-verb allowlist (`Read`, `Grep`, `Glob`, read-only `git`/`gh` verbs, `py_compile`), not `git:*`, `bash -n` or `node --check`. `tests/test_code_review_allowed_tools.py` pins it.
+- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` keeps the secrets out of the reviewer's subprocesses.
+- Two reviewer attempts; the second reseeds the findings file. If both fail validation, the job fails and uploads no evidence.
 
 **Finding classes (judgment, not mechanical):**
 - `regression` — reintroduces a bug
@@ -57,13 +71,12 @@ The gate never reads the PR comment, timestamp, or heading. The artifact is the 
 
 **Artifact binding:** The artifact's own `sha` and `base_ref` must equal the evaluated SHA and PR's base. A mismatch is red.
 
-**Gate machinery protection:** A PR touching the review workflow, verdict workflow, this script, or any agent/gate behavior file (`.claude/` config, `.github/scripts/`, actions) is always red. The sanctioned unblock is a human review-blind admin-merge backed by a fresh-session `/code-review` posted with the final SHA.
+**Gate machinery protection:** A PR touching `code-review.yml`, `code-gate-verdict.yml`, `.github/scripts/code_gate_verdict.py`, anything under `.github/actions/`, or the agent behavior files `.claude/settings.json`, `.claude/hooks/secret-scanner.py` and `.claude/marketplace/.claude-plugin/marketplace.json` is always red. Other `.claude/` and `.github/scripts/` files are ordinary code and go through review. The sanctioned unblock is a human review-blind admin-merge backed by a fresh-session `/code-review` posted with the final SHA.
 
 **Cosmetic allow-list (music-intel-mcp):**
 - Images anywhere: `*.png`, `*.jpg`, `*.gif`, `*.webp`
 - Root level: `README.md`, `LICENSE*`, `SECURITY.md`, `THIRD_PARTY_LICENSES`
-- `docs/domain/` with `.md` suffix (product documentation, not behavior-carrying)
-- Any `.md` in nested paths under root-level allow-list
+- `docs/domain/` markdown and images (product documentation, not behavior-carrying)
 
 **Code (requires review):**
 - Anything in `docs/` except `docs/domain/*.md`
@@ -93,6 +106,7 @@ See the decision function `is_cosmetic()` in `.github/scripts/code_gate_verdict.
    - Cosmetic-only change (should pass)
    - Blocking finding (should fail)
    - Mid-run push (should cancel in-flight review and start over)
+   - Re-run of a blocking run that comes back clean (should stay red)
    - Gate machinery change (should fail unconditionally)
 
 ## Canonical Description

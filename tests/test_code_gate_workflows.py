@@ -1,21 +1,27 @@
-"""Shape of the two code-gate workflows (#226).
+"""Shape of the two code-gate workflows (#226, ported from jarvis#1964).
 
 code-gate-verdict.yml is the trusted half: it runs from the default branch and
-decides verify-verdict. Its safety is structural — it must never run PR code,
-never hold more than read permissions, and never let a PR-controlled string reach
-a shell. code-review.yml produces the evidence; evidence upload settings ensure a
-missing or stale review fails closed. Each test walks the parsed YAML, not the file
-text.
+decides `verify-verdict`. Its safety is structural — it must never run PR code, never
+hold more than read permissions, and never let a PR-controlled string reach a
+shell. code-review.yml produces the evidence; its retry and upload settings are
+what make a missing or stale review fail closed. Each test walks the parsed YAML,
+not the file text.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
-WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+WORKFLOWS = (
+    next(p for p in Path(__file__).resolve().parents if (p / ".github" / "workflows").is_dir())
+    / ".github"
+    / "workflows"
+)
 REVIEW = yaml.safe_load((WORKFLOWS / "code-review.yml").read_text(encoding="utf-8"))
 VERDICT = yaml.safe_load((WORKFLOWS / "code-gate-verdict.yml").read_text(encoding="utf-8"))
 
@@ -31,7 +37,7 @@ def _run_bodies(spec: dict) -> list[str]:
     return [step["run"] for step in _steps(spec) if "run" in step]
 
 
-# --- verdict workflow -----------------------------------------------
+# --- verdict workflow -----------------------------------------------------
 
 
 def test_verdict_permissions_are_exactly_three_reads():
@@ -69,11 +75,10 @@ def test_verdict_triggers_pull_request_target_and_review_workflow_run():
 
 
 def test_verdict_concurrency_is_per_pr_and_sha_without_cancel():
-    concurrency = VERDICT["jobs"]["verdict"]["concurrency"]
     expected_group = (
         "code-gate-${{ needs.resolve.outputs.pr_number }}-${{ needs.resolve.outputs.head_sha }}"
     )
-    assert concurrency == {
+    assert VERDICT["jobs"]["verdict"]["concurrency"] == {
         "group": expected_group,
         "cancel-in-progress": False,
     }
@@ -109,11 +114,14 @@ def test_only_the_verdict_step_holds_the_app_token():
     assert VERDICT["jobs"]["verdict"]["environment"] == "code-gate-verdict"
 
 
-# --- review workflow -----
+# --- review workflow ------------------------------------------------------
 
 
 def test_review_concurrency_cancels_a_superseded_review():
-    assert REVIEW["concurrency"] == {
+    # Job-level: workflow-level concurrency is evaluated before the job `if`, so a
+    # skipped `edited` run would cancel the real review and leave no evidence.
+    assert "concurrency" not in REVIEW
+    assert REVIEW["jobs"]["review"]["concurrency"] == {
         "group": "code-review-${{ github.event.pull_request.number || inputs.pr_number }}",
         "cancel-in-progress": True,
     }
@@ -130,33 +138,83 @@ def test_dispatch_requires_pr_number_and_head_sha():
     assert all(spec["required"] is True for spec in inputs.values())
 
 
-def test_review_checks_out_base_only():
-    checkout = [
+def test_review_checks_out_base_only_with_no_history():
+    (checkout,) = [
         s for s in _steps(REVIEW) if str(s.get("uses", "")).startswith("actions/checkout@")
-    ][0]
-    expected_ref = (
-        "${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}"
-    )
-    assert checkout["with"]["ref"] == expected_ref
+    ]
+    assert checkout["with"] == {
+        "ref": "${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}"
+    }
 
 
-def test_evidence_artifact_is_retained_90_days_and_overwritable():
-    uploads = [
+def _upload_steps() -> list[dict]:
+    return [
         s for s in _steps(REVIEW) if str(s.get("uses", "")).startswith("actions/upload-artifact@")
     ]
-    (evidence,) = [s for s in uploads if s["with"]["name"] == "review-evidence"]
+
+
+EVIDENCE_UPLOAD_NAME = "review-evidence-${{ github.run_attempt }}"
+
+
+def test_evidence_artifact_is_retained_90_days_one_per_attempt():
+    """A re-run attempt uploads its own artifact and cannot overwrite an earlier
+    attempt's, so blocking evidence survives a re-run."""
+    (evidence,) = [s for s in _upload_steps() if s["with"]["name"] == EVIDENCE_UPLOAD_NAME]
     assert evidence["with"]["retention-days"] == 90
-    assert evidence["with"]["overwrite"] is True
+    assert evidence["with"]["overwrite"] is False
     assert evidence["with"]["if-no-files-found"] == "error"
+    assert "if" not in evidence, "every run uploads evidence, including skipped ones"
 
 
-def test_decision_rests_on_the_findings_file():
-    # Final validation steps must not depend on the review action outcome.
+@pytest.mark.parametrize("attempt", ["1", "2", "17"])
+def test_uploaded_evidence_name_is_what_the_verdict_reads(attempt):
+    """The verdict only reads artifacts whose name fullmatches its pattern; an
+    upload name it does not match would read as "missing" for every run. The step
+    is found by what it uploads, not by the name under test."""
+    (evidence,) = [s for s in _upload_steps() if s["with"]["path"] == "review-evidence.json"]
+    name = evidence["with"]["name"].replace("${{ github.run_attempt }}", attempt)
+    assert _gate().EVIDENCE_ARTIFACT_NAME.fullmatch(name)
+
+
+def _gate():
+    spec = importlib.util.spec_from_file_location(
+        "code_gate_verdict", WORKFLOWS.parent / "scripts" / "code_gate_verdict.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_second_reviewer_attempt_runs_only_when_the_first_findings_are_invalid():
+    by_name = {s["name"]: s for s in _steps(REVIEW) if "name" in s}
+    first = by_name["Run code review (attempt 1)"]
+    second = by_name["Run code review (attempt 2)"]
+    assert first["continue-on-error"] is True
+    assert by_name["Validate findings (attempt 1)"]["continue-on-error"] is True
+    assert second["if"] == "steps.v1.outcome == 'failure'"
+    # The retry starts from the sentinel again, not from attempt 1's invalid file.
+    names = [s.get("name") for s in _steps(REVIEW)]
+    reseed = by_name["Reseed findings file for the retry"]
+    assert reseed["if"] == "steps.v1.outcome == 'failure'"
+    assert names.index(reseed["name"]) < names.index(second["name"])
+    assert "unreviewed" in reseed["run"]
+
+
+def test_decision_rests_on_the_findings_file_not_on_reviewer_outcome():
+    # A run with permission denials but valid findings must pass; a clean run with
+    # no findings file must fail. So no step may read the reviewer's outcome or its
+    # denial count after validation.
     steps = _steps(REVIEW)
     final_names = {"Check workspace is clean", "Validate findings", "Stamp review evidence"}
     final = [s for s in steps if s.get("name") in final_names]
-    assert len(final) == 3
-    assert {s["name"] for s in final} == final_names
+    assert [s["name"] for s in final] == [
+        "Check workspace is clean",
+        "Validate findings",
+        "Stamp review evidence",
+    ]
     for step in final:
         assert "continue-on-error" not in step
-        assert "steps.review" not in step.get("if", "")
+        assert "steps.review1" not in step.get("if", "") and "steps.review2" not in step.get(
+            "if", ""
+        )
+    assert "permission_denials" not in yaml.safe_dump(REVIEW)
