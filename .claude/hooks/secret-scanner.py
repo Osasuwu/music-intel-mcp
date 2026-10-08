@@ -1,4 +1,5 @@
 """PreToolUse hook: scan tool inputs for secret patterns before execution.
+# canary #244
 
 Handles three tool shapes:
 - File writes (Edit/Write/NotebookEdit): scans the text being written to disk
