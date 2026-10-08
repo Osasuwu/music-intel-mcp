@@ -1,6 +1,6 @@
 """conn_country → IANA-region map for local-wall-clock bucketize (#90, AC2).
 
-The Spotify Extended Streaming History source carries an ISO-3166 alpha-2
+The Spotify Extended Streaming History export carries an ISO-3166 alpha-2
 ``conn_country`` per play. To bucketize a play by the listener's *local* hour we
 shift its UTC timestamp into the region that country implies. This module is the
 country → region lookup only; the shift itself and the fallback chain live in
