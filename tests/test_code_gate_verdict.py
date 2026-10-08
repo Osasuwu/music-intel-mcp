@@ -105,6 +105,7 @@ def test_cosmetic_paths(path):
         "pyproject.toml",
         "LICENSE.py",  # LICENSE is matched by exact name, not as a prefix
         "LICENSE-check.sh",
+        "docs/domain/../AGENTS.md",  # a `..` component never reads as cosmetic
     ],
 )
 def test_code_paths(path):
@@ -1266,10 +1267,14 @@ def _payload_dispatch(**over):
 
 
 def _gather(runs, compare):
+    """Only the two listings the runs API is really asked are answered: the PR's head
+    SHA (a dispatch run's head is the default branch's commit, so it is not there) and
+    the default branch's dispatch runs. A wrong query is an unexpected call."""
     api = FakeApi(
         {
             COMPARE_PATH: compare,
-            RUNS_PATH: {"workflow_runs": runs},
+            f"{RUNS_PATH}?head_sha={SHA}&": {"workflow_runs": []},
+            f"{RUNS_PATH}?event=workflow_dispatch&branch=main&": {"workflow_runs": runs},
             DISPATCH_ARTIFACTS: {"artifacts": [_art(1, "review-evidence-1")]},
         },
         blobs={1: _evidence_zip()},
