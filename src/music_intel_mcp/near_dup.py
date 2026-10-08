@@ -157,7 +157,7 @@ def _evaluate_pair(store: UserStore, key_a: str, key_b: str, distance: float) ->
     if fp_a is not None and fp_b is not None:
         tier = TIER_FINGERPRINT_EMBEDDING
         match = match_fingerprints(fp_a, fp_b)
-        if match is None or match.ber > FINGERPRINT_BER_THRESHOLD:
+        if match is None or match.ber < FINGERPRINT_BER_THRESHOLD:
             return {
                 "tier": tier,
                 "fingerprint": None if match is None else _match_payload(match),
