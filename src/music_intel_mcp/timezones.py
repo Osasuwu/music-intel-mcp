@@ -3,7 +3,7 @@
 The Spotify Extended Streaming History source carries an ISO-3166 alpha-2
 ``conn_country`` per play. To bucketize a play by the listener's *local* hour we
 shift its UTC timestamp into the region that country implies. This module is the
-country → region lookup; the shift itself and the fallback chain live in
+country → region lookup only; the shift itself and the fallback chain live in
 ``analyzer._temporal_plays``.
 
 Two deliberate constraints (decision ``498eb9d1``):
