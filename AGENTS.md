@@ -32,7 +32,7 @@ Before marking any task complete:
 
 ## Process
 
-- **Branches** from `main`. One issue → one PR. PR body must `Closes #NNN`, or carry the `priority:critical` label (hotfix), or contain a `[no-issue]` body marker (drive-by / artifact PRs, e.g. grill CONTEXT.md notes), or use a `refactor:` / `refactor(scope):` title prefix — the four lanes of the universal owned-repo contract (jarvis#428).
+- **Branches** from `main`. One issue → one PR. PR body must `Closes #NNN` (an issue in another repo: `Closes owner/repo#NNN` or its URL; `Refs #NNN` links a partial-work PR without closing), or carry the `priority:critical` label (hotfix), or contain a `[no-issue]` line of its own in the body, or as the title's last token (drive-by / artifact PRs, e.g. grill CONTEXT.md notes), or use a `refactor:` / `refactor(scope):` title prefix — the four lanes of the universal owned-repo contract (jarvis#428).
 - **Decisions** belong in memory (`decisions.md`), not in PR bodies or markdown files. `CONTEXT.md` and `docs/domain/` capture *resolved* state; ephemeral debate goes to GitHub Discussions.
 - **TDD where the domain decides correctness** — recommendation scoring, similarity, anti-bubble penalty, importers. Write the failing test that defines "right answer" before the implementation.
 - **Vertical slices, not horizontal.** Each issue ships end-to-end (data → logic → test → CLI/output). Don't do "all loaders, then all scoring, then all output".
