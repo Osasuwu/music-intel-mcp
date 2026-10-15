@@ -16,7 +16,7 @@ cached in the shared store surface) so no Last.fm network call ever fires.
 
 Usage::
 
-    python scripts/sweep_validity_floor.py --data-dir data --user-id petr \\
+    python scripts/sweep_validity_floor.py --data-dir data --user-id <user-id> \\
         --out data/validity_floor_sweep_report.json
 
 The report is written to a **local file under the data dir and never

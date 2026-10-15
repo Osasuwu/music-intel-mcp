@@ -29,7 +29,7 @@ def test_profile_snapshot_round_trips(tmp_path, history_sample_path):
     shutil.copy(history_sample_path, tmp_path / "history.jsonl")
     store = UserStore(root=tmp_path)
     events = store.load_history()
-    profile = analyze(events, user_id="petr")
+    profile = analyze(events, user_id="test-user")
 
     path = store.write_profile(profile)
     assert path.exists()
@@ -42,7 +42,7 @@ def test_profile_snapshot_round_trips(tmp_path, history_sample_path):
 
 def test_snapshot_filename_is_filesystem_safe(tmp_path):
     store = UserStore(root=tmp_path)
-    profile = analyze([], user_id="petr")
+    profile = analyze([], user_id="test-user")
     path = store.write_profile(profile)
     # snapshot_id has '/' and ':' which are illegal on Windows; filename is sanitized
     assert "/" not in path.name
