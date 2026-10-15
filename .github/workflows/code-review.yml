@@ -398,8 +398,11 @@ jobs:
 
       # 90 days: the verdict re-reads this on every later event for the SHA; an
       # expired artifact turns the gate red ("re-dispatch the review"). One
-      # artifact per attempt, never overwritten: a re-run must not replace the
-      # blocking evidence an earlier attempt left (the verdict reads them all).
+      # artifact per attempt, never overwritten. A re-run still deletes the
+      # earlier attempts' artifacts, so the verdict keeps a blocking result
+      # sticky in its own ledger, not here (#251). Keep this step last and
+      # unconditional: the verdict treats a successful attempt as one that
+      # uploaded evidence.
       - name: Upload review evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

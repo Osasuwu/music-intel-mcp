@@ -7,11 +7,14 @@ evidence producer). Ported from Osasuwu/jarvis#1964 (locked design); issue #226.
 The rule ("Review evidence"). `verify-verdict` is green iff
   (a) at least one successful `code-review.yml` run bound to the evaluated head
       SHA carries a valid, non-blocking `review-evidence.json` artifact, no
-      artifact of any bound run or attempt is blocking (sticky: each attempt
-      uploads its own artifact, so neither a re-run nor a later clean run lifts
-      it, only a new commit does — but only while the artifact is retained, see
-      Osasuwu/like-current-song#236), none could not be downloaded, and no bound
-      run is unfinished; an expired, missing, malformed or mismatched artifact
+      artifact of any bound run or attempt is blocking, none could not be
+      downloaded, and no bound run is unfinished. Blocking is sticky for the
+      SHA: once read, it is recorded in the ledger this App keeps in its own
+      check run, so neither a re-run, a later clean run, nor the artifact being
+      deleted or expiring lifts it; only a new commit does. An attempt that
+      succeeded (so uploaded evidence) but whose artifact was gone before any
+      verdict read it is sticky red too, as `evidence-unobserved` (see the
+      ledger section, #251); an expired, missing, malformed or mismatched artifact
       is red only until a clean run for the SHA supersedes it (`status: skipped`
       artifacts are ignored), or
   (b) every changed file is cosmetic (see `is_cosmetic`).
@@ -67,8 +70,9 @@ REVIEW_WORKFLOW = ".github/workflows/code-review.yml"
 CHECK_NAME = "verify-verdict"
 EVIDENCE_ARTIFACT = "review-evidence"
 # One evidence artifact per run attempt (`review-evidence-<run_attempt>`, never
-# overwritten): a re-run cannot replace the evidence an earlier attempt left.
-EVIDENCE_ARTIFACT_NAME = re.compile(rf"{EVIDENCE_ARTIFACT}-[1-9][0-9]*")
+# overwritten). A re-run still deletes the earlier attempts' artifacts, and every
+# artifact expires: what keeps a blocking verdict in force is the ledger (#251).
+EVIDENCE_ARTIFACT_NAME = re.compile(rf"{EVIDENCE_ARTIFACT}-([1-9][0-9]*)")
 EVIDENCE_FILE = "review-evidence.json"
 EVIDENCE_SCHEMA = 1
 MAX_EVIDENCE_BYTES = 1 << 20
@@ -139,6 +143,14 @@ class Verdict(NamedTuple):
     green: bool
     code: str
     message: str
+
+
+class Observation(NamedTuple):
+    """What one evaluation read, for the ledger (see `observe`)."""
+
+    seen: frozenset
+    unseen: frozenset
+    blocking: bool
 
 
 # --- classification -------------------------------------------------------
@@ -356,7 +368,14 @@ _EVIDENCE_MESSAGES = {
     "evidence-invalid": "A review artifact is malformed. Re-dispatch the review.",
     "evidence-blocking": (
         "A review run reported blocking findings for this commit; that stays in force "
-        "for the SHA, across re-runs. Fix them and push a new commit."
+        "for the SHA, across re-runs and after its artifact is gone. "
+        "Fix them and push a new commit."
+    ),
+    "evidence-unobserved": (
+        "A review attempt for this commit succeeded, but its evidence was deleted "
+        "(a re-run) or expired before the gate read it, so it may have been blocking "
+        "(or the gate's record for this commit is unreadable). This stays in force "
+        "for the SHA; push a new commit."
     ),
     "evidence-unreadable": (
         "A review artifact could not be downloaded, so it may hide a blocking verdict. "
@@ -452,6 +471,112 @@ def evaluate_evidence(entries, pr_number, head_sha, base_ref, default_branch):
         if code in reds:
             return _verdict(code)
     return _verdict("evidence-none")
+
+
+# --- the ledger: stickiness that outlives the artifact (#251) -------------
+#
+# An artifact does not last: a re-run deletes the earlier attempts' artifacts and
+# every artifact expires after 90 days. So the gate keeps its own record of what it
+# has read for a SHA, in the `verify-verdict` check run it posts for that SHA (the
+# hidden block below, in `output.text`). Only this App can write that check run,
+# nobody can delete a check run, and a check run does not expire; a new commit gets
+# a new check run, hence an empty ledger. The ledger holds the attempts already read
+# (`<run id>:<attempt>`) and a sticky red, once one is due:
+#   evidence-blocking    a blocking artifact was read for the SHA;
+#   evidence-unobserved  an attempt succeeded, so it uploaded evidence, but the
+#                        artifact was gone (deleted or expired) before any verdict
+#                        read it: it may have been blocking.
+# A sticky red overrides every other verdict for the SHA, verdict-error included.
+
+LEDGER_VERSION = 1
+LEDGER_MARKER = "<!-- code-gate-ledger "
+LEDGER_RE = re.compile(r"<!-- code-gate-ledger (.*?) -->", re.S)
+_STICKY_RANK = {None: 0, "evidence-unobserved": 1, "evidence-blocking": 2}
+
+
+def empty_ledger():
+    return {"v": LEDGER_VERSION, "sticky": None, "observed": []}
+
+
+def observe(entries, pr_number, head_sha, base_ref, default_branch):
+    """What these entries tell the ledger: the attempts read now (`seen`), the
+    attempts whose evidence is gone (`unseen`), and whether any read is blocking."""
+    seen, unseen, blocking = set(), set(), False
+    for e in entries:
+        key = e.get("key")
+        if not key or not run_provenance(e["run"], pr_number, head_sha, default_branch):
+            continue
+        state = e.get("state")
+        if state == "ok":
+            seen.add(key)
+            if _judge_artifact(e["artifact"], head_sha, base_ref) == "evidence-blocking":
+                blocking = True
+        elif state in ("missing", "expired"):
+            unseen.add(key)
+    return Observation(frozenset(seen), frozenset(unseen), blocking)
+
+
+def parse_ledger(check):
+    """The ledger carried by one of this App's check runs.
+
+    No block: a check posted before the ledger existed; its title is the only
+    record, and a blocking one stays sticky. A block that does not parse fails
+    closed, as sticky `evidence-unobserved`.
+    """
+    output = check.get("output") or {}
+    text = output.get("text") or ""
+    if LEDGER_MARKER not in text:
+        ledger = empty_ledger()
+        if output.get("title") == f"{CHECK_NAME}: evidence-blocking":
+            ledger["sticky"] = "evidence-blocking"
+        return ledger
+    m = LEDGER_RE.search(text)
+    try:
+        data = json.loads(m.group(1)) if m else None
+    except ValueError:
+        data = None
+    if (
+        not isinstance(data, dict)
+        or data.get("v") != LEDGER_VERSION
+        or data.get("sticky") not in _STICKY_RANK
+        or not isinstance(data.get("observed"), list)
+        or not all(isinstance(k, str) for k in data["observed"])
+    ):
+        return dict(empty_ledger(), sticky="evidence-unobserved")
+    return {
+        "v": LEDGER_VERSION,
+        "sticky": data["sticky"],
+        "observed": sorted(set(data["observed"])),
+    }
+
+
+def merge_ledgers(ledgers):
+    """The strictest sticky and every attempt read, across this App's check runs."""
+    merged = empty_ledger()
+    observed = set()
+    for ledger in ledgers:
+        observed.update(ledger["observed"])
+        if _STICKY_RANK[ledger["sticky"]] > _STICKY_RANK[merged["sticky"]]:
+            merged["sticky"] = ledger["sticky"]
+    merged["observed"] = sorted(observed)
+    return merged
+
+
+def apply_ledger(verdict, ledger, observation):
+    """(the verdict to post, the ledger to write) after this evaluation."""
+    observed = set(ledger["observed"]) | observation.seen
+    sticky = ledger["sticky"]
+    if observation.blocking:
+        sticky = "evidence-blocking"
+    elif sticky is None and observation.unseen - observed:
+        sticky = "evidence-unobserved"
+    new = {"v": LEDGER_VERSION, "sticky": sticky, "observed": sorted(observed)}
+    return (_verdict(sticky) if sticky else verdict), new
+
+
+def ledger_text(ledger):
+    body = json.dumps(ledger, sort_keys=True, separators=(",", ":"))
+    return f"<!-- code-gate-ledger {body} -->"
 
 
 def evaluate_pr(pr, files, entries, default_branch):
@@ -620,38 +745,58 @@ def read_evidence_zip(blob):
 
 
 def load_entries(api, repo, run):
-    """A candidate run's entries: one per live evidence artifact (one per attempt).
+    """A candidate run's entries: one per attempt that left evidence, keyed
+    `<run id>:<attempt>` for the ledger.
 
-    State per entry: ok / unreadable (the download failed), or a single missing /
-    expired entry when the run has no live evidence artifact. A completed run is
-    read whatever its conclusion: an earlier attempt's blocking artifact outlives
-    a failed or cancelled re-run.
+    State per entry: ok / unreadable (the download failed) for a live artifact;
+    expired when the attempt's artifact is listed but expired; missing when it is
+    not listed at all although the attempt succeeded. The upload is the review
+    job's last step, so an attempt that succeeded uploaded evidence, and a re-run
+    deletes it (#251); an attempt that did not succeed left none and has no
+    entry. A completed run is read whatever its conclusion: an earlier attempt's
+    blocking artifact outlives a failed or cancelled re-run. A completed run with
+    no entry at all yields one bare missing entry, as an unfinished run does.
     """
     bare = {"run": run, "artifact": None, "state": "missing"}
     if run.get("status") != "completed" or run.get("conclusion") == "action_required":
         return [bare]
-    arts = [
-        a
-        for a in paged(api, f"repos/{repo}/actions/runs/{run['id']}/artifacts", key="artifacts")
-        if EVIDENCE_ARTIFACT_NAME.fullmatch(a.get("name") or "")
-    ]
-    live = [a for a in arts if not a.get("expired")]
-    if not live:
-        return [dict(bare, state="expired" if arts else "missing")]
+    by_attempt = {}
+    for a in paged(api, f"repos/{repo}/actions/runs/{run['id']}/artifacts", key="artifacts"):
+        m = EVIDENCE_ARTIFACT_NAME.fullmatch(a.get("name") or "")
+        if m:
+            by_attempt.setdefault(int(m.group(1)), []).append(a)
+    latest = max([run.get("run_attempt") or 1, *by_attempt])
     entries = []
-    for a in live:
-        try:
-            artifact = read_evidence_zip(
-                api.download(f"repos/{repo}/actions/artifacts/{a['id']}/zip")
-            )
-        except (OSError, http.client.HTTPException, UnreadableArtifact):
-            # URLError/HTTPError, a timeout, a reset, a cut-off or corrupt body:
-            # whatever the artifact said is unknown, so it must not read as
-            # "missing" or "malformed", both of which a clean run lifts.
-            entries.append(dict(bare, state="unreadable"))
+    for attempt in range(1, latest + 1):
+        keyed = dict(bare, key=f"{run['id']}:{attempt}")
+        arts = by_attempt.get(attempt, [])
+        live = [a for a in arts if not a.get("expired")]
+        if arts and not live:
+            entries.append(dict(keyed, state="expired"))
             continue
-        entries.append(dict(bare, artifact=artifact, state="ok"))
-    return entries
+        if not arts:
+            if attempt == latest:
+                concluded = run.get("conclusion")
+            else:
+                concluded = api(
+                    "GET", f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}"
+                ).get("conclusion")
+            if concluded == "success":
+                entries.append(keyed)
+            continue
+        for a in live:
+            try:
+                artifact = read_evidence_zip(
+                    api.download(f"repos/{repo}/actions/artifacts/{a['id']}/zip")
+                )
+            except (OSError, http.client.HTTPException, UnreadableArtifact):
+                # URLError/HTTPError, a timeout, a reset, a cut-off or corrupt body:
+                # whatever the artifact said is unknown, so it must not read as
+                # "missing" or "malformed", both of which a clean run lifts.
+                entries.append(dict(keyed, state="unreadable"))
+                continue
+            entries.append(dict(keyed, artifact=artifact, state="ok"))
+    return entries or [bare]
 
 
 def gather_entries(api, repo, pr_number, head_sha, default_branch):
@@ -727,25 +872,43 @@ def shared_head_verdict(pr, open_prs):
     )
 
 
-def post_check(api, repo, head_sha, verdict, app_id):
-    """PATCH this App's `verify-verdict` check run for the SHA; create one only if none exists."""
-    output = {"title": f"{CHECK_NAME}: {verdict.code}", "summary": verdict.message}
-    conclusion = "success" if verdict.green else "failure"
+def post_check(api, repo, head_sha, verdict, app_id, observation=None):
+    """PATCH this App's `verify-verdict` check runs for the SHA; create one only if
+    none exists. The ledger they carry is merged, updated with `observation` and
+    written back, and a sticky red it holds is what gets posted.
+
+    Returns (how, the verdict posted)."""
     existing = api(
-        "GET", f"repos/{repo}/commits/{head_sha}/check-runs?check_name={CHECK_NAME}&per_page=100"
+        "GET",
+        f"repos/{repo}/commits/{head_sha}/check-runs"
+        f"?check_name={CHECK_NAME}&filter=all&per_page=100",
     )
+    # Only this App's check runs: another app's same-named check can neither lift
+    # nor plant a sticky red.
     mine = [
         c
         for c in existing.get("check_runs", [])
         if str((c.get("app") or {}).get("id")) == str(app_id)
     ]
+    verdict, ledger = apply_ledger(
+        verdict,
+        merge_ledgers(parse_ledger(c) for c in mine),
+        observation or Observation(frozenset(), frozenset(), False),
+    )
+    output = {
+        "title": f"{CHECK_NAME}: {verdict.code}",
+        "summary": verdict.message,
+        "text": ledger_text(ledger),
+    }
+    conclusion = "success" if verdict.green else "failure"
     if mine:
-        api(
-            "PATCH",
-            f"repos/{repo}/check-runs/{mine[0]['id']}",
-            {"status": "completed", "conclusion": conclusion, "output": output},
-        )
-        return "patched"
+        for c in mine:
+            api(
+                "PATCH",
+                f"repos/{repo}/check-runs/{c['id']}",
+                {"status": "completed", "conclusion": conclusion, "output": output},
+            )
+        return "patched", verdict
     api(
         "POST",
         f"repos/{repo}/check-runs",
@@ -757,7 +920,7 @@ def post_check(api, repo, head_sha, verdict, app_id):
             "output": output,
         },
     )
-    return "created"
+    return "created", verdict
 
 
 # --- head content for the reviewer ----------------------------------------
@@ -953,6 +1116,7 @@ def cmd_verdict(_args):
     read = Api(os.environ["GH_TOKEN"])
     number = int(os.environ["PR_NUMBER"])
     failure = None
+    observation = None
     try:
         pr, files = fetch_pr_snapshot(read, repo, number)
         if pr["head"]["sha"] != head_sha:
@@ -971,9 +1135,11 @@ def cmd_verdict(_args):
         )
         if len(open_prs) >= 100 * MAX_PR_PAGES:
             raise RuntimeError("too many open PRs to check for a shared head")
-        verdict = shared_head_verdict(pr, open_prs) or evaluate_pr(
-            pr, files, gather_entries(read, repo, number, head_sha, default_branch), default_branch
-        )
+        verdict = shared_head_verdict(pr, open_prs)
+        if verdict is None:
+            entries = gather_entries(read, repo, number, head_sha, default_branch)
+            observation = observe(entries, number, head_sha, pr["base"]["ref"], default_branch)
+            verdict = evaluate_pr(pr, files, entries, default_branch)
     except Exception as exc:
         # Fail closed: a crash must not leave an earlier green check standing for
         # this SHA (attempt 1 clean, the re-run blocking, its listing reset).
@@ -984,8 +1150,15 @@ def cmd_verdict(_args):
             f"The verdict could not be computed ({type(exc).__name__}: {str(exc)[:200]}). "
             "Re-run the verdict job.",
         )
-    how = post_check(
-        Api(os.environ["GATE_TOKEN"]), repo, head_sha, verdict, os.environ["GATE_APP_ID"]
+    # The ledger (see `apply_ledger`) is read and written even on a crash: a
+    # verdict-error must not erase a sticky red.
+    how, verdict = post_check(
+        Api(os.environ["GATE_TOKEN"]),
+        repo,
+        head_sha,
+        verdict,
+        os.environ["GATE_APP_ID"],
+        observation,
     )
     color = "green" if verdict.green else "red"
     _summary(f"### {CHECK_NAME}: {color} — `{verdict.code}`\n\n{verdict.message}")
