@@ -4,7 +4,7 @@
 
 The `verify-verdict` check is green iff the PR is out of draft, its full changed-file list was read and is non-empty, and it touches no gate machinery; and then either:
 
-1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run attempt is blocking, has an artifact that cannot be read, or is still in progress; or
+1. At least one successful `code-review.yml` run bound to the evaluated head SHA carries a valid, non-blocking `review-evidence.json` artifact, AND no bound run attempt is blocking, has an artifact that cannot be read, or is still in progress, AND the verdict's own record for the SHA holds no sticky red (below); or
 2. Every changed file is on the cosmetic allow-list below: images, a few named root files, and markdown and images under `docs/domain/`. Other documentation is code.
 
 The preconditions fail as red `draft`, `files-incomplete` (the files API serves at most 3000), `files-empty` and `gate-machinery`. Two more reds come from provenance, not evidence: `shared-head`, and `untrusted-needs-dispatch` for a fork or Dependabot PR with no evidence yet (see below).
@@ -12,9 +12,9 @@ The preconditions fail as red `draft`, `files-incomplete` (the files API serves 
 The gate never reads PR comments, timestamps or headings, and the reviewer cannot comment (`gh pr comment` is disallowed). The artifact is the whole verdict.
 
 **Which red wins:**
-- **Blocking is sticky.** A blocking artifact stays in force for its commit even if a later run, or a re-run of the same run, is clean, and even if that re-run failed or was cancelled. The fix is a new commit. Known limit ([like-current-song#236](https://github.com/Osasuwu/like-current-song/issues/236)): this holds only while the blocking artifact is retained (90 days); once it expires, a clean result for the same SHA turns the check green.
+- **Blocking is sticky.** A blocking artifact stays in force for its commit even if a later run, or a re-run of the same run, is clean, even if that re-run failed or was cancelled, and after the artifact itself is gone (a re-run deletes the earlier attempts' artifacts, and every artifact expires after 90 days). The verdict records what it has read for the SHA in a hidden ledger in its own `verify-verdict` check run (`output.text`), which only the gate's App can write and which never expires; a sticky red there overrides every other verdict, `verdict-error` included. A review attempt that succeeded but whose artifact was gone before any verdict read it is red `evidence-unobserved` for the same reason: it may have been blocking. A ledger that cannot be parsed fails closed as `evidence-unobserved`. Either way the fix is a new commit.
 - **Unreadable is sticky until re-read.** An artifact the verdict could not download (cut-off body, size mismatch, oversized, network error) is red `evidence-unreadable` whatever else is clean, until the verdict job is re-run and reads it. Only a blocking artifact outranks it.
-- **Every other red clears on a clean run.** Missing, expired or malformed evidence is superseded as soon as a run for the same SHA comes back clean.
+- **Every other red clears on a clean run.** Missing, expired or malformed evidence that is not sticky (an attempt that was read clean before its artifact went, or one that never succeeded) is superseded as soon as a run for the same SHA comes back clean.
 - **A run still in progress holds the check at `evidence-pending`**, whatever the other runs say.
 - **A failed or cancelled run counts only for blocking evidence** an earlier attempt of it left; nothing else from it counts either way.
 - **A verdict crash is red.** If the verdict script itself raises, it posts red `verify-verdict: verdict-error` before failing the job; it never leaves the check unset or green.
@@ -33,7 +33,7 @@ The gate never reads PR comments, timestamps or headings, and the reviewer canno
 - Stages PR content as inert data under `.pr-head/` (not executable)
 - Runs the reviewer (Claude Code with 8 finding classes only)
 - Validates and stamps findings into `review-evidence.json`
-- Uploads it as `review-evidence-<run_attempt>`, one artifact per run attempt, never overwritten (`overwrite: false`), 90-day retention. A re-run cannot replace an earlier attempt's evidence; the verdict reads all of them.
+- Uploads it as `review-evidence-<run_attempt>`, one artifact per run attempt, never overwritten (`overwrite: false`), 90-day retention. A re-run deletes the earlier attempts' artifacts, so the verdict reads every attempt still live and keeps what it has read, and any blocking result, in its ledger (above).
 
 **Reviewer sandbox:**
 - The job token is read-only (`contents: read`, `pull-requests: read`; no `id-token`), and it is the token handed to the action.
