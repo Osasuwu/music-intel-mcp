@@ -59,7 +59,7 @@ def test_analyze_empty_input_is_honest_empty():
 
 def test_generated_from_counts_match_fixture(history_sample_path):
     events = _load(history_sample_path)
-    profile = analyze(events, user_id="petr", generated_at=FIXED_NOW)
+    profile = analyze(events, user_id="test-user", generated_at=FIXED_NOW)
     gf = profile.generated_from
     assert gf.n_events == 5
     # 3 unique tracks: spotify AAA (x2), isrc USABC... (x2), mbid 1111... (x1)
@@ -76,8 +76,8 @@ def test_generated_from_counts_match_fixture(history_sample_path):
 
 
 def test_snapshot_id_embeds_user_and_timestamp():
-    profile = analyze([], user_id="petr", generated_at=FIXED_NOW)
-    assert profile.snapshot_id.startswith("petr/")
+    profile = analyze([], user_id="test-user", generated_at=FIXED_NOW)
+    assert profile.snapshot_id.startswith("test-user/")
     assert "2026-06-09" in profile.snapshot_id
 
 
@@ -116,7 +116,7 @@ def test_analyze_runs_audio_stage_when_store_and_source_supplied():
 
     profile = analyze(
         events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         method_params=AUDIO_METHOD_PARAMS,
         shared_store=store,
@@ -135,7 +135,7 @@ def test_analyze_runs_audio_stage_when_store_and_source_supplied():
 
 def test_analyze_without_audio_source_stays_honest_empty():
     events, _ = _audio_events_and_source()
-    profile = analyze(events, user_id="petr", generated_at=FIXED_NOW)
+    profile = analyze(events, user_id="test-user", generated_at=FIXED_NOW)
     assert profile.roots == []
     assert profile.generated_from.coverage_per_category["audio"] == 0.0
 
@@ -157,7 +157,7 @@ def test_analyze_surfaces_audio_enrichment_diagnostics(history_sample_path):
 
     profile = analyze(
         events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         shared_store=InMemorySharedStore(),
         audio_source=source,
@@ -174,7 +174,7 @@ def test_analyze_without_enricher_reports_no_diagnostics():
     """Honest-empty: no audio source wired -> no audio diagnostics fabricated."""
     profile = analyze(
         [ListenEvent(track=TrackRef(mbid="m", name="n", artist="A"), played_at=EARLY, source="s")],
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
     )
     assert "audio" not in profile.generated_from.enrichment_diagnostics
@@ -231,7 +231,7 @@ def test_analyze_bridges_resolver_output_into_audio_enrichment():
 
     profile = analyze(
         events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         method_params=AUDIO_METHOD_PARAMS,
         shared_store=store,
@@ -252,7 +252,7 @@ def test_analyze_spotify_only_without_resolver_stays_honest_empty():
     events, source, _ = _spotify_only_audio_events_and_sources()
     profile = analyze(
         events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         method_params=AUDIO_METHOD_PARAMS,
         shared_store=InMemorySharedStore(),
@@ -344,7 +344,7 @@ def test_analyze_runs_scene_stage_when_store_and_tag_source_supplied():
 
     profile = analyze(
         events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         method_params=SCENE_METHOD_PARAMS,
         shared_store=store,
@@ -363,7 +363,7 @@ def test_analyze_does_not_mutate_caller_method_params():
     events, tag_source = _scene_events_and_source()
     analyze(
         events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         method_params=SCENE_METHOD_PARAMS,
         shared_store=InMemorySharedStore(),
@@ -375,7 +375,7 @@ def test_analyze_does_not_mutate_caller_method_params():
 
 def test_analyze_without_tag_source_stays_honest_empty_scene():
     events, _ = _scene_events_and_source()
-    profile = analyze(events, user_id="petr", generated_at=FIXED_NOW)
+    profile = analyze(events, user_id="test-user", generated_at=FIXED_NOW)
     assert profile.roots == []
     assert profile.generated_from.coverage_per_category["scene"] == 0.0
 
@@ -396,7 +396,7 @@ def test_analyze_runs_audio_and_scene_together():
 
     profile = analyze(
         audio_events + scene_events,
-        user_id="petr",
+        user_id="test-user",
         generated_at=FIXED_NOW,
         method_params=params,
         shared_store=store,

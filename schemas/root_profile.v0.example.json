@@ -3,8 +3,8 @@
 
   "schema_version": "v0",
   "model_maturity": "proxy",
-  "snapshot_id": "u-petr/2026-05-13T18:00:00Z",
-  "user_id": "petr",
+  "snapshot_id": "u-example/2026-05-13T18:00:00Z",
+  "user_id": "example",
 
   "generated_from": {
     "history_range": ["2024-12-01T00:00:00Z", "2026-05-13T18:00:00Z"],

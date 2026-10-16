@@ -8,7 +8,7 @@
     music-intel import-youtube --from <watch-history.json> [--data-dir ./data]
     music-intel import-account --from <dir> [--data-dir ./data]
                         [--mb-index PATH] [--artist-index PATH]
-    music-intel analyze --user-id petr [--data-dir ./data]
+    music-intel analyze [--user-id <user-id>] [--data-dir ./data]
                         [--with-audio] [--with-scene]
                         [--with-musicbrainz-genre] [--with-discogs]
                         [--ab-index PATH] [--mb-index PATH]

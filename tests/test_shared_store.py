@@ -96,7 +96,7 @@ def test_record_rejects_personal_fields():
             name="n",
             artist="a",
             fetched_at=T0,
-            user_id="petr",  # personal data has no place in the shared store
+            user_id="test-user",  # personal data has no place in the shared store
         )
 
 

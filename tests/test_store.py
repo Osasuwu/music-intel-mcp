@@ -30,7 +30,7 @@ def test_profile_snapshot_round_trips(tmp_path, history_sample_path):
     shutil.copy(history_sample_path, tmp_path / "history.jsonl")
     store = UserStore(root=tmp_path)
     events = store.load_history()
-    profile = analyze(events, user_id="petr")
+    profile = analyze(events, user_id="test-user")
 
     path = store.write_profile(profile)
     assert path.exists()
@@ -43,7 +43,9 @@ def test_profile_snapshot_round_trips(tmp_path, history_sample_path):
 
 def test_snapshot_filename_is_filesystem_safe(tmp_path):
     store = UserStore(root=tmp_path)
-    profile = analyze([], user_id="petr", generated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+    profile = analyze(
+        [], user_id="test-user", generated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    )
     # snapshot_id carries '/' and ':' (illegal in a Windows filename); the
     # assertion below is only meaningful while the input has both.
     assert "/" in profile.snapshot_id
@@ -51,11 +53,11 @@ def test_snapshot_filename_is_filesystem_safe(tmp_path):
     # Pre-create the subdirectory an unsanitized '/' would route into, so a
     # regression fails on the path assertion, not on write_text's
     # FileNotFoundError for a missing parent (#232).
-    (store.profiles_dir / "petr").mkdir(parents=True)
+    (store.profiles_dir / "test-user").mkdir(parents=True)
 
     path = store.write_profile(profile)
 
-    assert path == store.profiles_dir / "petr_2026-01-02T03_04_05_00_00.json"
+    assert path == store.profiles_dir / "test-user_2026-01-02T03_04_05_00_00.json"
     assert path.is_file()
 
 

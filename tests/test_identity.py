@@ -460,5 +460,5 @@ def test_resolved_identity_rejects_extra_fields():
             name="n",
             artist="a",
             level="spotify",
-            user_id="petr",  # personal data has no place in an identity record
+            user_id="test-user",  # personal data has no place in an identity record
         )

@@ -46,12 +46,12 @@ FIXTURE_AB = Path(__file__).parent / "fixtures" / "acousticbrainz_features_sampl
 def _analyze_args(*extra: str):
     """Parse an ``analyze`` argv through the real parser (so the flags are
     exercised too) and return the resulting namespace."""
-    return build_parser().parse_args(["analyze", "--user-id", "petr", *extra])
+    return build_parser().parse_args(["analyze", "--user-id", "test-user", *extra])
 
 
 def test_cli_analyze_writes_snapshot(tmp_path, history_sample_path, capsys):
     shutil.copy(history_sample_path, tmp_path / "history.jsonl")
-    rc = main(["analyze", "--user-id", "petr", "--data-dir", str(tmp_path)])
+    rc = main(["analyze", "--user-id", "test-user", "--data-dir", str(tmp_path)])
     assert rc == 0
 
     out = capsys.readouterr().out
@@ -63,7 +63,7 @@ def test_cli_analyze_writes_snapshot(tmp_path, history_sample_path, capsys):
     # a valid snapshot landed in the store and re-validates
     profile = UserStore(root=tmp_path).latest_profile()
     assert profile is not None
-    assert profile.user_id == "petr"
+    assert profile.user_id == "test-user"
     assert profile.roots == []
 
 
@@ -81,7 +81,7 @@ def test_cli_analyze_without_user_id_defaults_to_data_dir_basename(tmp_path):
 
 
 def test_cli_analyze_empty_history(tmp_path, capsys):
-    rc = main(["analyze", "--user-id", "petr", "--data-dir", str(tmp_path)])
+    rc = main(["analyze", "--user-id", "test-user", "--data-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
     assert "events=0" in out
@@ -92,7 +92,7 @@ def test_cli_analyze_prints_per_category_coverage(tmp_path, history_sample_path,
     """The honest-empty default prints coverage with no enrichment run: audio and
     scene are 0 (no source), temporal is 1.0 (every event carries a timestamp)."""
     shutil.copy(history_sample_path, tmp_path / "history.jsonl")
-    rc = main(["analyze", "--user-id", "petr", "--data-dir", str(tmp_path)])
+    rc = main(["analyze", "--user-id", "test-user", "--data-dir", str(tmp_path)])
     assert rc == 0
     assert "coverage: audio=0.00 scene=0.00 temporal=1.00" in capsys.readouterr().out
 
@@ -336,7 +336,7 @@ def test_cli_analyze_scene_without_key_fails_fast(
         [
             "analyze",
             "--user-id",
-            "petr",
+            "test-user",
             "--data-dir",
             str(tmp_path),
             "--with-scene",
@@ -360,7 +360,7 @@ def test_cli_analyze_supabase_without_creds_fails_fast(
         [
             "analyze",
             "--user-id",
-            "petr",
+            "test-user",
             "--data-dir",
             str(tmp_path),
             "--with-audio",
@@ -398,7 +398,7 @@ def test_cli_analyze_with_scene_runs_enrichment(tmp_path, capsys, monkeypatch):
         [
             "analyze",
             "--user-id",
-            "petr",
+            "test-user",
             "--data-dir",
             str(tmp_path),
             "--with-scene",
@@ -426,7 +426,7 @@ def test_cli_analyze_with_audio_no_dump_notes_zero_coverage(
         [
             "analyze",
             "--user-id",
-            "petr",
+            "test-user",
             "--data-dir",
             str(tmp_path),
             "--with-audio",
@@ -456,7 +456,7 @@ def test_cli_analyze_with_audio_bridges_isrc_to_mbid_and_enriches(
         [
             "analyze",
             "--user-id",
-            "petr",
+            "test-user",
             "--data-dir",
             str(tmp_path),
             "--with-audio",
@@ -519,7 +519,7 @@ def test_cli_main_loads_dotenv_credentials(tmp_path, capsys, monkeypatch):
         [
             "analyze",
             "--user-id",
-            "petr",
+            "test-user",
             "--data-dir",
             str(tmp_path),
             "--with-scene",
