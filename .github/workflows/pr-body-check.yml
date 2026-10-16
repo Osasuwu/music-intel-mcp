@@ -17,47 +17,73 @@ jobs:
             const repo = { owner: context.repo.owner, repo: context.repo.repo };
             const pr = context.payload.pull_request;
             const body = pr.body || '';
+            const title = pr.title || '';
             const labels = (pr.labels || []).map(l => l.name);
 
-            // Bot bypass: dependabot/renovate cannot author linked issues.
+            // Every bypass passes the check, so it leaves a notice on the run naming
+            // itself (#1967) — a silent green is indistinguishable from a linked PR.
+            const bypass = (name, why) => {
+              core.notice(`require-linked-issue bypassed: ${name} — ${why}`);
+            };
+
+            // Bot bypass: dependabot/renovate cannot author linked issues. Paperwork-only — pytest, gitleaks, meta-tests still gate.
             const author = (pr.user && pr.user.login) || '';
             if (author === 'dependabot[bot]' || author === 'renovate[bot]') {
-              console.log(`bot author (${author}) — skipping linked-issue requirement.`);
+              bypass('bot author', `${author} cannot author linked issues.`);
               return;
             }
 
             // Hotfix escape: priority:critical label bypasses the linked-issue requirement.
             if (labels.includes('priority:critical')) {
-              console.log('priority:critical — skipping linked-issue requirement (hotfix).');
+              bypass('priority:critical', 'hotfix label present.');
               return;
             }
 
-            // Drive-by lane: explicit [no-issue] marker for artifact/fix-inline PRs (jarvis#428).
-            if (/\[no-issue\]/i.test(body)) {
-              console.log('[no-issue] marker — skipping linked-issue requirement (drive-by).');
+            // Fix-inline escape (#428): the [no-issue] directive, on a body line of its
+            // own or as the title's last token (the squash commit title, matching the
+            // commit-msg convention in .pre-commit-config.yaml, #329). Anywhere else it
+            // is prose about the marker, not the directive (#1967).
+            if (/^\s*\[no-issue\]\s*$/im.test(body) || /(?:^|\s)\[no-issue\]\s*$/i.test(title)) {
+              bypass('[no-issue]', 'fix-inline drive-by per #428.');
               return;
             }
 
-            // Refactor lane: refactor: / refactor(scope): title prefix.
-            if (/^refactor(\([^)]*\))?:/i.test(pr.title || '')) {
-              console.log('refactor: title prefix — skipping linked-issue requirement.');
+            // Refactor escape: conventional-commit `refactor:` / `refactor(scope):` title
+            // bypasses the requirement. Refactors are usually structural cleanup with
+            // no parent feature/bug issue; the [no-issue] marker is redundant paperwork
+            // for this class. Same posture as #428 but auto-detected from title prefix.
+            if (/^refactor(\([^)]*\))?:/i.test(title)) {
+              bypass('refactor: title prefix', 'structural cleanup without a parent issue.');
               return;
             }
 
-            const issueMatches = [...body.matchAll(/(?:closes|fixes|resolves)\s+#(\d+)/gi)];
-            const issueNumbers = [...new Set(issueMatches.map(m => parseInt(m[1], 10)))];
+            // Linkage keywords: GitHub's closing keywords (close/closes/closed, fix/fixes/
+            // fixed, resolve/resolves/resolved) auto-close on merge; refs/references LINK
+            // WITHOUT closing (#1136 AC-GATE), so a partial-work PR uses `Refs #N` and
+            // leaves the issue open. The leading \b keeps `prefixes #12` from reading as
+            // `fixes #12` (#1967). A reference is `#N`, `owner/repo#N` or an issue URL,
+            // after whitespace or a colon (`Closes: #N`) — the forms GitHub links.
+            const linkRe = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?)(?::\s*|\s+)(?:#(\d+)|([\w.-]+)\/([\w.-]+)#(\d+)|https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))\b/gi;
+            const links = new Map();
+            for (const m of body.matchAll(linkRe)) {
+              const [owner, name, number] = m[1]
+                ? [repo.owner, repo.repo, m[1]]
+                : m[4] ? [m[2], m[3], m[4]] : [m[5], m[6], m[7]];
+              const ref = { owner, repo: name, issue_number: parseInt(number, 10) };
+              links.set(`${owner}/${name}#${ref.issue_number}`.toLowerCase(), ref);
+            }
 
-            if (issueNumbers.length === 0) {
-              core.setFailed('PR body must include a linked issue reference (e.g. "Closes #123"). Alternatives: priority:critical label (hotfix), a [no-issue] body marker (drive-by/artifact PR), or a refactor: title prefix.');
+            if (links.size === 0) {
+              core.setFailed('PR body must include a linked issue reference (e.g. "Closes #123" to auto-close, "Closes owner/repo#123" or "Closes https://github.com/owner/repo/issues/123" for an issue in another repo, or "Refs #123" to link a partial-work PR without closing), a [no-issue] line for trivial fix-inline drive-bys (#428), a refactor: title prefix, or the priority:critical label for hotfixes.');
               return;
             }
 
             const errors = [];
-            for (const issueNumber of issueNumbers) {
+            for (const ref of links.values()) {
               try {
-                await github.rest.issues.get({ ...repo, issue_number: issueNumber });
+                await github.rest.issues.get(ref);
               } catch (e) {
-                errors.push(`Linked issue #${issueNumber} does not exist or is not accessible.`);
+                errors.push(`Linked issue ${ref.owner}/${ref.repo}#${ref.issue_number} does not exist or is not accessible (the workflow token reads public repos only, so an issue in a private repo cannot be verified).`);
               }
             }
 
