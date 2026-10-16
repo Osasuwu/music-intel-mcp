@@ -76,8 +76,3 @@ If none of these settles it, ask the user for the path.
 | Workflows | `.github/workflows/` |
 | Pre-commit | `.pre-commit-config.yaml` |
 | Java archive | branch `legacy/java`, tag `v0-uni` — git refs, not paths on `main` (read-only reference) |
-
-## Related context (memory hooks)
-
-- `music_intel_mcp_project_revival` — brainstorm decisions (3 pillars, anti-bubble bias, multi-source enrichment, similarity strategies).
-- Decision episode `d94c44fb-03eb-4867-8440-9910f905a903` — repo revival + jarvis-style conventions.

@@ -2,7 +2,7 @@
 
 **Status: live, grown inline via `/grill`.** Authoritative source for terminology, invariants, and architectural decisions.
 
-The brainstorm in memory (`music_intel_mcp_project_revival`, `05e849cb-2026-05-13`) is *input*. Where this file disagrees with the brainstorm, this file wins.
+The original project brainstorm is *input*. Where this file disagrees with it, this file wins.
 
 ---
 
