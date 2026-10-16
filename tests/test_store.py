@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 
 import pytest
 
@@ -42,12 +43,20 @@ def test_profile_snapshot_round_trips(tmp_path, history_sample_path):
 
 def test_snapshot_filename_is_filesystem_safe(tmp_path):
     store = UserStore(root=tmp_path)
-    profile = analyze([], user_id="petr")
+    profile = analyze([], user_id="petr", generated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+    # snapshot_id carries '/' and ':' (illegal in a Windows filename); the
+    # assertion below is only meaningful while the input has both.
+    assert "/" in profile.snapshot_id
+    assert ":" in profile.snapshot_id
+    # Pre-create the subdirectory an unsanitized '/' would route into, so a
+    # regression fails on the path assertion, not on write_text's
+    # FileNotFoundError for a missing parent (#232).
+    (store.profiles_dir / "petr").mkdir(parents=True)
+
     path = store.write_profile(profile)
-    # snapshot_id has '/' and ':' which are illegal on Windows; filename is sanitized
-    assert "/" not in path.name
-    assert ":" not in path.name
-    assert path.suffix == ".json"
+
+    assert path == store.profiles_dir / "petr_2026-01-02T03_04_05_00_00.json"
+    assert path.is_file()
 
 
 def test_env_var_sets_data_dir(tmp_path, monkeypatch):
@@ -583,11 +592,15 @@ def test_old_format_consent_file_is_rejected_with_clear_message(tmp_path):
         json.dumps({"granted_at": "2026-01-01T00:00:00Z"}), encoding="utf-8"
     )
 
-    try:
+    with pytest.raises(ConsentFormatError) as excinfo:
         store.has_automated_playback_consent()
-        raise AssertionError("expected ConsentFormatError")
-    except ConsentFormatError as exc:
-        assert "old" in str(exc).lower() or "format" in str(exc).lower()
+
+    # "Clear" means actionable: the message names the stale file and the exact
+    # re-grant command (the `automated-playback-consent` subcommand's
+    # --grant/--grantor/--scope flags in cli.py), not just "old format" (#232).
+    message = str(excinfo.value)
+    assert str(store.automated_playback_consent_path) in message
+    assert "`automated-playback-consent --grant --grantor ... --scope ...`" in message
 
 
 def test_automated_playback_consent_is_independent_of_backfill_playlist_opt_in(
