@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keeps the SHA pins in .github/workflows current (#233); tests/test_workflow_action_pins.py
+  # fails if a `uses:` falls back to a movable tag. Monthly + grouped: a Dependabot PR is
+  # untrusted for the review gate (maintainer-run), so one PR per month bounds the cost.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    target-branch: main
+    groups:
+      github-actions:
+        patterns:
+          - "*"
