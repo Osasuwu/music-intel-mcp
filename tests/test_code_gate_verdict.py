@@ -12,6 +12,7 @@ import base64
 import http.client
 import importlib.util
 import json
+import re
 import urllib.error
 from pathlib import Path
 
@@ -1038,9 +1039,8 @@ def _downloads(api):
 
 
 def test_load_entries_reads_every_live_attempt():
-    """Expired attempt 3 is skipped: its verdict is gone. That is the known
-    retention bound on blocking stickiness (Osasuwu/like-current-song#236), not
-    the intended end state."""
+    """One entry per attempt, keyed `<run id>:<attempt>`: the live ones read, the
+    expired attempt 3 an expired entry (the ledger decides whether it sticks, #251)."""
     api = FakeApi(
         {
             ARTIFACTS_PATH: {
@@ -1053,9 +1053,37 @@ def test_load_entries_reads_every_live_attempt():
         },
         blobs={1: _evidence_zip(blocking=True), 2: _evidence_zip()},
     )
-    got = gate.load_entries(api, "o/r", _pr_run())
-    assert [(e["state"], e["artifact"]["blocking"]) for e in got] == [("ok", True), ("ok", False)]
+    got = gate.load_entries(api, "o/r", _pr_run(run_attempt=3))
+    assert [(e["key"], e["state"], (e["artifact"] or {}).get("blocking")) for e in got] == [
+        ("1001:1", "ok", True),
+        ("1001:2", "ok", False),
+        ("1001:3", "expired", None),
+    ]
     assert _downloads(api) == [1, 2]
+
+
+def test_load_entries_marks_a_successful_attempt_whose_artifact_vanished():
+    """A re-run deletes the earlier attempts' artifacts (#251). Attempt 1
+    succeeded, so it uploaded evidence that is gone now: a keyed missing entry.
+    Attempt 2 failed before the upload step, so it left none: no entry."""
+    api = FakeApi(
+        {
+            ARTIFACTS_PATH: {"artifacts": [_art(3, "review-evidence-3")]},
+            "repos/o/r/actions/runs/1001/attempts/1": {"conclusion": "success"},
+            "repos/o/r/actions/runs/1001/attempts/2": {"conclusion": "failure"},
+        },
+        blobs={3: _evidence_zip()},
+    )
+    got = gate.load_entries(api, "o/r", _pr_run(run_attempt=3))
+    assert [(e["key"], e["state"]) for e in got] == [("1001:1", "missing"), ("1001:3", "ok")]
+
+
+def test_load_entries_reads_the_latest_attempts_conclusion_from_the_run():
+    """No attempts call for the latest attempt: the run payload is its conclusion."""
+    api = FakeApi({ARTIFACTS_PATH: {"artifacts": []}})
+    got = gate.load_entries(api, "o/r", _pr_run(run_attempt=1))
+    assert [(e["key"], e["state"]) for e in got] == [("1001:1", "missing")]
+    assert [p for _, p, _ in api.calls if "/attempts/" in p] == []
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1107,7 @@ def test_load_entries_ignores_artifacts_not_named_review_evidence_attempt(name):
     assert _downloads(api) == [1]
 
 
-def test_load_entries_all_expired_is_one_expired_entry():
+def test_load_entries_all_expired_is_one_expired_entry_per_attempt():
     api = FakeApi(
         {
             ARTIFACTS_PATH: {
@@ -1090,8 +1118,11 @@ def test_load_entries_all_expired_is_one_expired_entry():
             }
         }
     )
-    got = gate.load_entries(api, "o/r", _pr_run())
-    assert [(e["state"], e["artifact"]) for e in got] == [("expired", None)]
+    got = gate.load_entries(api, "o/r", _pr_run(run_attempt=2))
+    assert [(e["key"], e["state"], e["artifact"]) for e in got] == [
+        ("1001:1", "expired", None),
+        ("1001:2", "expired", None),
+    ]
     assert _downloads(api) == []
 
 
@@ -1391,7 +1422,7 @@ GREEN = gate.Verdict(True, "cosmetic", "cosmetic")
 def test_post_check_patches_this_apps_existing_check_run():
     runs = [{"id": 9, "app": {"id": 123}}, {"id": 8, "app": {"id": 15368}}]
     api = FakeApi({CHECKS_PATH: {"check_runs": runs}})
-    assert gate.post_check(api, "o/r", SHA, RED, 123) == "patched"
+    assert gate.post_check(api, "o/r", SHA, RED, 123)[0] == "patched"
     method, path, body = api.calls[-1]
     assert (method, path) == ("PATCH", "repos/o/r/check-runs/9")
     assert body["conclusion"] == "failure"
@@ -1399,8 +1430,10 @@ def test_post_check_patches_this_apps_existing_check_run():
 
 
 def test_post_check_creates_only_when_the_app_has_none():
+    """A new commit has no check yet, so it starts with an empty ledger: that is
+    how a new commit, and only a new commit, clears a sticky red."""
     api = FakeApi({CHECKS_PATH: {"check_runs": [{"id": 8, "app": {"id": 15368}}]}})
-    assert gate.post_check(api, "o/r", SHA, GREEN, 123) == "created"
+    assert gate.post_check(api, "o/r", SHA, GREEN, 123)[0] == "created"
     method, path, body = api.calls[-1]
     assert (method, path) == ("POST", "repos/o/r/check-runs")
     assert (body["name"], body["head_sha"], body["conclusion"]) == (
@@ -1408,16 +1441,224 @@ def test_post_check_creates_only_when_the_app_has_none():
         SHA,
         "success",
     )
+    assert _ledger_of(body) == {"v": 1, "sticky": None, "observed": []}
+
+
+# --- the ledger: blocking stays sticky after its artifact is gone (#251) ----
+
+
+def _ledger_text(sticky, observed):
+    return (
+        "<!-- code-gate-ledger "
+        + json.dumps({"v": 1, "sticky": sticky, "observed": observed})
+        + " -->"
+    )
+
+
+def _check(id=9, app=123, title="verify-verdict: evidence-clean", text=None):
+    out = {"title": title, "summary": "s"}
+    if text is not None:
+        out["text"] = text
+    return {"id": id, "app": {"id": app}, "output": out}
+
+
+def _ledger_of(body):
+    m = re.search(r"<!-- code-gate-ledger (\{.*?\}) -->", body["output"].get("text") or "")
+    assert m, body["output"]
+    return json.loads(m.group(1))
+
+
+CLEAN = gate.Verdict(True, "evidence-clean", "clean")
+NOTHING = gate.Observation(frozenset(), frozenset(), False)
+
+
+def _post(checks, verdict, observation=NOTHING):
+    api = FakeApi({CHECKS_PATH: {"check_runs": checks}})
+    how, posted = gate.post_check(api, "o/r", SHA, verdict, 123, observation)
+    bodies = [body for m, _, body in api.calls if m in ("PATCH", "POST")]
+    return api, posted, bodies
+
+
+def test_post_check_reads_every_check_run_of_the_app_not_just_the_latest():
+    api, _, _ = _post([], CLEAN)
+    ((_, path, _),) = [c for c in api.calls if c[0] == "GET"]
+    assert "filter=all" in path
+
+
+def test_observed_blocking_is_written_to_the_ledger():
+    obs = gate.Observation(frozenset({"1001:1"}), frozenset(), True)
+    _, posted, (body,) = _post([_check()], gate._verdict("evidence-blocking"), obs)
+    assert posted.code == "evidence-blocking"
+    assert _ledger_of(body) == {"v": 1, "sticky": "evidence-blocking", "observed": ["1001:1"]}
+
+
+def test_ledgered_blocking_outlives_its_artifact_and_a_clean_result():
+    """AC1: the blocking artifact was read once; it is now deleted or expired and
+    a re-run came back clean. The SHA stays red, and the ledger keeps saying so."""
+    prior = _check(text=_ledger_text("evidence-blocking", ["1001:1"]))
+    obs = gate.Observation(frozenset({"1001:2"}), frozenset({"1001:1"}), False)
+    _, posted, (body,) = _post([prior], CLEAN, obs)
+    assert (posted.green, posted.code) == (False, "evidence-blocking")
+    assert body["conclusion"] == "failure"
+    assert body["output"]["title"] == "verify-verdict: evidence-blocking"
+    assert _ledger_of(body) == {
+        "v": 1,
+        "sticky": "evidence-blocking",
+        "observed": ["1001:1", "1001:2"],
+    }
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        gate.Verdict(False, "verdict-error", "boom"),
+        gate.Verdict(False, "draft", "draft"),
+        gate.Verdict(True, "cosmetic", "cosmetic"),
+    ],
+    ids=["verdict-error", "draft", "cosmetic"],
+)
+def test_no_other_verdict_erases_the_ledger(verdict):
+    prior = _check(text=_ledger_text("evidence-blocking", ["1001:1"]))
+    _, posted, (body,) = _post([prior], verdict)
+    assert posted.code == "evidence-blocking"
+    assert _ledger_of(body)["sticky"] == "evidence-blocking"
+
+
+def test_a_successful_attempt_never_read_before_it_vanished_is_sticky():
+    """The re-run raced the verdict: attempt 1's artifact was deleted before any
+    verdict read it. It may have been blocking, so the SHA stays red."""
+    obs = gate.Observation(frozenset({"1001:2"}), frozenset({"1001:1"}), False)
+    _, posted, (body,) = _post([_check()], CLEAN, obs)
+    assert (posted.green, posted.code) == (False, "evidence-unobserved")
+    assert _ledger_of(body)["sticky"] == "evidence-unobserved"
+
+
+def test_a_gone_artifact_that_was_read_clean_does_not_stick():
+    """AC2: attempt 1 was read clean and has expired since; a clean run lifts it."""
+    prior = _check(text=_ledger_text(None, ["1001:1"]))
+    obs = gate.Observation(frozenset({"2002:1"}), frozenset({"1001:1"}), False)
+    _, posted, (body,) = _post([prior], CLEAN, obs)
+    assert (posted.green, posted.code) == (True, "evidence-clean")
+    assert _ledger_of(body) == {"v": 1, "sticky": None, "observed": ["1001:1", "2002:1"]}
+
+
+def test_blocking_seen_later_upgrades_an_unobserved_sticky():
+    prior = _check(text=_ledger_text("evidence-unobserved", ["1001:2"]))
+    obs = gate.Observation(frozenset({"3003:1"}), frozenset(), True)
+    _, posted, _ = _post([prior], gate._verdict("evidence-blocking"), obs)
+    assert posted.code == "evidence-blocking"
+
+
+def test_another_apps_ledger_can_neither_lift_nor_plant():
+    """Only this App's check runs carry the ledger: a same-named check by another
+    app cannot clear a sticky red, nor make a clean SHA red."""
+    forged_clear = _check(id=8, app=999, text=_ledger_text(None, ["1001:1"]))
+    mine = _check(text=_ledger_text("evidence-blocking", ["1001:1"]))
+    _, posted, _ = _post([forged_clear, mine], CLEAN)
+    assert posted.code == "evidence-blocking"
+    forged_plant = _check(id=8, app=999, text=_ledger_text("evidence-blocking", []))
+    _, posted, _ = _post([forged_plant, _check()], CLEAN)
+    assert posted.code == "evidence-clean"
+
+
+def test_ledgers_of_several_own_check_runs_merge_and_all_are_patched():
+    a = _check(id=9, text=_ledger_text(None, ["1001:1"]))
+    b = _check(id=10, text=_ledger_text("evidence-blocking", ["1001:2"]))
+    api, posted, bodies = _post([a, b], CLEAN)
+    assert posted.code == "evidence-blocking"
+    assert sorted(p for m, p, _ in api.calls if m == "PATCH") == [
+        "repos/o/r/check-runs/10",
+        "repos/o/r/check-runs/9",
+    ]
+    assert all(_ledger_of(b)["observed"] == ["1001:1", "1001:2"] for b in bodies)
+
+
+def test_a_check_posted_before_the_ledger_existed_keeps_a_blocking_title_sticky():
+    legacy = _check(title="verify-verdict: evidence-blocking")
+    _, posted, _ = _post([legacy], CLEAN)
+    assert posted.code == "evidence-blocking"
+
+
+def test_a_check_posted_before_the_ledger_existed_with_another_title_is_an_empty_ledger():
+    legacy = _check(title="verify-verdict: evidence-none")
+    _, posted, (body,) = _post([legacy], CLEAN)
+    assert posted.code == "evidence-clean"
+    assert _ledger_of(body) == {"v": 1, "sticky": None, "observed": []}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<!-- code-gate-ledger {not json -->",
+        '<!-- code-gate-ledger {"v": 2, "sticky": null, "observed": []} -->',
+        '<!-- code-gate-ledger {"v": 1, "sticky": "evidence-none", "observed": []} -->',
+        '<!-- code-gate-ledger {"v": 1, "sticky": null, "observed": "1001:1"} -->',
+    ],
+    ids=["not-json", "unknown-version", "unknown-sticky", "observed-not-a-list"],
+)
+def test_an_unreadable_ledger_fails_closed(text):
+    _, posted, _ = _post([_check(text=text)], CLEAN)
+    assert (posted.green, posted.code) == (False, "evidence-unobserved")
+
+
+# --- observe: what one evaluation read, for the ledger ----------------------
+
+
+def _observe(entries):
+    return gate.observe(entries, pr_number=PR, head_sha=SHA, base_ref="main", default_branch="main")
+
+
+def _keyed(run, key, artifact="default", state="ok"):
+    return dict(_entry(run, artifact, state), key=key)
+
+
+def test_observe_records_read_attempts_and_blocking():
+    blocking = _artifact(blocking=True, findings=[{"class": "regression", "file": "a.py"}])
+    got = _observe(
+        [
+            _keyed(_pr_run(), "1001:1", blocking),
+            _keyed(_pr_run(), "1001:2"),
+            _keyed(_pr_run(), "1001:3", None, "missing"),
+            _keyed(_pr_run(), "1001:4", None, "expired"),
+            _keyed(_pr_run(), "1001:5", None, "unreadable"),
+        ]
+    )
+    assert got == gate.Observation(
+        frozenset({"1001:1", "1001:2"}), frozenset({"1001:3", "1001:4"}), True
+    )
+
+
+def test_observe_counts_blocking_from_a_foreign_base_run():
+    blocking = _artifact(blocking=True, findings=[{"class": "regression", "file": "a.py"}])
+    run = _pr_run(pull_requests=[_listed(PR, "main"), _listed(8, "release")])
+    assert _observe([_keyed(run, "1001:1", blocking)]).blocking is True
+
+
+def test_observe_ignores_runs_not_about_this_pr_and_sha():
+    blocking = _artifact(blocking=True, findings=[{"class": "regression", "file": "a.py"}])
+    got = _observe(
+        [
+            _keyed(_pr_run(head_sha=OTHER_SHA), "1001:1", blocking),
+            _keyed(_pr_run(id=1002, head_sha=OTHER_SHA), "1002:1", None, "missing"),
+        ]
+    )
+    assert got == NOTHING
+
+
+def test_observe_does_not_count_a_clean_artifact_as_blocking():
+    assert _observe([_keyed(_pr_run(), "1001:1")]).blocking is False
 
 
 # --- cmd_verdict (fake API) -----------------------------------------------
 
 
-def _run_verdict(monkeypatch, read_responses, blobs=None):
+def _run_verdict(monkeypatch, read_responses, blobs=None, checks=None):
     """cmd_verdict over a read API answering `read_responses` and a gate API whose
-    `verify-verdict` for the SHA is currently green (id 9, app 123)."""
+    `verify-verdict` for the SHA is `checks` (default: green, id 9, app 123)."""
     read = FakeApi(read_responses, blobs)
-    write = FakeApi({CHECKS_PATH: {"check_runs": [{"id": 9, "app": {"id": 123}}]}})
+    if checks is None:
+        checks = [{"id": 9, "app": {"id": 123}}]
+    write = FakeApi({CHECKS_PATH: {"check_runs": checks}})
     apis = {"read-token": read, "gate-token": write}
     monkeypatch.setattr(gate, "Api", lambda token: apis[token])
     env = {
@@ -1537,6 +1778,137 @@ def test_an_open_pr_listing_too_long_to_read_whole_fails_closed(monkeypatch):
         gate.cmd_verdict(None)
     ((_, body),) = _patched(write)
     assert body["output"]["title"] == "verify-verdict: verdict-error"
+
+
+# --- cmd_verdict end to end: stickiness past the artifact (#251) -------------
+
+
+ATTEMPT_1 = "repos/o/r/actions/runs/1001/attempts/1"
+
+
+def _rerun_responses(artifacts, attempt_1="success", **extra):
+    """Run 1001 re-run once (attempt 2 concluded success); `artifacts` is what the
+    artifacts listing shows now."""
+    return _snapshot_responses(
+        **{
+            RUNS_PATH: {"workflow_runs": [_pr_run(run_attempt=2)]},
+            ARTIFACTS_PATH: {"artifacts": artifacts},
+            ATTEMPT_1: {"conclusion": attempt_1},
+            **extra,
+        }
+    )
+
+
+def _title(write):
+    ((_, body),) = _patched(write)
+    return body["output"]["title"]
+
+
+def test_verdict_reads_blocking_then_the_rerun_deletes_it_stays_blocking(monkeypatch):
+    """AC1, deleted: event 1 reads attempt 1 blocking; the re-run deletes that
+    artifact and comes back clean; event 2 must still post blocking."""
+    first = _run_verdict(
+        monkeypatch,
+        _snapshot_responses(
+            **{
+                RUNS_PATH: {"workflow_runs": [_pr_run(run_attempt=1)]},
+                ARTIFACTS_PATH: {"artifacts": [_art(1, "review-evidence-1")]},
+            }
+        ),
+        blobs={1: _evidence_zip(blocking=True)},
+    )
+    assert gate.cmd_verdict(None) == 0
+    ((_, body),) = _patched(first)
+    assert body["output"]["title"] == "verify-verdict: evidence-blocking"
+    after = [_check(text=body["output"]["text"])]
+    second = _run_verdict(
+        monkeypatch,
+        _rerun_responses([_art(2, "review-evidence-2")]),
+        blobs={2: _evidence_zip()},
+        checks=after,
+    )
+    assert gate.cmd_verdict(None) == 0
+    assert _title(second) == "verify-verdict: evidence-blocking"
+
+
+def test_ledgered_blocking_stays_after_expiry_and_a_clean_redispatch(monkeypatch):
+    """AC1, expired: the blocking attempt expired, a dispatched review is clean."""
+    responses = _snapshot_responses(
+        **{
+            RUNS_PATH: {"workflow_runs": [_pr_run(run_attempt=1), _payload_dispatch()]},
+            ARTIFACTS_PATH: {"artifacts": [_art(1, "review-evidence-1", expired=True)]},
+            DISPATCH_ARTIFACTS: {"artifacts": [_art(5, "review-evidence-1")]},
+            COMPARE_PATH: {"status": "behind"},
+        }
+    )
+    write = _run_verdict(
+        monkeypatch,
+        responses,
+        blobs={5: _evidence_zip()},
+        checks=[_check(text=_ledger_text("evidence-blocking", ["1001:1"]))],
+    )
+    assert gate.cmd_verdict(None) == 0
+    assert _title(write) == "verify-verdict: evidence-blocking"
+
+
+def test_rerun_before_the_verdict_read_attempt_1_is_red_unobserved(monkeypatch):
+    """The race: nothing ever read attempt 1, a successful attempt whose artifact
+    the re-run deleted. A clean attempt 2 does not lift it."""
+    write = _run_verdict(
+        monkeypatch,
+        _rerun_responses([_art(2, "review-evidence-2")]),
+        blobs={2: _evidence_zip()},
+        checks=[_check()],
+    )
+    assert gate.cmd_verdict(None) == 0
+    assert _title(write) == "verify-verdict: evidence-unobserved"
+
+
+def test_rerun_after_a_failed_attempt_1_can_go_green(monkeypatch):
+    """Attempt 1 failed before uploading anything: there is nothing it could hide."""
+    write = _run_verdict(
+        monkeypatch,
+        _rerun_responses([_art(2, "review-evidence-2")], attempt_1="failure"),
+        blobs={2: _evidence_zip()},
+        checks=[_check()],
+    )
+    assert gate.cmd_verdict(None) == 0
+    assert _title(write) == "verify-verdict: evidence-clean"
+
+
+def test_clean_read_then_expired_is_lifted_by_a_clean_redispatch(monkeypatch):
+    """AC2: never blocking, attempt 1 read clean and since expired; a clean
+    dispatched review turns the SHA green."""
+    responses = _snapshot_responses(
+        **{
+            RUNS_PATH: {"workflow_runs": [_pr_run(run_attempt=1), _payload_dispatch()]},
+            ARTIFACTS_PATH: {"artifacts": [_art(1, "review-evidence-1", expired=True)]},
+            DISPATCH_ARTIFACTS: {"artifacts": [_art(5, "review-evidence-1")]},
+            COMPARE_PATH: {"status": "behind"},
+        }
+    )
+    write = _run_verdict(
+        monkeypatch,
+        responses,
+        blobs={5: _evidence_zip()},
+        checks=[_check(text=_ledger_text(None, ["1001:1"]))],
+    )
+    assert gate.cmd_verdict(None) == 0
+    assert _title(write) == "verify-verdict: evidence-clean"
+
+
+def test_a_crashing_verdict_keeps_the_ledger(monkeypatch):
+    """verdict-error must not erase what the gate already knows about the SHA."""
+    write = _run_verdict(
+        monkeypatch,
+        {f"repos/o/r/pulls/{PR}": urllib.error.URLError("dns")},
+        checks=[_check(text=_ledger_text("evidence-blocking", ["1001:1"]))],
+    )
+    with pytest.raises(OSError):
+        gate.cmd_verdict(None)
+    ((_, body),) = _patched(write)
+    assert body["conclusion"] == "failure"
+    assert _ledger_of(body) == {"v": 1, "sticky": "evidence-blocking", "observed": ["1001:1"]}
 
 
 # --- shared_head_verdict --------------------------------------------------
