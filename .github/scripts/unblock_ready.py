@@ -18,13 +18,21 @@ PR events (issues the PR closes via `Closes #N`, same repo only):
 - closed without merge: the issues go back as if reopened, unless another
   open PR still closes them. A merge needs nothing here: it closes the issue.
 
-The workflow runs this script in three modes, set by `MODE`:
+Scheduled pass (`reconcile`): a blocker closed in *another* repo emits no event
+here, and `dependent_repo` rightly refuses to write across repos with a
+GITHUB_TOKEN, so the event path never promotes such an issue. The pass reads the
+repo's own open issues and gives `status:ready` to each once-blocked issue that
+has no open blocker, no `status:*` and no `needs-*`. It also catches a same-repo
+event that was missed.
+
+The workflow runs this script in four modes, set by `MODE`:
 - `resolve`: work out which issues this event touches and with which planner,
   and emit them as the matrix the `sync` job fans out over. Reads only the
   event's own shape (linked issues, dependents) — never labels.
 - `apply`: one issue, one planner. Reads the issue's labels itself, so the
   snapshot it plans from is taken inside its own concurrency group.
 - `sweep` (manual dispatch): one-off cleanup of `status:*` on closed issues.
+- `reconcile` (schedule, manual dispatch): the scheduled pass above.
 
 Splitting resolve from apply is what makes the per-issue concurrency group
 possible: a PR event's target issue numbers are only known after the GraphQL
@@ -44,7 +52,7 @@ READY = "status:ready"
 REVIEW = "status:review"
 # Status labels that may coexist with ready; any other `status:*` means the
 # issue already moved past ready and must not be overwritten.
-COEXISTS_WITH_READY = {READY, "status:owner-queue"}
+COEXISTS_WITH_READY = {READY}
 # Statuses of work under way; stale once the issue is reopened or its PR dropped.
 IN_FLIGHT = {"status:in-progress", REVIEW, "status:rework-in-progress"}
 # Set by a hardware lifecycle workflow on close/reopen; not ours to touch.
@@ -138,6 +146,19 @@ def was_blocked(issue):
 def plan_unlabeled(issue):
     """A `needs-*` question was answered: promote, but only a once-blocked issue."""
     if not was_blocked(issue):
+        return [], []
+    return plan(issue)
+
+
+def plan_reconcile(issue):
+    """Scheduled pass: promote an open, once-blocked issue nothing holds any more.
+
+    Stricter than `plan` in two ways: the pass lists every open item, so a PR is
+    skipped, and an issue that never had a blocker is triage's, not ours. `plan`
+    already refuses any other `status:*` and any `needs-*`, and treats ready as
+    nothing to add.
+    """
+    if "pull_request" in issue or not was_blocked(issue):
         return [], []
     return plan(issue)
 
@@ -385,6 +406,26 @@ def sweep_closed(repo):
             page += 1
 
 
+def reconcile(repo):
+    """Give `status:ready` to every open issue whose blockers have all closed.
+
+    The listing is a snapshot, so a candidate is re-read and re-planned just
+    before its write: a PR event may have moved it on since the page was taken.
+    Adding a label does not reorder `state=open` (newest first), so paging on is
+    safe.
+    """
+    page = 1
+    while True:
+        batch = _api("GET", f"repos/{repo}/issues?state=open&per_page=100&page={page}")
+        for item in batch:
+            if plan_reconcile(item) == ([], []):
+                continue
+            apply(repo, _api("GET", f"repos/{repo}/issues/{item['number']}"), plan_reconcile)
+        if len(batch) < 100:
+            break
+        page += 1
+
+
 def main():
     repo = os.environ["GITHUB_REPOSITORY"]
     mode = os.environ.get("MODE", "resolve")
@@ -398,6 +439,8 @@ def main():
         apply(repo, issue, PLANNERS[os.environ["TARGET_MODE"]])
     elif mode == "sweep":
         sweep_closed(repo)
+    elif mode == "reconcile":
+        reconcile(repo)
     else:
         raise SystemExit(f"unexpected MODE={mode!r}")
 

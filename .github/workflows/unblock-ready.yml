@@ -6,7 +6,10 @@
 # - needs-* removed: re-evaluate an issue that was skipped for it;
 # - PR opened / ready for review: issues it closes move to status:review;
 # - PR closed unmerged: those issues go back to ready;
-# - manual dispatch: one-off sweep of status:* on closed issues.
+# - hourly schedule / manual dispatch (mode=reconcile): promote once-blocked issues
+#   nothing holds any more. A blocker closed in another repo emits no event here,
+#   and GITHUB_TOKEN cannot write across repos, so this pass is the only route;
+# - manual dispatch (mode=sweep): one-off sweep of status:* on closed issues.
 # Label writes use GITHUB_TOKEN, so they trigger no other workflows.
 # Logic + label rules: .github/scripts/unblock_ready.py
 name: Unblock Ready
@@ -16,7 +19,17 @@ on:
     types: [closed, reopened, unlabeled]
   pull_request:
     types: [opened, reopened, ready_for_review, edited, closed]
+  # Hourly: the label is the only cost of a pass, and an issue freed by a foreign
+  # blocker waits at most one cadence.
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "reconcile = promote unblocked issues; sweep = one-off status:* cleanup of closed issues"
+        type: choice
+        options: [reconcile, sweep]
+        default: reconcile
 
 permissions:
   contents: read
@@ -97,7 +110,7 @@ jobs:
   # legs, so it runs unfanned in its own group. It only strips labels from
   # closed issues, which no lifecycle event is competing to write.
   sweep:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'sweep'
     concurrency:
       group: unblock-ready-sweep
       cancel-in-progress: false
@@ -109,5 +122,25 @@ jobs:
       - name: Sweep status labels off closed issues
         env:
           MODE: sweep
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/unblock_ready.py
+
+  # Cross-repo gap: closing a blocker in another repo fires nothing here, so the
+  # event jobs above never see it. One pass over this repo's own open issues,
+  # own token. Its own group: the sweep and this pass never write the same label
+  # for the same reason, and the pass re-reads each issue before writing.
+  reconcile:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'reconcile')
+    concurrency:
+      group: unblock-ready-reconcile
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: .github/scripts
+      - name: Promote issues whose blockers have all closed
+        env:
+          MODE: reconcile
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 .github/scripts/unblock_ready.py
