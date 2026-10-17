@@ -1,11 +1,12 @@
 """Label decisions of .github/scripts/unblock_ready.py (issue and PR lifecycle events)."""
 
 import importlib.util
-import io
 import urllib.error
 from pathlib import Path
 
 import pytest
+
+from ._github_fake import FakeApi, FakeTransport, http_error, load_client
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / ".github" / "scripts").is_dir())
 _spec = importlib.util.spec_from_file_location(
@@ -157,188 +158,179 @@ def test_dropped_pr_skips_issue_another_open_pr_still_closes():
     assert unblock_ready.pr_issue_numbers(nodes, "owner/repo", dropped=False) == [1, 2]
 
 
-def test_removing_a_label_a_racing_run_already_removed_is_not_an_error(monkeypatch):
-    calls = []
+def _main(monkeypatch, api, mode, **env):
+    """Run main() in `mode` against `api`; answer the tokens make_client was given."""
+    tokens = []
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "job-token")
+    monkeypatch.setenv("MODE", mode)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
 
-    def fake_api(method, path, body=None):
-        calls.append((method, path))
-        if method == "DELETE":
-            raise urllib.error.HTTPError(path, 404, "Label does not exist", {}, None)
-        return None
+    def make_client(token):
+        tokens.append(token)
+        return api
 
-    monkeypatch.setattr(unblock_ready, "_api", fake_api)
+    unblock_ready.main(make_client=make_client)
+    return tokens
+
+
+def _deletes(api):
+    return [path for method, path, _ in api.calls if method == "DELETE"]
+
+
+def test_removing_a_label_a_racing_run_already_removed_is_not_an_error(capsys):
+    api = FakeApi(writes={"repos/owner/repo/issues/7/labels/": http_error(404, "Not Found")})
     issue = dict(_issue(["status:ready"], state="closed"), number=7)
-    unblock_ready.apply("owner/repo", issue, unblock_ready.plan_close)
-    assert calls == [("DELETE", "repos/owner/repo/issues/7/labels/status%3Aready")]
+    unblock_ready.apply(api, "owner/repo", issue, unblock_ready.plan_close)
+    assert api.calls == [("DELETE", "repos/owner/repo/issues/7/labels/status%3Aready", None)]
+    assert "#7: status:ready already gone\n" in capsys.readouterr().out
 
 
-def test_a_delete_failing_for_any_other_reason_still_raises(monkeypatch):
-    def fake_api(method, path, body=None):
-        raise urllib.error.HTTPError(path, 500, "boom", {}, None)
-
-    monkeypatch.setattr(unblock_ready, "_api", fake_api)
+def test_a_delete_failing_for_any_other_reason_still_raises():
+    api = FakeApi(writes={"repos/owner/repo/issues/7/labels/": http_error(500, "boom")})
     issue = dict(_issue(["status:ready"], state="closed"), number=7)
-    with pytest.raises(urllib.error.HTTPError):
-        unblock_ready.apply("owner/repo", issue, unblock_ready.plan_close)
-
-
-def _http_error(status, body="", headers=None):
-    return urllib.error.HTTPError(
-        "https://api.github.com/x", status, body, headers or {}, io.BytesIO(body.encode())
-    )
-
-
-def _api_over(monkeypatch, responses):
-    """Drive `_api` against a scripted sequence, with a sleep that never blocks."""
-    slept, queue = [], list(responses)
-
-    def fake_request(method, path, body=None):
-        outcome = queue.pop(0)
-        if isinstance(outcome, urllib.error.HTTPError):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(unblock_ready, "_request", fake_request)
-    return slept, lambda: queue
-
-
-def test_a_throttled_call_backs_off_and_then_succeeds(monkeypatch):
-    slept, _ = _api_over(
-        monkeypatch,
-        [_http_error(403, "You have exceeded a secondary rate limit"), {"ok": True}],
-    )
-    result = unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
-    assert result == {"ok": True}
-    assert slept == [1]
-
-
-def test_a_403_that_is_not_a_throttle_raises_without_retrying(monkeypatch):
-    slept, remaining = _api_over(monkeypatch, [_http_error(403, "Resource not accessible")])
-    with pytest.raises(urllib.error.HTTPError):
-        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
-    assert slept == []
-    assert remaining() == []
-
-
-def test_retry_after_sets_the_delay_and_is_capped(monkeypatch):
-    slept, _ = _api_over(monkeypatch, [_http_error(429, "slow down", {"Retry-After": "999"}), None])
-    unblock_ready._api("POST", "repos/o/r/issues/1/labels", sleep=slept.append)
-    assert slept == [unblock_ready.MAX_BACKOFF_SECONDS]
-
-
-def test_an_exhausted_primary_limit_waits_for_its_reset(monkeypatch):
-    headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000"}
-    slept, _ = _api_over(monkeypatch, [_http_error(403, "rate limit", headers), None])
-    monkeypatch.setattr(unblock_ready.time, "time", lambda: 970)
-    unblock_ready._api("POST", "repos/o/r/issues/1/labels", sleep=slept.append)
-    assert slept == [30]
-
-
-def test_a_throttle_that_never_clears_gives_up_after_the_attempt_cap(monkeypatch):
-    throttled = [_http_error(429, "slow down") for _ in range(unblock_ready.MAX_ATTEMPTS)]
-    slept, remaining = _api_over(monkeypatch, throttled)
-    with pytest.raises(urllib.error.HTTPError):
-        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
-    assert len(slept) == unblock_ready.MAX_ATTEMPTS - 1
-    assert remaining() == []
-
-
-def test_a_404_is_left_for_the_caller_to_tolerate(monkeypatch):
-    slept, _ = _api_over(monkeypatch, [_http_error(404, "Label does not exist")])
     with pytest.raises(urllib.error.HTTPError) as caught:
-        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
-    assert caught.value.code == 404
-    assert slept == []
+        unblock_ready.apply(api, "owner/repo", issue, unblock_ready.plan_close)
+    assert caught.value.code == 500
 
 
-def test_a_failing_call_logs_its_response_body(monkeypatch, capsys):
-    slept, _ = _api_over(monkeypatch, [_http_error(403, "Resource not accessible by integration")])
-    with pytest.raises(urllib.error.HTTPError):
-        unblock_ready._api("DELETE", "repos/o/r/issues/1/labels/x", sleep=slept.append)
-    assert "Resource not accessible by integration" in capsys.readouterr().out
+def _same_repo(number):
+    return {"number": number, "repository_url": "https://api.github.com/repos/owner/repo"}
 
 
-def test_a_closed_issue_resolves_to_itself_plus_what_it_unblocks(monkeypatch):
-    def fake_api(method, path, body=None):
-        assert path.startswith("repos/owner/repo/issues/5/dependencies/blocking")
-        return [
-            {"number": 6, "repository_url": "https://api.github.com/repos/owner/repo"},
-            {"number": 7, "repository_url": "https://api.github.com/repos/other/repo"},
-        ]
+def _blocking_api(*pages):
+    """#5's dependencies/blocking listing, answering page N with `pages[N - 1]`."""
 
-    monkeypatch.setattr(unblock_ready, "_api", fake_api)
-    assert unblock_ready.resolve_issue("owner/repo", "5", "closed") == [
+    def page(method, path, body):
+        return pages[int(path.rsplit("page=", 1)[1]) - 1]
+
+    return FakeApi(responses={"repos/owner/repo/issues/5/dependencies/blocking": page})
+
+
+def test_a_closed_issue_resolves_to_itself_plus_what_it_unblocks():
+    other = {"number": 7, "repository_url": "https://api.github.com/repos/other/repo"}
+    api = _blocking_api([_same_repo(6), other])
+    assert unblock_ready.resolve_issue(api, "owner/repo", "5", "closed") == [
         {"issue": 5, "mode": "close"},
         {"issue": 6, "mode": "promote"},
     ]
+    assert api.calls == [
+        ("GET", "repos/owner/repo/issues/5/dependencies/blocking?per_page=100&page=1", None)
+    ]
+
+
+def _closed_issue_env(tmp_path):
+    out = tmp_path / "github_output"
+    env = {"EVENT_NAME": "issues", "EVENT_ACTION": "closed", "ISSUE_NUMBER": "5"}
+    return out, dict(env, GITHUB_OUTPUT=str(out))
+
+
+def test_main_resolves_a_closed_issue_into_its_targets(monkeypatch, tmp_path):
+    out, env = _closed_issue_env(tmp_path)
+    tokens = _main(monkeypatch, _blocking_api([_same_repo(6)]), "resolve", **env)
+    assert tokens == ["job-token"]
+    assert out.read_text(encoding="utf-8") == (
+        'targets=[{"issue": 5, "mode": "close"}, {"issue": 6, "mode": "promote"}]\n'
+    )
+
+
+def test_a_blocking_listing_past_ten_full_pages_raises_and_writes_no_targets(monkeypatch, tmp_path):
+    # Past its cap the listing may hold the one dependent this close frees: emitting
+    # the targets read so far would leave that issue unpromoted with a green run.
+    out, env = _closed_issue_env(tmp_path)
+    full = [_same_repo(n) for n in range(100)]
+    api = _blocking_api(*[full] * 10)
+    with pytest.raises(load_client().ListingTruncated):
+        _main(monkeypatch, api, "resolve", **env)
+    assert not out.exists()
+    assert len(api.calls) == 10
 
 
 def test_reopen_and_unlabel_resolve_to_the_issue_alone():
-    assert unblock_ready.resolve_issue("owner/repo", "5", "reopened") == [
+    api = FakeApi()
+    assert unblock_ready.resolve_issue(api, "owner/repo", "5", "reopened") == [
         {"issue": 5, "mode": "reopen"}
     ]
-    assert unblock_ready.resolve_issue("owner/repo", "5", "unlabeled") == [
+    assert unblock_ready.resolve_issue(api, "owner/repo", "5", "unlabeled") == [
         {"issue": 5, "mode": "unlabel"}
+    ]
+    assert api.calls == []
+
+
+def _graphql_api(nodes, errors=None):
+    answer = {
+        "data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": nodes}}}}
+    }
+    if errors:
+        answer["errors"] = errors
+    return FakeApi(writes={"graphql": answer})
+
+
+def test_a_pr_going_up_resolves_its_issues_to_review():
+    api = _graphql_api([_linked(1), _linked(2, "other/repo")])
+    targets = unblock_ready.resolve_pr(api, "owner/repo", "3", "opened", merged=False)
+    assert targets == [{"issue": 1, "mode": "review"}]
+    variables = {"owner": "owner", "name": "repo", "pr": 3}
+    assert api.calls == [
+        ("POST", "graphql", {"query": unblock_ready.LINKED_ISSUES_QUERY, "variables": variables})
     ]
 
 
-def _fake_graphql(monkeypatch, nodes):
-    def fake_api(method, path, body=None):
-        assert (method, path) == ("POST", "graphql")
-        pr = {"closingIssuesReferences": {"nodes": nodes}}
-        return {"data": {"repository": {"pullRequest": pr}}}
-
-    monkeypatch.setattr(unblock_ready, "_api", fake_api)
-
-
-def test_a_pr_going_up_resolves_its_issues_to_review(monkeypatch):
-    _fake_graphql(monkeypatch, [_linked(1), _linked(2, "other/repo")])
-    targets = unblock_ready.resolve_pr("owner/repo", "3", "opened", merged=False)
-    assert targets == [{"issue": 1, "mode": "review"}]
-
-
-def test_a_dropped_pr_resolves_its_issues_back_as_a_reopen(monkeypatch):
-    _fake_graphql(monkeypatch, [_linked(1)])
-    targets = unblock_ready.resolve_pr("owner/repo", "3", "closed", merged=False)
+def test_a_dropped_pr_resolves_its_issues_back_as_a_reopen():
+    api = _graphql_api([_linked(1)])
+    targets = unblock_ready.resolve_pr(api, "owner/repo", "3", "closed", merged=False)
     assert targets == [{"issue": 1, "mode": "reopen"}]
 
 
+def test_a_graphql_errors_answer_raises_in_resolve_pr():
+    # The answer still carries partial data; relabelling from it would act on a
+    # lookup GitHub itself reported as failed.
+    api = _graphql_api([_linked(1)], errors=[{"message": "Something went wrong"}])
+    with pytest.raises(RuntimeError, match="GraphQL lookup failed"):
+        unblock_ready.resolve_pr(api, "owner/repo", "3", "opened", merged=False)
+
+
 def test_a_merged_pr_resolves_to_nothing():
-    assert unblock_ready.resolve_pr("owner/repo", "3", "closed", merged=True) == []
+    api = FakeApi()
+    assert unblock_ready.resolve_pr(api, "owner/repo", "3", "closed", merged=True) == []
+    assert api.calls == []
 
 
-def test_every_mode_the_resolver_emits_has_a_planner(monkeypatch):
-    _fake_graphql(monkeypatch, [_linked(1)])
-    emitted = {t["mode"] for t in unblock_ready.resolve_pr("owner/repo", "3", "opened", False)}
-    emitted |= {t["mode"] for t in unblock_ready.resolve_pr("owner/repo", "3", "closed", False)}
-    dep = [{"number": 6, "repository_url": "https://api.github.com/repos/owner/repo"}]
-    monkeypatch.setattr(unblock_ready, "_api", lambda *a, **k: dep)
+def test_every_mode_the_resolver_emits_has_a_planner():
+    api = _graphql_api([_linked(1)])
+    api.responses = _blocking_api([_same_repo(6)]).responses
+    emitted = {t["mode"] for t in unblock_ready.resolve_pr(api, "owner/repo", "3", "opened", False)}
+    emitted |= {
+        t["mode"] for t in unblock_ready.resolve_pr(api, "owner/repo", "3", "closed", False)
+    }
     for action in ("closed", "reopened", "unlabeled"):
-        emitted |= {t["mode"] for t in unblock_ready.resolve_issue("owner/repo", "5", action)}
+        emitted |= {t["mode"] for t in unblock_ready.resolve_issue(api, "owner/repo", "5", action)}
     assert emitted == set(unblock_ready.PLANNERS)
 
 
-def _sweep_api(pages, calls):
-    """Stub `_api` for a sweep: one status label, then `pages` of results.
+CLOSED_LISTING = "repos/owner/repo/issues?state=closed&labels=status%3Areview"
 
-    `pages` maps a 1-based page number to the list that page returns; a page
-    with no entry returns []. Every DELETE is recorded in `calls`.
-    """
 
-    def fake_api(method, path, body=None):
-        calls.append((method, path))
-        if method == "DELETE":
-            # The real API drops the label, so that issue leaves the result set.
-            number = int(path.split("/issues/", 1)[1].split("/", 1)[0])
-            for items in pages.values():
-                items[:] = [i for i in items if i["number"] != number]
-            return None
-        if "/labels?" in path:
-            return [{"name": "status:review"}]
-        page = int(path.rsplit("page=", 1)[1])
-        return pages.get(page, [])
+def _sweep_api(*pages):
+    """A sweep's API: one status label, then the closed `status:review` listing,
+    answering page N with `pages[N - 1]` and an empty page past them.
 
-    return fake_api
+    The listing does not shrink after a DELETE, as GitHub's label index keeps
+    serving a cleared issue for seconds; it refuses a second read of a page, so a
+    sweep that re-reads a page it changed fails here instead of spinning."""
+    reads = set()
+
+    def listing(method, path, body):
+        if path in reads:
+            raise AssertionError(f"closed listing page re-read: {path}")
+        reads.add(path)
+        number = int(path.rsplit("page=", 1)[1])
+        return pages[number - 1] if number <= len(pages) else []
+
+    return FakeApi(
+        responses={"repos/owner/repo/labels": [{"name": "status:review"}], CLOSED_LISTING: listing}
+    )
 
 
 def _closed(number, is_pr=False):
@@ -348,39 +340,99 @@ def _closed(number, is_pr=False):
     return item
 
 
-def test_sweep_leaves_pull_requests_alone(monkeypatch):
+def test_sweep_leaves_pull_requests_alone():
     # `GET /issues` lists PRs too, and a label DELETE on a PR needs
     # `pull-requests: write` — the sweep job only has `issues: write`, so
     # touching one dies with 403 "Resource not accessible by integration".
-    calls = []
-    pages = {1: [_closed(1833, is_pr=True), _closed(1840)]}
-    monkeypatch.setattr(unblock_ready, "_api", _sweep_api(pages, calls))
-    unblock_ready.sweep_closed("owner/repo")
-    deletes = [path for method, path in calls if method == "DELETE"]
-    assert deletes == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
+    api = _sweep_api([_closed(1833, is_pr=True), _closed(1840)])
+    unblock_ready.sweep_closed(api, "owner/repo")
+    assert _deletes(api) == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
 
 
-def test_sweep_pages_past_a_full_page_of_pull_requests(monkeypatch):
-    # Page 1 never shrinks — nothing on it is ours to relabel — so re-asking
-    # for it would spin forever. The issues behind it must still get swept.
-    calls = []
-    pages = {1: [_closed(n, is_pr=True) for n in range(100)], 2: [_closed(1840)]}
-    monkeypatch.setattr(unblock_ready, "_api", _sweep_api(pages, calls))
-    unblock_ready.sweep_closed("owner/repo")
-    deletes = [path for method, path in calls if method == "DELETE"]
-    assert deletes == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
+def test_sweep_pages_past_a_full_page_of_pull_requests():
+    # Nothing on page 1 is ours to relabel; the issues behind it must still get swept.
+    api = _sweep_api([_closed(n, is_pr=True) for n in range(100)], [_closed(1840)])
+    unblock_ready.sweep_closed(api, "owner/repo")
+    assert _deletes(api) == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
 
 
-def test_sweep_stops_on_a_page_it_changed_nothing_on(monkeypatch):
-    # GitHub keeps serving an issue under a label for seconds after the DELETE
-    # that cleared it. Those repeats plan to nothing, so the page never shrinks
-    # — a loop that re-asks while the page merely *has* issues spins forever.
-    calls = []
-    stale = {"number": 1840, "state": "closed", "labels": []}
-    monkeypatch.setattr(unblock_ready, "_api", _sweep_api({1: [stale]}, calls))
-    unblock_ready.sweep_closed("owner/repo")
-    assert [path for method, path in calls if method == "DELETE"] == []
-    assert sum(1 for _, path in calls if "state=closed" in path) == 1  # no re-ask
+def test_sweep_reads_each_closed_issues_page_once():
+    # The listing is read whole before any DELETE, so its pages cannot shift under
+    # the sweep and a page it changed is never asked for again. #1841 is a stale
+    # entry the label index still serves after the DELETE that cleared it.
+    stale = {"number": 1841, "state": "closed", "labels": []}
+    api = _sweep_api([_closed(1840), stale])
+    unblock_ready.sweep_closed(api, "owner/repo")
+    assert _deletes(api) == ["repos/owner/repo/issues/1840/labels/status%3Areview"]
+    assert sum(1 for _, path, _ in api.calls if "state=closed" in path) == 1
+
+
+def test_a_truncated_closed_listing_is_swept_as_far_as_it_was_read_and_then_raises():
+    # A rerun converges: every issue stripped here leaves the listing.
+    items = [_closed(0, is_pr=True)] + [_closed(n) for n in range(1, 1000)]
+    api = _sweep_api(*[items[start : start + 100] for start in range(0, 1000, 100)])
+    with pytest.raises(load_client().ListingTruncated):
+        unblock_ready.sweep_closed(api, "owner/repo")
+    deletes = _deletes(api)
+    assert len(deletes) == 999
+    assert deletes[0] == "repos/owner/repo/issues/1/labels/status%3Areview"
+    assert deletes[-1] == "repos/owner/repo/issues/999/labels/status%3Areview"
+
+
+def test_a_truncated_labels_listing_raises_before_any_closed_listing_is_read_or_written():
+    # A sweep over part of the labels would skip every `status:*` label past the cap
+    # with a green run; it must raise before reading a closed listing or writing.
+    pages = [[{"name": f"status:s{page}-{n}"} for n in range(100)] for page in range(10)]
+
+    def labels(method, path, body):
+        return pages[int(path.rsplit("page=", 1)[1]) - 1]
+
+    closed = [{"number": 9, "state": "closed", "labels": [{"name": "status:review"}]}]
+    api = FakeApi(
+        responses={
+            "repos/owner/repo/labels": labels,
+            "repos/owner/repo/issues?state=closed": closed,
+        }
+    )
+    with pytest.raises(
+        load_client().ListingTruncated, match=r"^listing repos/owner/repo/labels truncated: "
+    ):
+        unblock_ready.sweep_closed(api, "owner/repo")
+    assert api.calls == [
+        ("GET", f"repos/owner/repo/labels?per_page=100&page={n}", None) for n in range(1, 11)
+    ]
+
+
+def test_main_builds_its_own_client_with_the_job_token_and_the_unblock_ready_agent(monkeypatch):
+    """The production `_make_client`, not an injected one: `main()` runs with only the
+    transport patched, so a wrong token, user agent or constructor call goes red here."""
+    gh = load_client()
+    issue = dict(_issue(["status:ready"], state="closed"), number=5)
+    transport = FakeTransport([issue, b""])
+    monkeypatch.setattr(gh, "urllib_transport", transport)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "job-token")
+    monkeypatch.setenv("MODE", "apply")
+    monkeypatch.setenv("TARGET_ISSUE", "5")
+    monkeypatch.setenv("TARGET_MODE", "close")
+    unblock_ready.main()
+    assert [
+        (r.method, r.url, r.headers["authorization"], r.headers["user-agent"])
+        for r in transport.requests
+    ] == [
+        (
+            "GET",
+            "https://api.github.com/repos/owner/repo/issues/5",
+            "Bearer job-token",
+            "unblock-ready",
+        ),
+        (
+            "DELETE",
+            "https://api.github.com/repos/owner/repo/issues/5/labels/status%3Aready",
+            "Bearer job-token",
+            "unblock-ready",
+        ),
+    ]
 
 
 def test_an_unlabel_promotes_only_an_issue_that_was_once_blocked():
@@ -432,73 +484,79 @@ def test_reconcile_leaves_an_issue_that_already_carries_ready_alone():
     assert unblock_ready.plan_reconcile(_listed(1, labels=("status:ready",))) == ([], [])
 
 
-def _reconcile_api(pages, calls):
-    """Stub `_api` for a reconcile: `pages` is the open-issue listing, keyed by page.
+def _reconcile_api(*pages):
+    """A reconcile's API: the open-issue listing answers page N with `pages[N - 1]`
+    and an empty page past them; a single issue's GET answers from the same data,
+    as the real endpoint does."""
+    by_number = {i["number"]: i for items in pages for i in items}
 
-    A single issue's GET answers from the same data, as the real endpoint does.
-    """
-    by_number = {i["number"]: i for items in pages.values() for i in items}
+    def listing(method, path, body):
+        number = int(path.rsplit("page=", 1)[1])
+        return pages[number - 1] if number <= len(pages) else []
 
-    def fake_api(method, path, body=None):
-        calls.append((method, path, body))
-        if method == "POST":
-            return None
-        if "/issues?" in path:
-            return pages.get(int(path.rsplit("page=", 1)[1]), [])
+    def one(method, path, body):
         return by_number[int(path.rsplit("/issues/", 1)[1])]
 
-    return fake_api
+    return FakeApi(
+        responses={"repos/owner/repo/issues?state=open": listing, "repos/owner/repo/issues/": one}
+    )
 
 
-def test_reconcile_labels_each_freshly_unblocked_issue_and_nothing_else(monkeypatch):
-    calls = []
-    pages = {
-        1: [
+def _writes(api):
+    return [(m, p, b) for m, p, b in api.calls if m != "GET"]
+
+
+def test_reconcile_labels_each_freshly_unblocked_issue_and_nothing_else():
+    api = _reconcile_api(
+        [
             _listed(10),
             _listed(11, open_blockers=1),
             _listed(12, labels=("task", "status:review")),
             _listed(13, is_pr=True),
             _listed(14, total_blockers=0),
         ]
-    }
-    monkeypatch.setattr(unblock_ready, "_api", _reconcile_api(pages, calls))
-    unblock_ready.reconcile("owner/repo")
-    writes = [(m, p, b) for m, p, b in calls if m != "GET"]
-    assert writes == [("POST", "repos/owner/repo/issues/10/labels", {"labels": ["status:ready"]})]
+    )
+    unblock_ready.reconcile(api, "owner/repo")
+    assert _writes(api) == [
+        ("POST", "repos/owner/repo/issues/10/labels", {"labels": ["status:ready"]})
+    ]
 
 
-def test_reconcile_pages_through_a_full_page_of_open_issues(monkeypatch):
-    calls = []
-    pages = {1: [_listed(n, total_blockers=0) for n in range(100)], 2: [_listed(500)]}
-    monkeypatch.setattr(unblock_ready, "_api", _reconcile_api(pages, calls))
-    unblock_ready.reconcile("owner/repo")
-    writes = [(m, p) for m, p, _ in calls if m != "GET"]
-    assert writes == [("POST", "repos/owner/repo/issues/500/labels")]
+def test_reconcile_pages_through_a_full_page_of_open_issues():
+    api = _reconcile_api([_listed(n, total_blockers=0) for n in range(100)], [_listed(500)])
+    unblock_ready.reconcile(api, "owner/repo")
+    assert [(m, p) for m, p, _ in _writes(api)] == [("POST", "repos/owner/repo/issues/500/labels")]
 
 
-def test_reconcile_replans_from_a_fresh_read_before_writing(monkeypatch):
+def test_reconcile_labels_what_it_read_and_then_raises_on_a_truncated_listing():
+    full = [_listed(n, total_blockers=0) for n in range(100)]
+    pages = [full] * 9 + [[_listed(900)] + full[1:]]
+    api = _reconcile_api(*pages)
+    with pytest.raises(load_client().ListingTruncated):
+        unblock_ready.reconcile(api, "owner/repo")
+    assert [(m, p) for m, p, _ in _writes(api)] == [("POST", "repos/owner/repo/issues/900/labels")]
+
+
+def test_reconcile_replans_from_a_fresh_read_before_writing():
     # The listing is a snapshot: by the time the pass reaches #10 a PR event may
     # have moved it to review. The write must follow the labels as they are now.
-    calls = []
-    listing = {1: [_listed(10)]}
-    api = _reconcile_api(listing, calls)
-
-    def racing_api(method, path, body=None):
-        if method == "GET" and path.endswith("/issues/10"):
-            return _listed(10, labels=("task", "status:review"))
-        return api(method, path, body)
-
-    monkeypatch.setattr(unblock_ready, "_api", racing_api)
-    unblock_ready.reconcile("owner/repo")
-    assert [c for c in calls if c[0] == "POST"] == []
+    api = _reconcile_api([_listed(10)])
+    api.responses["repos/owner/repo/issues/10"] = _listed(10, labels=("task", "status:review"))
+    unblock_ready.reconcile(api, "owner/repo")
+    assert _writes(api) == []
 
 
 def test_main_runs_the_reconcile_mode(monkeypatch):
-    calls = []
-    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
-    monkeypatch.setenv("MODE", "reconcile")
-    monkeypatch.setattr(unblock_ready, "_api", _reconcile_api({1: [_listed(10)]}, calls))
-    unblock_ready.main()
-    assert [(m, p) for m, p, _ in calls if m == "POST"] == [
-        ("POST", "repos/owner/repo/issues/10/labels")
+    api = _reconcile_api([_listed(10)])
+    tokens = _main(monkeypatch, api, "reconcile")
+    assert tokens == ["job-token"]
+    assert [(m, p) for m, p, _ in _writes(api)] == [("POST", "repos/owner/repo/issues/10/labels")]
+
+
+def test_main_applies_the_target_mode_to_a_fresh_read_of_the_issue(monkeypatch):
+    api = FakeApi(responses={"repos/owner/repo/issues/7": dict(_closed(7))})
+    _main(monkeypatch, api, "apply", TARGET_ISSUE="7", TARGET_MODE="close")
+    assert api.calls == [
+        ("GET", "repos/owner/repo/issues/7", None),
+        ("DELETE", "repos/owner/repo/issues/7/labels/status%3Areview", None),
     ]
