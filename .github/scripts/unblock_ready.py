@@ -38,15 +38,19 @@ Splitting resolve from apply is what makes the per-issue concurrency group
 possible: a PR event's target issue numbers are only known after the GraphQL
 lookup, so the workflow cannot key a group on them until `resolve` has run.
 
-Stdlib only: the job needs no dependency install.
+Stdlib plus `github_client.py` beside this script, itself stdlib-only: the job
+needs no dependency install. Every API call goes through the shared client
+(#2068), with its timeout, retry and throttle policy; `main(make_client=...)` is
+the tests' seam. A listing past the client's page cap raises `ListingTruncated`
+and turns the run red, after acting on what it did read where that is safe.
 """
 
+import importlib.util
 import json
 import os
-import time
-import urllib.error
+import sys
 import urllib.parse
-import urllib.request
+from pathlib import Path
 
 READY = "status:ready"
 REVIEW = "status:review"
@@ -57,11 +61,6 @@ COEXISTS_WITH_READY = {READY}
 IN_FLIGHT = {"status:in-progress", REVIEW, "status:rework-in-progress"}
 # Set by a hardware lifecycle workflow on close/reopen; not ours to touch.
 HARDWARE_PREFIX = "status:hardware-"
-# Throttle handling: a sweep's burst of mutations trips GitHub's secondary rate
-# limit, which answers 403 with no machine-readable marker beyond this phrase.
-SECONDARY_LIMIT_HINT = "secondary rate limit"
-MAX_ATTEMPTS = 5
-MAX_BACKOFF_SECONDS = 60
 # `needs-grill`, `needs-triage`, `needs-safety-review`, ...: an open question
 # that must be answered before the issue is ready.
 NEEDS_PREFIX = "needs-"
@@ -201,127 +200,62 @@ def dependent_repo(dep, repo):
     return repo if url.split("/repos/", 1)[1].lower() == repo.lower() else None
 
 
-def _throttle_delay(status, headers, payload, attempt, now=None):
-    """Seconds to wait before retrying a throttled request, or None if it isn't one.
-
-    A `sweep` pass fires a long burst of mutations, and GitHub answers a burst
-    with the *secondary* rate limit — which shares its status code with a plain
-    permission failure, so the code alone can't tell them apart. The headers
-    can: `Retry-After` is what the secondary limiter sends, and an exhausted
-    primary limit sends `x-ratelimit-remaining: 0` with a reset epoch. Absent
-    both, a 403 whose body doesn't name the secondary limit is a real 403 and
-    must surface rather than be retried into silence. A 429 is unambiguous.
-    """
-    headers = headers or {}
-    retry_after = _positive_int(headers.get("Retry-After"))
-    if retry_after is not None:
-        return min(retry_after, MAX_BACKOFF_SECONDS)
-    if headers.get("x-ratelimit-remaining") == "0":
-        reset = _positive_int(headers.get("x-ratelimit-reset"))
-        now = int((now or time.time)())
-        return min(max(reset - now, 1), MAX_BACKOFF_SECONDS) if reset else MAX_BACKOFF_SECONDS
-    if status == 429 or SECONDARY_LIMIT_HINT in (payload or "").lower():
-        return min(2**attempt, MAX_BACKOFF_SECONDS)
-    return None
-
-
-def _positive_int(value):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _request(method, path, body=None):
-    req = urllib.request.Request(
-        f"https://api.github.com/{path}",
-        method=method,
-        data=None if body is None else json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+def _load_client():
+    """`github_client.py` beside this script, under the sys.modules key every
+    caller shares, so `ListingTruncated` is one class across them."""
+    name = "_jarvis_github_client"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().with_name("github_client.py")
     )
-    with urllib.request.urlopen(req) as resp:
-        raw = resp.read()
-    return json.loads(raw) if raw else None
-
-
-def _api(method, path, body=None, attempts=MAX_ATTEMPTS, sleep=time.sleep):
-    """Call the REST API, backing off while GitHub throttles us.
-
-    Every call this script makes is idempotent (add a label it may already
-    carry, drop one that may already be gone), so a retry can only repeat work,
-    never corrupt it. Anything that isn't a throttle propagates with its body
-    logged: a bare status line leaves the operator unable to tell a rate limit
-    from a permission problem, which is the whole reason this helper exists.
-    """
-    for attempt in range(attempts):
-        try:
-            return _request(method, path, body)
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise
-            payload = exc.read().decode("utf-8", "replace")
-            delay = _throttle_delay(exc.code, exc.headers, payload, attempt)
-            if delay is None or attempt == attempts - 1:
-                print(f"{method} {path} -> HTTP {exc.code}: {' '.join(payload.split())[:500]}")
-                raise
-            print(f"{method} {path} -> HTTP {exc.code}, throttled; retrying in {delay}s")
-            sleep(delay)
-
-
-def _remove_label(repo, num, name):
-    """Drop a label, tolerating a concurrent run that dropped it first.
-
-    Same-issue runs are serialised by the workflow's per-issue concurrency
-    group, but a `sweep` pass or a hand edit can still delete a label between
-    this run's read and its DELETE. An already-absent label is the intended end
-    state, not a failure.
-    """
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     try:
-        _api("DELETE", f"repos/{repo}/issues/{num}/labels/{urllib.parse.quote(name)}")
-        return True
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404:
-            raise
-        print(f"#{num}: {name} already gone")
-        return False
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)  # a half-built module must not be handed out next time
+        raise
+    return module
 
 
-def apply(repo, issue, planner=plan):
-    """Run the planner's verdict against the API. True when anything changed."""
+def _make_client(token):
+    return _load_client().Client(token, user_agent="unblock-ready")
+
+
+def apply(api, repo, issue, planner=plan):
+    """Run the planner's verdict against the API. True when anything changed.
+
+    A label already gone is the intended end state, not a failure: same-issue
+    runs are serialised by the workflow's per-issue concurrency group, but a
+    `sweep` pass or a hand edit can still drop it between the read and the DELETE.
+    """
     add, remove = planner(issue)
     num = issue["number"]
     if add:
-        _api("POST", f"repos/{repo}/issues/{num}/labels", {"labels": add})
+        api("POST", f"repos/{repo}/issues/{num}/labels", {"labels": add})
     for name in remove:
-        _remove_label(repo, num, name)
+        if not _load_client().remove_label(api, repo, num, name):
+            print(f"#{num}: {name} already gone")
     print(f"#{num}: add={add} remove={remove}")
     return bool(add or remove)
 
 
-def blocking_dependents(repo, closed):
-    """Same-repo issue numbers the closed issue was blocking."""
-    numbers, page = [], 1
-    while True:
-        batch = _api(
-            "GET", f"repos/{repo}/issues/{closed}/dependencies/blocking?per_page=100&page={page}"
-        )
-        for dep in batch:
-            if dependent_repo(dep, repo) is None:
-                print(f"skip {dep.get('html_url', dep.get('number'))}: outside {repo}")
-                continue
-            numbers.append(dep["number"])
-        if len(batch) < 100:
-            break
-        page += 1
+def blocking_dependents(api, repo, closed):
+    """Same-repo issue numbers the closed issue was blocking.
+
+    A listing past the page cap raises: the dependent it leaves unread could be
+    the one this close frees, so no targets are emitted from part of it."""
+    numbers = []
+    for dep in _load_client().paged(api, f"repos/{repo}/issues/{closed}/dependencies/blocking"):
+        if dependent_repo(dep, repo) is None:
+            print(f"skip {dep.get('html_url', dep.get('number'))}: outside {repo}")
+            continue
+        numbers.append(dep["number"])
     return numbers
 
 
-def resolve_pr(repo, pr, action, merged):
+def resolve_pr(api, repo, pr, action, merged):
     """Matrix entries for a PR event: the issues it closes, and how to replan them."""
     if action == "closed" and merged:
         print(f"PR #{pr} merged: its issues close on their own")
@@ -329,17 +263,17 @@ def resolve_pr(repo, pr, action, merged):
     dropped = action == "closed"
     owner, name = repo.split("/")
     variables = {"owner": owner, "name": name, "pr": int(pr)}
-    data = _api("POST", "graphql", {"query": LINKED_ISSUES_QUERY, "variables": variables})
-    nodes = data["data"]["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
+    data = _load_client().graphql(api, LINKED_ISSUES_QUERY, variables)
+    nodes = data["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
     mode = "reopen" if dropped else "review"
     return [{"issue": n, "mode": mode} for n in pr_issue_numbers(nodes, repo, dropped)]
 
 
-def resolve_issue(repo, number, action):
+def resolve_issue(api, repo, number, action):
     """Matrix entries for an issue event: the issue itself, plus what it unblocks."""
     number = int(number)
     if action == "closed":
-        freed = blocking_dependents(repo, number)
+        freed = blocking_dependents(api, repo, number)
         return [{"issue": number, "mode": "close"}] + [
             {"issue": n, "mode": "promote"} for n in freed
         ]
@@ -350,15 +284,15 @@ def resolve_issue(repo, number, action):
     raise SystemExit(f"unexpected EVENT_ACTION={action!r}")
 
 
-def resolve(repo):
+def resolve(api, repo):
     event = os.environ.get("EVENT_NAME", "issues")
     action = os.environ.get("EVENT_ACTION", "closed")
     if event == "pull_request":
         targets = resolve_pr(
-            repo, os.environ["PR_NUMBER"], action, os.environ.get("PR_MERGED") == "true"
+            api, repo, os.environ["PR_NUMBER"], action, os.environ.get("PR_MERGED") == "true"
         )
     else:
-        targets = resolve_issue(repo, os.environ["ISSUE_NUMBER"], action)
+        targets = resolve_issue(api, repo, os.environ["ISSUE_NUMBER"], action)
     print(f"targets: {targets}")
     # A matrix caps at 256 entries. Truncating would silently skip an issue, so
     # let an over-long fan-out fail the run visibly instead.
@@ -366,7 +300,14 @@ def resolve(repo):
         out.write(f"targets={json.dumps(targets)}\n")
 
 
-def sweep_closed(repo):
+def _sweep_listing(api, repo, items):
+    for item in items:
+        if "pull_request" in item:
+            continue
+        apply(api, repo, item, plan_close)
+
+
+def sweep_closed(api, repo):
     """Strip `status:*` from every closed issue, one status label at a time.
 
     `GET /issues` lists pull requests alongside issues, and a label DELETE on a
@@ -374,73 +315,66 @@ def sweep_closed(repo):
     grant — GitHub answers `403 Resource not accessible by integration` and the
     sweep dies on the first such PR. A PR's labels aren't this script's business
     anyway (it tracks the issue lifecycle), so PRs are skipped.
+
+    Each label's closed-issue listing is read whole before any DELETE, so its
+    pages cannot shift under the sweep and no page is asked for twice. One past
+    the page cap is swept as far as it was read and then raises: the run goes
+    red, and a rerun converges because every stripped issue leaves the listing.
     """
-    names, page = [], 1
-    while True:
-        batch = _api("GET", f"repos/{repo}/labels?per_page=100&page={page}")
-        names += [label["name"] for label in batch]
-        if len(batch) < 100:
-            break
-        page += 1
+    client = _load_client()
+    names = [label["name"] for label in client.paged(api, f"repos/{repo}/labels")]
     for name in names:
         if not name.startswith("status:") or name.startswith(HARDWARE_PREFIX):
             continue
-        query = f"repos/{repo}/issues?state=closed&per_page=100&labels={urllib.parse.quote(name)}"
-        page = 1
-        while batch := _api("GET", f"{query}&page={page}"):
-            changed = False
-            for item in batch:
-                if "pull_request" in item:
-                    continue
-                changed |= apply(repo, item, plan_close)
-            if changed:
-                # The page shrank by what we just relabelled, so page `page`
-                # refills from behind: ask for it again rather than stepping on.
-                continue
-            # Nothing on this page was ours to change — skipped PRs, or issues
-            # the label index is still serving for a few seconds after the
-            # DELETE that cleared them. Either way the page will not shrink, so
-            # re-asking for it would spin forever; move on instead.
-            if len(batch) < 100:
-                break
-            page += 1
+        query = f"repos/{repo}/issues?state=closed&labels={urllib.parse.quote(name)}"
+        try:
+            items = client.paged(api, query)
+        except client.ListingTruncated as exc:
+            _sweep_listing(api, repo, exc.items)
+            raise
+        _sweep_listing(api, repo, items)
 
 
-def reconcile(repo):
+def _reconcile_listing(api, repo, items):
+    for item in items:
+        if plan_reconcile(item) == ([], []):
+            continue
+        apply(api, repo, api("GET", f"repos/{repo}/issues/{item['number']}"), plan_reconcile)
+
+
+def reconcile(api, repo):
     """Give `status:ready` to every open issue whose blockers have all closed.
 
     The listing is a snapshot, so a candidate is re-read and re-planned just
     before its write: a PR event may have moved it on since the page was taken.
-    Adding a label does not reorder `state=open` (newest first), so paging on is
-    safe.
+    A listing past the page cap is reconciled as far as it was read and then
+    raises, so the run goes red rather than pass with issues left unread.
     """
-    page = 1
-    while True:
-        batch = _api("GET", f"repos/{repo}/issues?state=open&per_page=100&page={page}")
-        for item in batch:
-            if plan_reconcile(item) == ([], []):
-                continue
-            apply(repo, _api("GET", f"repos/{repo}/issues/{item['number']}"), plan_reconcile)
-        if len(batch) < 100:
-            break
-        page += 1
+    client = _load_client()
+    try:
+        items = client.paged(api, f"repos/{repo}/issues?state=open")
+    except client.ListingTruncated as exc:
+        _reconcile_listing(api, repo, exc.items)
+        raise
+    _reconcile_listing(api, repo, items)
 
 
-def main():
+def main(make_client=None):
     repo = os.environ["GITHUB_REPOSITORY"]
     mode = os.environ.get("MODE", "resolve")
+    api = (make_client or _make_client)(os.environ["GITHUB_TOKEN"])
     if mode == "resolve":
-        resolve(repo)
+        resolve(api, repo)
     elif mode == "apply":
         number = os.environ["TARGET_ISSUE"]
         # Read labels here, inside this issue's concurrency group, so no other
         # run can write between the read and the plan built from it.
-        issue = _api("GET", f"repos/{repo}/issues/{number}")
-        apply(repo, issue, PLANNERS[os.environ["TARGET_MODE"]])
+        issue = api("GET", f"repos/{repo}/issues/{number}")
+        apply(api, repo, issue, PLANNERS[os.environ["TARGET_MODE"]])
     elif mode == "sweep":
-        sweep_closed(repo)
+        sweep_closed(api, repo)
     elif mode == "reconcile":
-        reconcile(repo)
+        reconcile(api, repo)
     else:
         raise SystemExit(f"unexpected MODE={mode!r}")
 

@@ -156,5 +156,9 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Kept byte-identical to Osasuwu/jarvis's copy (jarvis#1981 AC4), whose lint does not select SIM.
+".github/scripts/github_client.py" = ["SIM108"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["music_intel_mcp"]
