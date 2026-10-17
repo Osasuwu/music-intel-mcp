@@ -141,7 +141,7 @@ jobs:
         # A reviewer error is not itself a verdict: what decides is whether a
         # valid findings file exists afterwards (validate step below).
         continue-on-error: true
-        uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -264,7 +264,7 @@ jobs:
         # A reviewer error is not itself a verdict: what decides is whether a
         # valid findings file exists afterwards (validate step below).
         continue-on-error: true
-        uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -373,7 +373,7 @@ jobs:
       # execution log is the only copy of what the reviewer did. Short retention.
       - name: Upload review execution log
         if: always() && (steps.review2.outputs.execution_file != '' || steps.review1.outputs.execution_file != '')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: claude-execution-output-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.review2.outputs.execution_file || steps.review1.outputs.execution_file }}
@@ -404,7 +404,7 @@ jobs:
       # unconditional: the verdict treats a successful attempt as one that
       # uploaded evidence.
       - name: Upload review evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: review-evidence-${{ github.run_attempt }}
           path: review-evidence.json
