@@ -78,7 +78,15 @@ music-intel window-probe-report --data-dir <owner root>
 
 The report prints the per-track cosine-distance distribution (AC1), the adjusted Rand index between timbre derivations from each leg plus each leg's root/cluster and noise counts (AC2), and — below 100 tracks — a loud `under-powered sample` warning, because a thin sample must never read as a passed gate. Pairs are journaled to `<data_root>/window_probe.jsonl`; like every other per-user artifact they stay inside the gitignored data root and are never committed.
 
-Judge the result and record it in memory (`~/.claude/projects/<project>/memory/decisions.md`): keep 120 s, switch to 30 s, or add a per-track multi-window mean. If the two windows produce meaningfully different clusters on the same tracks, document the discrepancy before proceeding — don't silently ship the 120 s setting on an unmeasured assumption.
+Run it on the owner's **permanent** root, never on the synthetic type B root that the node procedure purges — the journal lives in the data root and would go with it. Judge the result on the adjusted Rand index (grill 2026-11-03; the bands are a prior from secondary sources, revisit them on the first real result):
+
+| ARI between the legs | Decision |
+|---|---|
+| ≥ 0.8 | keep 120 s |
+| 0.65 – 0.8 | per-track multi-window mean |
+| < 0.65 | switch to 30 s |
+
+The cosine-distance distribution is shown for context, not gated on. With `min_cluster_size=3` a small sample is mostly noise points, so an ARI from an under-powered sample is not a pass. Record the result in memory (`~/.claude/projects/<project>/memory/decisions.md`) **before the first participant replays** — don't silently ship the 120 s setting on an unmeasured assumption.
 
 ## Pre-pilot measurement gate: whole-track vs 30 s stream-decode window
 
