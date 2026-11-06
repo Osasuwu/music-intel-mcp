@@ -6,6 +6,12 @@ Layout under the data root (default ``data/``, overridable via the
 - ``history.jsonl`` — append-only listening events, one JSON object per line.
 - ``profiles/<snapshot>.json`` — RootProfile time-series snapshots.
 
+A node also keeps an anonymous analysis pool (``UserStore(pool_root=...)``,
+#161): new audio analyses go there instead of the root, and lookups check it
+first. Entry points open stores through :func:`open_user_store`, which
+resolves the pool (``--pool-dir`` > ``MUSIC_INTEL_POOL_DIR`` > none) and
+refuses a ``participants/`` root without one (#263).
+
 Personal data lives here and *only* here — never to the shared metadata store
 (history-never-leaves-the-machine invariant).
 """
@@ -45,6 +51,7 @@ class AudioAnalysisRecord:
 
 DEFAULT_DATA_DIR = "data"
 _DATA_DIR_ENV = "MUSIC_INTEL_DATA_DIR"
+_POOL_DIR_ENV = "MUSIC_INTEL_POOL_DIR"
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -178,6 +185,48 @@ def resolve_data_root(root: str | Path | None) -> Path:
     if root is not None:
         return Path(root)
     return Path(os.environ.get(_DATA_DIR_ENV, DEFAULT_DATA_DIR))
+
+
+def resolve_pool_root(pool_dir: str | Path | None) -> Path | None:
+    """Resolve the node-level analysis pool (#263): explicit arg >
+    ``MUSIC_INTEL_POOL_DIR`` > no pool. An empty value at either level counts
+    as unset, so ``MUSIC_INTEL_POOL_DIR=`` copied from ``.env.example`` means
+    "no pool", never "a pool at the current directory"."""
+    if pool_dir is not None and str(pool_dir) != "":
+        return Path(pool_dir)
+    env_value = os.environ.get(_POOL_DIR_ENV, "")
+    if env_value != "":
+        return Path(env_value)
+    return None
+
+
+class PoolNotConfiguredError(Exception):
+    """A participant root was opened with no analysis pool resolved (#263).
+
+    Analyses written there would land in the transient root and die with
+    ``purge``, so the node refuses rather than silently losing them."""
+
+
+def is_participant_root(root: str | Path) -> bool:
+    """True for a per-participant root, i.e. any path below a ``participants``
+    directory (``data/participants/<id>/``). The ``participants`` directory
+    itself is not one."""
+    return "participants" in Path(root).resolve().parts[:-1]
+
+
+def open_user_store(data_dir: str | Path | None, pool_dir: str | Path | None) -> UserStore:
+    """The one way an entry point opens a store (#263): the data root and the
+    pool are both resolved here, and a participant root with no pool is
+    refused with :class:`PoolNotConfiguredError`."""
+    root = resolve_data_root(data_dir)
+    pool_root = resolve_pool_root(pool_dir)
+    if pool_root is None and is_participant_root(root):
+        raise PoolNotConfiguredError(
+            f"{root} is a participant root but no analysis pool is configured -- "
+            f"pass --pool-dir or set {_POOL_DIR_ENV}, or its analyses would be "
+            "deleted with the root"
+        )
+    return UserStore(root, pool_root=pool_root)
 
 
 class UserStore:

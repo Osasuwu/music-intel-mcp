@@ -73,7 +73,9 @@ def test_cli_analyze_without_user_id_defaults_to_data_dir_basename(tmp_path):
     for a separate identifier, it derives one from --data-dir."""
     participant_root = tmp_path / "participants" / "alice"
     participant_root.mkdir(parents=True)
-    rc = main(["analyze", "--data-dir", str(participant_root)])
+    rc = main(
+        ["analyze", "--data-dir", str(participant_root), "--pool-dir", str(tmp_path / "pool")]
+    )
     assert rc == 0
     profile = UserStore(root=participant_root).latest_profile()
     assert profile is not None

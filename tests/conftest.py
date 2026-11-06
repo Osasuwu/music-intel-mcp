@@ -20,6 +20,9 @@ def _no_real_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     import music_intel_mcp.cli as cli
 
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: False)
+    # A node operator's shell exports the pool (#263); a test that wants one
+    # sets it itself, so a developer's real pool is never written to.
+    monkeypatch.delenv("MUSIC_INTEL_POOL_DIR", raising=False)
 
 
 @pytest.fixture

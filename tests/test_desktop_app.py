@@ -70,3 +70,35 @@ def test_no_data_dir_flag_defaults_to_resolve_data_root(monkeypatch, fake_tray):
 
     assert rc == 0
     assert captured["store"].root == UserStore().root
+
+
+# --- #263: the desktop app resolves the analysis pool like the CLI --------- #
+
+
+def test_pool_dir_flag_threads_to_userstore_pool_root(tmp_path, monkeypatch, fake_tray):
+    captured: dict[str, UserStore] = {}
+
+    def fake_run_loop(stop_event: threading.Event, status, store: UserStore) -> None:
+        captured["store"] = store
+
+    monkeypatch.setattr(desktop_app, "_run_loop", fake_run_loop)
+    pool = tmp_path / "pool"
+
+    rc = desktop_app.main(["--data-dir", str(tmp_path / "root"), "--pool-dir", str(pool)])
+
+    assert rc == 0
+    assert captured["store"].pool_root == pool
+
+
+def test_participant_root_without_a_pool_is_refused(tmp_path, monkeypatch, fake_tray):
+    captured: dict[str, UserStore] = {}
+
+    def fake_run_loop(stop_event: threading.Event, status, store: UserStore) -> None:
+        captured["store"] = store
+
+    monkeypatch.setattr(desktop_app, "_run_loop", fake_run_loop)
+
+    rc = desktop_app.main(["--data-dir", str(tmp_path / "data" / "participants" / "p1")])
+
+    assert rc == 2
+    assert captured == {}  # the collector loop never started

@@ -40,23 +40,40 @@ For every type A participant, request their Spotify Extended Streaming History *
 
 This is the only order the node runs a type B participant's data in (decision `9fbaac14-d67a-40f7-8da8-ec7516710286`). Each step needs the previous one to have completed — there is no re-derivation after purge, because purge deletes the participant's root entirely.
 
+**Pool configuration (#263).** The node keeps one anonymous analysis pool, `data/pool/`, beside the participant roots — never inside one. Every command that opens a participant root resolves it the same way: the `--pool-dir` flag, else `MUSIC_INTEL_POOL_DIR` (the CLI loads it from `.env`; `music-intel-desktop` does not, so set it in the host environment or pass `--pool-dir`), else no pool. A root under `participants/` with no pool is refused (exit 2), so a forgotten flag cannot send analyses into a root that purge will delete. Set it once for the session or pass it on every command:
+
+```powershell
+$env:MUSIC_INTEL_POOL_DIR = "data/pool"
+```
+
+The commands below spell out `--pool-dir` so they work either way. With a pool, every new analysis goes to the pool, and a track already in it is not decoded again for the next participant.
+
 1. **Derive.** Import the participant's export into a dedicated data root, then derive their `RootProfile`:
 
    ```powershell
-   music-intel import-spotify --from <export dir> --data-dir data/participants/<id>
-   music-intel resolve --data-dir data/participants/<id>
-   music-intel analyze --data-dir data/participants/<id> --with-audio --with-scene
+   music-intel import-spotify --from <export dir> --data-dir data/participants/<id> --pool-dir data/pool
+   music-intel resolve --data-dir data/participants/<id> --pool-dir data/pool
+   music-intel analyze --data-dir data/participants/<id> --pool-dir data/pool --with-audio --with-scene
    ```
 
-   `analyze` reads the node-level anonymous pool intersected with this participant's own history only (never the whole pool) and writes the `RootProfile` into `data/participants/<id>/`.
+   Capture runs between `resolve` and `analyze`, against the same root and pool: `replay-capture-youtube --data-dir data/participants/<id> --pool-dir data/pool` for a Takeout history today, the Spotify replay leg once #262 ships it. `analyze` reads the node-level anonymous pool intersected with this participant's own history only (never the whole pool) and writes the `RootProfile` into `data/participants/<id>/`.
 2. **Deliver.** Send the resulting `RootProfile` JSON (and its phone-readable rendering) back to the participant. Confirm delivery before moving on — once purge runs, there is no way to regenerate it without re-importing the export from scratch.
 3. **Purge.** Delete the participant's data root:
 
    ```powershell
-   music-intel purge --data-dir data/participants/<id>
+   music-intel purge --data-dir data/participants/<id> --pool-dir data/pool
    ```
 
-   `purge` refuses (exit 2) if no `RootProfile` was ever written for that root — i.e. it will not let you delete a root that was never delivered — unless you pass `--force`. It deletes the participant root with `shutil.rmtree` and never touches the node-level pool or shared store; those are anonymous track-level data and are exactly what's meant to persist. Do not pass `--force` to skip the "was this delivered?" check unless the participant is withdrawing before delivery.
+   It deletes the participant root with `shutil.rmtree` and never touches the node-level pool or shared store; those are anonymous track-level data and are exactly what's meant to persist. Before that it checks, in this order, and refuses with exit 2 on the first that fails:
+
+   | Refusal | Override |
+   |---|---|
+   | The pool resolves to the root or a directory under it — purging would delete the pool | none, not even `--force`; move the pool out |
+   | No `RootProfile` was ever written for the root, i.e. it was never delivered | `--force` — only when the participant withdraws before delivery |
+   | The root still holds capture output: analyses or fingerprints (written before the pool existed), the live / replay / stream-decode journals, the replay ledger, or a window-probe journal | `--purge-capture-data` — copy anything worth keeping first; `--force` does not cover this |
+   | The delivered profile's timbre coverage is below 80 % of valid plays, or not measured at all | `--accept-low-coverage` |
+
+   Until #264 lands, no profile reports timbre coverage, so every pilot purge needs `--accept-low-coverage`. Check the coverage `analyze` printed before passing it.
 
 Because purge is the end of the line, **do not purge until delivery is confirmed.** "No re-derivation after purge" is not a warning about a bug — it is the design: the participant's personal data exists on the node only for the time it takes to produce their profile.
 
