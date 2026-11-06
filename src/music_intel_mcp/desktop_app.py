@@ -83,10 +83,6 @@ def _run_loop(stop_event: threading.Event, status: _Status, store: UserStore) ->
     from .inference import DiscogsEffnetOnnxModel, MtgJamendoClassifier
     from .nowplaying import DEFAULT_DROP_LOG_FILENAME, SmtcNowPlayingSource
 
-    live_resolver = _build_live_resolver(store)
-    embedding_model = DiscogsEffnetOnnxModel()
-    classifier = MtgJamendoClassifier()
-
     def capture_factory(now_playing):
         return WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
 
@@ -99,8 +95,13 @@ def _run_loop(stop_event: threading.Event, status: _Status, store: UserStore) ->
     def on_error(now_playing, exc: Exception) -> None:
         status.set(f"error on '{now_playing.title}': {exc}")
 
-    status.set("listening for now-playing...")
+    # Startup (resolver, model files) sits inside the guard too: a missing
+    # model must reach the tray status, not kill this thread silently.
     try:
+        live_resolver = _build_live_resolver(store)
+        embedding_model = DiscogsEffnetOnnxModel()
+        classifier = MtgJamendoClassifier()
+        status.set("listening for now-playing...")
         run_continuous_capture(
             now_playing_source=SmtcNowPlayingSource(
                 identity_resolver=live_resolver,
