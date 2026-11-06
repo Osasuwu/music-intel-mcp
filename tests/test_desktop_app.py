@@ -13,6 +13,7 @@ import types
 import pytest
 
 import music_intel_mcp.desktop_app as desktop_app
+import music_intel_mcp.inference as inference
 from music_intel_mcp.store import UserStore
 
 
@@ -102,3 +103,39 @@ def test_participant_root_without_a_pool_is_refused(tmp_path, monkeypatch, fake_
 
     assert rc == 2
     assert captured == {}  # the collector loop never started
+
+
+# --- a startup failure in the collector thread reaches the tray status ----- #
+
+
+def _raise_missing_model(*_args, **_kwargs):
+    raise inference.ModelFileNotFoundError("discogs-effnet model not found")
+
+
+@pytest.mark.parametrize(
+    ("target", "attr"),
+    [
+        (desktop_app, "_build_live_resolver"),
+        (inference, "DiscogsEffnetOnnxModel"),
+        (inference, "MtgJamendoClassifier"),
+    ],
+    ids=["resolver", "embedding-model", "classifier"],
+)
+def test_startup_failure_is_shown_in_tray_status(tmp_path, monkeypatch, target, attr):
+    """Building the resolver or loading a model can fail (a missing model file
+    did, for real). The collector thread must report it in the tray status, not
+    die silently while the icon keeps showing."""
+    monkeypatch.setattr(desktop_app, "_build_live_resolver", lambda store: object())
+    monkeypatch.setattr(inference, "DiscogsEffnetOnnxModel", lambda: object())
+    monkeypatch.setattr(inference, "MtgJamendoClassifier", lambda: object())
+    monkeypatch.setattr(target, attr, _raise_missing_model)
+
+    def capture_must_not_start(**_kwargs):
+        raise AssertionError("capture loop started despite a failed startup")
+
+    monkeypatch.setattr(desktop_app, "run_continuous_capture", capture_must_not_start)
+    status = desktop_app._Status()
+
+    desktop_app._run_loop(threading.Event(), status, UserStore(root=tmp_path))
+
+    assert status.get() == "stopped: fatal error (discogs-effnet model not found)"
