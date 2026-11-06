@@ -27,7 +27,7 @@ from .live_identity import (
     LiveNegativeCache,
     TitleArtistYoutubeIndex,
 )
-from .store import UserStore
+from .store import PoolNotConfiguredError, UserStore, open_user_store
 
 _CAPTURE_DURATION_S = 120.0  # #139 AC1: ~120s capture window
 _POLL_INTERVAL_S = 5.0
@@ -146,8 +146,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="data root (default: $MUSIC_INTEL_DATA_DIR or ./data)",
     )
+    parser.add_argument(
+        "--pool-dir",
+        default=None,
+        help="node-level analysis pool (default: $MUSIC_INTEL_POOL_DIR, else no pool)",
+    )
     args = parser.parse_args(argv)
-    store = UserStore(root=args.data_dir)
+    try:
+        store = open_user_store(args.data_dir, args.pool_dir)
+    except PoolNotConfiguredError as exc:
+        print(f"error: {exc}")
+        return 2
 
     stop_event = threading.Event()
     status = _Status()

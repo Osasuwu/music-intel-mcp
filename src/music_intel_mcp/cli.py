@@ -60,6 +60,7 @@ import shutil
 import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -119,7 +120,7 @@ from .spotify_extended import (
     load_replay_ledger_windows,
     load_spotify_extended_dir,
 )
-from .store import UserStore
+from .store import PoolNotConfiguredError, UserStore, open_user_store
 from .youtube_music import (
     SUPERSEDES as YOUTUBE_SUPERSEDES,
 )
@@ -139,6 +140,13 @@ _SUPABASE_URL_ENV = "SUPABASE_URL"
 _SUPABASE_KEY_ENV = "SUPABASE_KEY"
 _SPOTIFY_CLIENT_ID_ENV = "SPOTIFY_CLIENT_ID"
 _SPOTIFY_CLIENT_SECRET_ENV = "SPOTIFY_CLIENT_SECRET"
+
+
+def _open_store(args: argparse.Namespace) -> UserStore:
+    """Open the command's per-user store with the analysis pool resolved
+    (#263). Raises :class:`PoolNotConfiguredError` for a participant root with
+    no pool; :func:`main` turns that into exit 2."""
+    return open_user_store(args.data_dir, getattr(args, "pool_dir", None))
 
 
 def plan_spotify_source(
@@ -261,7 +269,7 @@ def plan_enrichment(
 
 
 def _cmd_import_ifttt(args: argparse.Namespace) -> int:
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     before = store.load_history()
     stats = IngestStats()
     imported = load_ifttt_dir(args.source, stats=stats)
@@ -286,7 +294,7 @@ def _cmd_import_ifttt(args: argparse.Namespace) -> int:
 
 
 def _cmd_import_spotify(args: argparse.Namespace) -> int:
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     before = store.load_history()
     stats = SpotifyExtendedStats()
     # #167 AC2: rows falling inside a replay-loop window are tagged
@@ -351,7 +359,7 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
 
 
 def _cmd_import_youtube(args: argparse.Namespace) -> int:
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     before = store.load_history()
     stats = YoutubeMusicStats()
     imported = load_watch_history_file(args.source, stats=stats)
@@ -388,7 +396,7 @@ def _cmd_import_account(args: argparse.Namespace) -> int:
     silent), and a **report-only** measured MBID coverage over liked + playlist
     tracks (computed via the existing resolve() chain, never persisted —
     decision dddc4d90)."""
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     prior = store.load_library()
 
     stats = AccountDataStats()
@@ -458,7 +466,7 @@ def _cmd_import_account_history(args: argparse.Namespace) -> int:
     with). Rows are resolved onto an existing ``spotify:<id>`` canonical id via
     a name/artist lookup built from the current ``spotify_extended`` history
     where unambiguous; unresolved rows fall back to the ``name:`` rung."""
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     before = store.load_history()
     stats = AccountHistoryStats()
     imported = load_account_history_dir(args.source, existing_events=before, stats=stats)
@@ -526,7 +534,7 @@ def _build_live_resolver(args: argparse.Namespace) -> LiveIdentityResolver:
         spotify_search = SpotifySearchApiSource(isrc_source=isrc_source)
         spotify_isrc = isrc_source
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     youtube_history_index = TitleArtistYoutubeIndex.from_events(store.load_history())
 
     return LiveIdentityResolver(
@@ -562,7 +570,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     # AB-covered recording (AC-B) and the dump loads once.
     resolver = _build_resolver(args, audio_source) if args.with_audio else None
 
-    user_store = UserStore(root=args.data_dir)
+    user_store = _open_store(args)
     events = user_store.load_history()
     # #165 AC4: node tier never asks a phone-only participant for a separate
     # identifier -- user_id defaults to the participant root's own name.
@@ -627,7 +635,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def _cmd_resolve(args: argparse.Namespace) -> int:
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     events = store.load_history()
 
     spotify_source, errors = plan_spotify_source(
@@ -719,7 +727,7 @@ def _cmd_capture_spike(args: argparse.Namespace) -> int:
 
     print(f"now playing: {now_playing.artist} - {now_playing.title} (pid={now_playing.process_id})")
     capture = WasapiProcessLoopbackCapture(target_pid=now_playing.process_id)
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
 
     from .live_pipeline import live_capture_journal_path
 
@@ -758,7 +766,7 @@ def _cmd_capture_loop(args: argparse.Namespace) -> int:
     from .nowplaying import DEFAULT_DROP_LOG_FILENAME, SmtcNowPlayingSource
 
     live_resolver = _build_live_resolver(args)
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     embedding_model = DiscogsEffnetOnnxModel()
     classifier = MtgJamendoClassifier()
 
@@ -919,9 +927,8 @@ def _cmd_spotify_login(args: argparse.Namespace) -> int:
         build_authorize_url,
         generate_pkce_pair,
     )
-    from .store import UserStore
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     auth = SpotifyUserAuth(client_id=app_id, token_path=store.root / "spotify_user_token.json")
 
     verifier, challenge = generate_pkce_pair()
@@ -963,9 +970,8 @@ def _cmd_backfill_playlist(args: argparse.Namespace) -> int:
         return 2
 
     from .spotify_user_auth import SpotifyUserAuth
-    from .store import UserStore
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     auth = SpotifyUserAuth(client_id=app_id, token_path=store.root / "spotify_user_token.json")
     if not auth.is_authorized():
         print("not authorized — run `music-intel spotify-login` first")
@@ -1038,9 +1044,8 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
         replay_queue_coverage,
         youtube_crosswalk_resolve_mbid,
     )
-    from .store import UserStore
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     events = store.load_history()
     # History-import TrackRefs never carry mbid/isrc (only spotify_id/youtube_id/
     # name+artist), while has_audio_analysis is keyed on the mbid-prefixed id the
@@ -1090,10 +1095,9 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
 
 def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     from .replay_capture import replay_journal_path, summarize_replay_journal
-    from .store import UserStore
     from .stream_decode import stream_decode_journal_path
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     counts = summarize_replay_journal(replay_journal_path(store))
     if not counts:
         print("replay journal: no attempts recorded yet")
@@ -1138,7 +1142,6 @@ def _cmd_replay_capture_youtube(args: argparse.Namespace) -> int:
         select_replay_queue,
         youtube_crosswalk_resolve_mbid,
     )
-    from .store import UserStore
     from .stream_decode import (
         YtDlpStreamDecodeSource,
         journaled_unavailable_track_ids,
@@ -1147,7 +1150,7 @@ def _cmd_replay_capture_youtube(args: argparse.Namespace) -> int:
     )
     from .window_probe import make_window_probe_recorder, stream_decode_window_probe_path
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     events = store.load_history()
     resolver = _build_resolver(args)
     resolve_mbid = youtube_crosswalk_resolve_mbid(
@@ -1201,7 +1204,6 @@ def _cmd_replay_capture_youtube(args: argparse.Namespace) -> int:
 
 
 def _cmd_window_probe_report(args: argparse.Namespace) -> int:
-    from .store import UserStore
     from .window_probe import (
         build_window_probe_report,
         load_window_pairs,
@@ -1209,7 +1211,7 @@ def _cmd_window_probe_report(args: argparse.Namespace) -> int:
         window_probe_path,
     )
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     pairs = load_window_pairs(window_probe_path(store))
     if not pairs:
         print("no window-probe pairs recorded yet (#169 gate unmeasured)")
@@ -1223,7 +1225,6 @@ def _cmd_stream_decode_window_probe_report(args: argparse.Namespace) -> int:
     """#201: read back the stream-decode leg's whole-track-vs-30s journal --
     kept on its own command/journal so its numbers are never mistaken for
     #169's loopback-leg ones (AC6)."""
-    from .store import UserStore
     from .window_probe import (
         build_window_probe_report,
         load_window_pairs,
@@ -1231,7 +1232,7 @@ def _cmd_stream_decode_window_probe_report(args: argparse.Namespace) -> int:
         stream_decode_window_probe_path,
     )
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     pairs = load_window_pairs(stream_decode_window_probe_path(store))
     if not pairs:
         print("no window-probe pairs recorded yet (#201 gate unmeasured)")
@@ -1250,9 +1251,7 @@ def _cmd_stream_decode_window_probe_report(args: argparse.Namespace) -> int:
 
 
 def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
-    from .store import UserStore
-
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     if args.revoke:
         store.revoke_automated_playback_consent()
         print("automated-playback consent revoked")
@@ -1272,9 +1271,9 @@ def _cmd_automated_playback_consent(args: argparse.Namespace) -> int:
 
 
 def _cmd_migrate_audio_analysis_keys(args: argparse.Namespace) -> int:
-    from .store import UserStore, migrate_audio_analysis_keys
+    from .store import migrate_audio_analysis_keys
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     report = migrate_audio_analysis_keys(store)
     print(f"migrated {len(report.migrated)}")
     print(f"conflicts {len(report.conflicts)}")
@@ -1289,14 +1288,71 @@ def _cmd_migrate_audio_analysis_keys(args: argparse.Namespace) -> int:
     return 0
 
 
+PURGE_TIMBRE_COVERAGE_FLOOR = 0.8
+"""Pilot success criterion (decision ``30b40b80``, X = 80): timbre coverage of
+valid plays below this means the participant's capture is not done (#263)."""
+
+
+def _capture_artifacts(store: UserStore) -> list[Path]:
+    """Capture output a participant root may hold (#263 AC7): analyses and
+    fingerprints written before the pool existed, the capture journals, and the
+    window-probe journals. Only the ones present are returned."""
+    from .live_pipeline import live_capture_journal_path
+    from .replay_capture import replay_journal_path, replay_ledger_path
+    from .stream_decode import stream_decode_journal_path
+    from .window_probe import stream_decode_window_probe_path, window_probe_path
+
+    dirs = [store.audio_analysis_dir, store.fingerprints_dir]
+    files = [
+        live_capture_journal_path(store),
+        replay_journal_path(store),
+        replay_ledger_path(store),
+        stream_decode_journal_path(store),
+        window_probe_path(store),
+        stream_decode_window_probe_path(store),
+    ]
+    present = [d for d in dirs if d.is_dir() and any(d.iterdir())]
+    return present + [f for f in files if f.exists()]
+
+
 def _cmd_purge(args: argparse.Namespace) -> int:
-    store = UserStore(root=args.data_dir)
-    if store.latest_profile() is None and not args.force:
+    store = _open_store(args)
+    root = store.root.resolve()
+    pool = store.pool_root.resolve() if store.pool_root is not None else None
+    if pool is not None and (pool == root or root in pool.parents):
+        print(
+            f"error: the analysis pool {store.pool_root} lies inside {store.root} -- "
+            "purging the root would delete the pool; no flag overrides this"
+        )
+        return 2
+
+    profile = store.latest_profile()
+    if profile is None and not args.force:
         print(
             "error: no RootProfile has been written for this root -- "
             "run `analyze` first, or pass --force to purge anyway"
         )
         return 2
+
+    artifacts = _capture_artifacts(store)
+    if artifacts and not args.purge_capture_data:
+        names = ", ".join(sorted(p.name for p in artifacts))
+        print(
+            f"error: {store.root} still holds capture data ({names}) -- copy it to the pool "
+            "or pass --purge-capture-data to delete it with the root (--force does not)"
+        )
+        return 2
+
+    if profile is not None and not args.accept_low_coverage:
+        timbre = profile.generated_from.coverage_per_category.get("timbre")
+        if timbre is None or timbre < PURGE_TIMBRE_COVERAGE_FLOOR:
+            measured = "not measured" if timbre is None else f"{timbre:.0%}"
+            print(
+                f"error: the delivered profile's timbre coverage is {measured}, below "
+                f"{PURGE_TIMBRE_COVERAGE_FLOOR:.0%} of valid plays -- capture more, or pass "
+                "--accept-low-coverage to purge anyway"
+            )
+            return 2
 
     root = store.root
     if root.exists():
@@ -1307,9 +1363,8 @@ def _cmd_purge(args: argparse.Namespace) -> int:
 
 def _cmd_near_dup_scan(args: argparse.Namespace) -> int:
     from .near_dup import scan
-    from .store import UserStore
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     json_path = scan(store)
     print(f"wrote report {json_path}")
     return 0
@@ -1331,9 +1386,9 @@ def _cmd_near_dup_apply(args: argparse.Namespace) -> int:
 
 
 def _cmd_automated_playback(args: argparse.Namespace) -> int:
-    from .store import ConsentFormatError, UserStore
+    from .store import ConsentFormatError
 
-    store = UserStore(root=args.data_dir)
+    store = _open_store(args)
     try:
         has_consent = store.has_automated_playback_consent()
     except ConsentFormatError as exc:
@@ -2014,6 +2069,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="purge even if no RootProfile has been written for this root yet",
     )
+    p_purge.add_argument(
+        "--purge-capture-data",
+        action="store_true",
+        help="delete analyses, fingerprints and capture/probe journals still in the root "
+        "(--force does not cover these) (#263)",
+    )
+    p_purge.add_argument(
+        "--accept-low-coverage",
+        action="store_true",
+        help="purge even if the delivered profile's timbre coverage is below 80%% "
+        "of valid plays, or not measured (#263)",
+    )
     p_purge.set_defaults(func=_cmd_purge)
 
     p_migrate_keys = sub.add_parser(
@@ -2052,7 +2119,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_near_dup_apply.add_argument("report", help="path to a reviewed scan report JSON file")
     p_near_dup_apply.set_defaults(func=_cmd_near_dup_apply)
 
+    _add_pool_dir(parser)
     return parser
+
+
+def _add_pool_dir(parser: argparse.ArgumentParser) -> None:
+    """Give every (sub)command that takes ``--data-dir`` a ``--pool-dir`` too
+    (#263), so no store-opening command can be added without it. Walks nested
+    subparsers; an alias maps to the same parser, so the presence check keeps
+    it to one ``--pool-dir`` per parser."""
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for sub in action.choices.values():
+            options = {opt for a in sub._actions for opt in a.option_strings}
+            if "--data-dir" in options and "--pool-dir" not in options:
+                sub.add_argument(
+                    "--pool-dir",
+                    default=None,
+                    help="node-level analysis pool (default: $MUSIC_INTEL_POOL_DIR, else no pool)",
+                )
+            _add_pool_dir(sub)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2065,7 +2152,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv(find_dotenv(usecwd=True), override=False)
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except PoolNotConfiguredError as exc:
+        print(f"error: {exc}")
+        return 2
 
 
 if __name__ == "__main__":

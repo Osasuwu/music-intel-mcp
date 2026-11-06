@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 
 from music_intel_mcp.analyzer import analyze
-from music_intel_mcp.store import UserStore
+from music_intel_mcp.store import UserStore, resolve_pool_root
 
 
 def test_load_history_parses_fixture(tmp_path, history_sample_path):
@@ -65,6 +65,31 @@ def test_env_var_sets_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSIC_INTEL_DATA_DIR", str(tmp_path / "envdata"))
     store = UserStore()
     assert store.root == tmp_path / "envdata"
+
+
+# #263 AC1: the pool resolves from --pool-dir, then MUSIC_INTEL_POOL_DIR, else
+# no pool; an empty value at either level counts as unset.
+def test_resolve_pool_root_flag_wins_over_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSIC_INTEL_POOL_DIR", str(tmp_path / "envpool"))
+    assert resolve_pool_root(str(tmp_path / "flagpool")) == tmp_path / "flagpool"
+
+
+def test_resolve_pool_root_falls_back_to_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSIC_INTEL_POOL_DIR", str(tmp_path / "envpool"))
+    assert resolve_pool_root(None) == tmp_path / "envpool"
+
+
+def test_resolve_pool_root_is_none_when_neither_is_set(monkeypatch):
+    monkeypatch.delenv("MUSIC_INTEL_POOL_DIR", raising=False)
+    assert resolve_pool_root(None) is None
+
+
+def test_resolve_pool_root_treats_empty_values_as_unset(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSIC_INTEL_POOL_DIR", str(tmp_path / "envpool"))
+    assert resolve_pool_root("") == tmp_path / "envpool"
+    monkeypatch.setenv("MUSIC_INTEL_POOL_DIR", "")
+    assert resolve_pool_root(None) is None
+    assert resolve_pool_root("") is None
 
 
 def test_replace_history_overwrites_not_appends(tmp_path):
