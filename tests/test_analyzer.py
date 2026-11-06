@@ -14,6 +14,7 @@ from music_intel_mcp.identity import (
     InMemoryIsrcMbidIndex,
     InMemorySpotifyIsrcSource,
 )
+from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
 from music_intel_mcp.models import (
     AudioParams,
     ListenEvent,
@@ -26,6 +27,8 @@ from music_intel_mcp.models import (
 )
 from music_intel_mcp.scene import InMemoryTagSource
 from music_intel_mcp.shared_store import AudioFeatures, InMemorySharedStore, TrackTag
+from music_intel_mcp.store import AudioAnalysisRecord
+from music_intel_mcp.timbre import TimbreSource
 
 FIXED_NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 
@@ -717,3 +720,161 @@ def test_analyze_default_excludes_agent_originated_from_audio_evidence():
     )
     assert profile.generated_from.n_unique_tracks == 1  # raw ingest count unaffected
     assert store.get_tracks(["spotify:S-1"]) == {}  # never seeded -- zero evidence
+
+
+# --------------------------------------------------------------------------- #
+# Timbre stage (#264): analyze() derives timbre roots from (root ∪ pool) ∩
+# history at the current embedding version
+# --------------------------------------------------------------------------- #
+
+
+def _timbre_listen(spotify_id: str, *, source: str = "test") -> ListenEvent:
+    return ListenEvent(
+        track=TrackRef(spotify_id=spotify_id, name=spotify_id, artist="artist"),
+        played_at=EARLY,
+        source=source,
+    )
+
+
+def _timbre_record(track_id: str, embedding: list[float], tag: str) -> AudioAnalysisRecord:
+    return AudioAnalysisRecord(
+        track_id=track_id,
+        embedding=embedding,
+        tags={tag: 0.9},
+        model_version=EMBEDDING_SPACE_VERSION,
+    )
+
+
+def _two_timbre_neighbourhoods() -> tuple[list[ListenEvent], list[AudioAnalysisRecord]]:
+    """Six listened tracks in two tight embedding neighbourhoods, 3 + 3."""
+    events = [_timbre_listen(f"a{i}") for i in range(3)] + [
+        _timbre_listen(f"b{i}") for i in range(3)
+    ]
+    records = [
+        _timbre_record(f"spotify:a{i}", [0.0 + 0.001 * i, 0.0], "genre---electronic")
+        for i in range(3)
+    ] + [
+        _timbre_record(f"spotify:b{i}", [10.0 + 0.001 * i, 10.0], "genre---rock") for i in range(3)
+    ]
+    return events, records
+
+
+# AC2: the profile carries timbre roots built from the selected records only.
+# A pool record of a track this participant never played sits inside the
+# electronic neighbourhood; had it been clustered, that root would hold 4
+# tracks, not 3.
+def test_analyze_derives_timbre_roots_from_history_records_only():
+    events, records = _two_timbre_neighbourhoods()
+    foreign = _timbre_record("spotify:other", [0.0005, 0.0], "genre---electronic")
+
+    profile = analyze(
+        events,
+        user_id="u",
+        generated_at=FIXED_NOW,
+        timbre_source=TimbreSource(records=[foreign, *records]),
+    )
+
+    timbre = [root for root in profile.roots if root.category == "timbre"]
+    sizes = {root.structural_descriptor["label"]: root.evidence.cluster_size for root in timbre}
+    assert sizes == {"Electronic": 3, "Rock": 3}
+    sampled = {s["track_id"] for root in timbre for s in root.evidence.sample_tracks}
+    assert "spotify:other" not in sampled
+
+
+# AC3: no record survives the intersection -> no timbre roots, and the reason
+# is in quality_log (transparent rejection), with the counts behind it.
+def test_analyze_logs_an_empty_timbre_intersection():
+    events = [_timbre_listen("a0")]
+    records = [
+        _timbre_record("spotify:other", [0.0, 0.0], "genre---rock"),
+        AudioAnalysisRecord(track_id="spotify:a0", embedding=[0.0, 0.0], tags={}),
+    ]
+
+    profile = analyze(
+        events, user_id="u", generated_at=FIXED_NOW, timbre_source=TimbreSource(records=records)
+    )
+
+    assert [root for root in profile.roots if root.category == "timbre"] == []
+    entry = next(e for e in profile.quality_log if e.category == "timbre")
+    assert entry.failed_test == "empty_intersection"
+    assert entry.details["candidates"] == 2
+    assert entry.details["stale_version"] == 1
+    assert entry.details["outside_history"] == 1
+    assert entry.details["embedding_version"] == EMBEDDING_SPACE_VERSION
+
+
+# Transparent rejection, the other way to get no timbre root: records were
+# selected but HDBSCAN found no cluster among them.
+def test_analyze_logs_timbre_records_that_formed_no_cluster():
+    events = [_timbre_listen("a0"), _timbre_listen("a1")]
+    records = [
+        _timbre_record("spotify:a0", [0.0, 0.0], "genre---rock"),
+        _timbre_record("spotify:a1", [5.0, 5.0], "genre---rock"),
+    ]
+
+    profile = analyze(
+        events, user_id="u", generated_at=FIXED_NOW, timbre_source=TimbreSource(records=records)
+    )
+
+    assert [root for root in profile.roots if root.category == "timbre"] == []
+    entry = next(e for e in profile.quality_log if e.category == "timbre")
+    assert entry.failed_test == "no_clusters"
+    assert entry.details["selected"] == 2
+    assert entry.details["noise"] == 2
+
+
+# AC4: timbre coverage lands where `music-intel purge` reads it, as a share of
+# valid plays: 6 listened tracks, 5 with a current-version record -> 5/6.
+def test_analyze_reports_timbre_coverage_in_generated_from():
+    events, records = _two_timbre_neighbourhoods()
+
+    profile = analyze(
+        events,
+        user_id="u",
+        generated_at=FIXED_NOW,
+        timbre_source=TimbreSource(records=records[1:]),
+    )
+
+    assert profile.generated_from.coverage_per_category["timbre"] == 5 / 6
+    assert profile.generated_from.enrichment_diagnostics["timbre"] == {
+        "candidates": 5,
+        "stale_version": 0,
+        "outside_history": 0,
+        "selected": 5,
+    }
+
+
+def test_analyze_without_a_timbre_source_reports_no_timbre_coverage():
+    events, _ = _two_timbre_neighbourhoods()
+
+    profile = analyze(events, user_id="u", generated_at=FIXED_NOW)
+
+    assert "timbre" not in profile.generated_from.coverage_per_category
+
+
+# AC5: timbre roots are labelled proxy output, and so is the profile.
+def test_analyze_labels_timbre_roots_proxy_preliminary():
+    events, records = _two_timbre_neighbourhoods()
+
+    profile = analyze(
+        events, user_id="u", generated_at=FIXED_NOW, timbre_source=TimbreSource(records=records)
+    )
+
+    timbre = [root for root in profile.roots if root.category == "timbre"]
+    assert len(timbre) == 2
+    assert all(any("proxy / preliminary" in c for c in root.caveats) for root in timbre)
+    assert profile.model_maturity == "proxy"
+
+
+# #129 holds for timbre too: an automated-playback play is not this
+# participant's listening, so its track is outside the timbre history.
+def test_analyze_excludes_agent_originated_plays_from_timbre_history():
+    events, records = _two_timbre_neighbourhoods()
+    events = [*events[:5], _timbre_listen("b2", source=AUTOMATED_PLAYBACK_SOURCE)]
+
+    profile = analyze(
+        events, user_id="u", generated_at=FIXED_NOW, timbre_source=TimbreSource(records=records)
+    )
+
+    assert profile.generated_from.enrichment_diagnostics["timbre"]["outside_history"] == 1
+    assert profile.generated_from.coverage_per_category["timbre"] == 1.0

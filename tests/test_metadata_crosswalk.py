@@ -11,12 +11,13 @@ import json
 from datetime import UTC, datetime
 
 from music_intel_mcp.identity import InMemoryIsrcMbidIndex
+from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
 from music_intel_mcp.metadata_crosswalk import run_metadata_crosswalk
 from music_intel_mcp.models import ListenEvent, TrackRef
 from music_intel_mcp.replay_queue import replay_queue_coverage
 from music_intel_mcp.shared_store import canonical_track_id
-from music_intel_mcp.store import UserStore
-from music_intel_mcp.timbre import derive_timbre_roots
+from music_intel_mcp.store import AudioAnalysisRecord, UserStore
+from music_intel_mcp.timbre import TimbreSource, select_timbre_records
 
 
 def _event(spotify_id: str, *, name: str = "Track", artist: str = "Artist") -> ListenEvent:
@@ -165,20 +166,13 @@ def test_replay_queue_coverage_treats_aliased_history_key_as_analyzed(tmp_path):
     assert stats.queued_count == 0
 
 
-def test_timbre_pool_history_intersection_treats_aliased_history_key_as_mbid(tmp_path):
-    """AC3: the pool ∩ history intersection treats the aliased history key
-    as the ``mbid:`` record. Three history-only spotify keys alias to three
-    pool-analyzed mbids in a tight embedding neighborhood; three more
-    unaliased pool tracks sit in a second, well-separated neighborhood so
-    HDBSCAN has genuine density contrast (a single blob alone reads as
-    noise, per the existing timbre test suite's own convention). Unresolved
-    (unaliased) membership would intersect nothing from the "aaa/bbb/ccc"
-    group and leave only the second, foreign-history cluster."""
-    from music_intel_mcp.store import AudioAnalysisRecord
-
-    pool_root = tmp_path / "pool"
+def test_timbre_selection_treats_aliased_history_key_as_mbid(tmp_path):
+    """AC3 (#264: through ``select_timbre_records``): the (root ∪ pool) ∩
+    history selection treats the aliased history key as the ``mbid:``
+    record. Three history-only spotify keys alias to three pool-analyzed
+    mbids; three more history tracks are analyzed under their own spotify
+    keys. Unresolved membership would select only the latter three."""
     root = tmp_path / "user"
-    pool_root.mkdir()
     root.mkdir()
     other_events = [_event(f"other{i}") for i in range(3)]
     _write_history(
@@ -193,32 +187,27 @@ def test_timbre_pool_history_intersection_treats_aliased_history_key_as_mbid(tmp
         isrc_index=isrc_index,
         spotify_isrc_lookup={"sp1": "ISRC0001", "sp2": "ISRC0002", "sp3": "ISRC0003"}.get,
     )
+    store = UserStore(root=root)
 
     other_keys = [canonical_track_id(e.track) for e in other_events]
     records = [
-        AudioAnalysisRecord(track_id="mbid:mbid-aaa", embedding=[0.0, 0.0], tags={}),
-        AudioAnalysisRecord(track_id="mbid:mbid-bbb", embedding=[0.001, 0.0], tags={}),
-        AudioAnalysisRecord(track_id="mbid:mbid-ccc", embedding=[0.0, 0.001], tags={}),
-        AudioAnalysisRecord(track_id=other_keys[0], embedding=[10.0, 10.0], tags={}),
-        AudioAnalysisRecord(track_id=other_keys[1], embedding=[10.001, 10.0], tags={}),
-        AudioAnalysisRecord(track_id=other_keys[2], embedding=[10.0, 10.001], tags={}),
+        AudioAnalysisRecord(
+            track_id=key, embedding=[0.0, 0.0], tags={}, model_version=EMBEDDING_SPACE_VERSION
+        )
+        for key in ["mbid:mbid-aaa", "mbid:mbid-bbb", "mbid:mbid-ccc", *other_keys]
     ]
 
-    class _StoreWithPool(UserStore):
-        def list_pool_audio_analyses(self):
-            return records
-
-    aliased_store = _StoreWithPool(root=root, pool_root=pool_root)
-
-    roots = derive_timbre_roots(aliased_store, min_cluster_size=3)
-
-    assert len(roots) == 2
-    aliased_cluster = next(
-        r for r in roots if {s["track_id"] for s in r.evidence.sample_tracks} & {"mbid:mbid-aaa"}
+    selection = select_timbre_records(
+        store.load_history(),
+        TimbreSource(records=records, resolve_key=store.resolve_track_key),
     )
-    assert aliased_cluster.evidence.cluster_size == 3
-    assert {s["track_id"] for s in aliased_cluster.evidence.sample_tracks} == {
+
+    assert sorted(r.track_id for r in selection.records) == [
         "mbid:mbid-aaa",
         "mbid:mbid-bbb",
         "mbid:mbid-ccc",
-    }
+        "spotify:other0",
+        "spotify:other1",
+        "spotify:other2",
+    ]
+    assert selection.coverage == 1.0

@@ -500,7 +500,7 @@ class UserStore:
 
     def list_pool_audio_analyses(self) -> list[AudioAnalysisRecord]:
         """Read every persisted record from the node-level pool (#161), for
-        #162's pool ∩ participant-history timbre derivation. Mirrors
+        #264's (root ∪ pool) ∩ participant-history timbre selection. Mirrors
         ``list_audio_analyses`` but reads ``pool_audio_analysis_dir`` instead
         of the participant root. No pool configured, or pool dir not yet
         created -> empty list (honest-empty), same idiom as the root reader."""

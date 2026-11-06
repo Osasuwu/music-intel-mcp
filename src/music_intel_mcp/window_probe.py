@@ -147,7 +147,8 @@ class ClusterAgreement:
     ``adjusted_rand_index`` is ``None`` when either leg produced no cluster at
     all: there is no partition to compare, and the all-singleton fallback
     would score a meaningless 1.0. ``*_cluster_count`` is also the timbre
-    **root** count, since ``derive_timbre_roots`` emits one root per cluster."""
+    **root** count, since ``derive_timbre_roots`` emits one root per cluster
+    of the records ``analyze`` gives it."""
 
     n_tracks: int
     adjusted_rand_index: float | None

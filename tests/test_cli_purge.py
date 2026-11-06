@@ -1,7 +1,10 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from music_intel_mcp.cli import main
-from music_intel_mcp.models import GeneratedFrom, RootProfile
+from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
+from music_intel_mcp.models import GeneratedFrom, ListenEvent, RootProfile, TrackRef
 from music_intel_mcp.shared_store import LocalSharedStore
 from music_intel_mcp.store import UserStore
 
@@ -218,3 +221,57 @@ def test_purge_at_exactly_the_coverage_floor_runs(tmp_path):
     rc = main(["purge", "--data-dir", str(root)])
 
     assert rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# #264 -- analyze writes the timbre coverage where purge reads it.
+# --------------------------------------------------------------------------- #
+
+
+def _pooled_participant(tmp_path, *, analysed: int, played: int):
+    """A participant root with ``played`` listened tracks, the first
+    ``analysed`` of them analysed into the pool at the current version."""
+    root, pool = _participant(tmp_path), tmp_path / "pool"
+    store = UserStore(root=root, pool_root=pool)
+    store.append_events(
+        [
+            ListenEvent(
+                track=TrackRef(spotify_id=f"t{i}", name=f"t{i}", artist="a"),
+                played_at=datetime(2026, 1, 1, tzinfo=UTC),
+                source="test",
+            )
+            for i in range(played)
+        ]
+    )
+    for i in range(analysed):
+        store.write_audio_analysis(
+            track_id=f"spotify:t{i}",
+            embedding=[float(i), 0.0],
+            tags={},
+            model_version=EMBEDDING_SPACE_VERSION,
+        )
+    return root, pool
+
+
+# AC4 end to end: a participant whose every played track is analysed in the
+# pool is purged after analyze with no override flag -- the coverage analyze
+# measured is the one purge reads.
+def test_purge_after_analyze_runs_when_the_pool_covers_the_history(tmp_path):
+    root, pool = _pooled_participant(tmp_path, analysed=3, played=3)
+    assert main(["analyze", "--data-dir", str(root), "--pool-dir", str(pool)]) == 0
+
+    rc = main(["purge", "--data-dir", str(root), "--pool-dir", str(pool)])
+
+    assert rc == 0
+    assert not root.exists()
+
+
+def test_purge_after_analyze_refuses_when_the_pool_covers_too_little(tmp_path, capsys):
+    root, pool = _pooled_participant(tmp_path, analysed=2, played=3)
+    assert main(["analyze", "--data-dir", str(root), "--pool-dir", str(pool)]) == 0
+    assert "timbre=0.67" in capsys.readouterr().out
+
+    rc = main(["purge", "--data-dir", str(root), "--pool-dir", str(pool)])
+
+    assert rc == 2
+    assert root.exists()

@@ -73,7 +73,7 @@ The commands below spell out `--pool-dir` so they work either way. With a pool, 
    | The root still holds capture output: analyses or fingerprints (written before the pool existed), the live / replay / stream-decode journals, the replay ledger, or a window-probe journal | `--purge-capture-data` — copy anything worth keeping first; `--force` does not cover this |
    | The delivered profile's timbre coverage is below 80 % of valid plays, or not measured at all | `--accept-low-coverage` |
 
-   Until #264 lands, no profile reports timbre coverage, so every pilot purge needs `--accept-low-coverage`. Check the coverage `analyze` printed before passing it.
+   `analyze` prints the coverage it wrote as `timbre=` on its `coverage:` line — the share of valid plays whose track has an analysis in the pool or the root at the current embedding version. A profile written before #264 has no timbre coverage and counts as below the floor; re-run `analyze` rather than passing `--accept-low-coverage`. Pass the flag only after reading that number.
 
 Because purge is the end of the line, **do not purge until delivery is confirmed.** "No re-derivation after purge" is not a warning about a bug — it is the design: the participant's personal data exists on the node only for the time it takes to produce their profile.
 

@@ -74,7 +74,8 @@ def _is_valid(context: PlayContext | None, *, min_valid_ms: int = MIN_VALID_MS) 
     ``ms_played``, and ``skipped in {None, False}``. Null-safe by construction so
     the IFTTT / thin-scrobble sources — which carry no context — always pass.
 
-    Applies ONLY in the temporal seed path; the import and audio/scene seed maps
+    Applies in the temporal seed path and to the plays counted by the replay
+    queue and by timbre coverage (#264); the import and audio/scene seed maps
     are unaffected.
 
     ``min_valid_ms`` is keyword-only and defaults to :data:`MIN_VALID_MS` — the
