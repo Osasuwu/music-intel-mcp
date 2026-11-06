@@ -3,10 +3,10 @@ RootProfile per #162).
 
 Per-user HDBSCAN over raw Discogs-EffNet embedding vectors (not z-scored,
 not tags/scalars — decision 0c762eec). Mirrors audio.py's HDBSCAN/
-_build_cluster conventions. ``derive_timbre_roots`` (#162, decision
-945459ac reopened) is the pool ∩ participant-history bridge into
-``Root.category == "timbre"`` — see ``timbre.py``'s module docstring for
-the full picture.
+_build_cluster conventions. ``select_timbre_records`` (#264) picks the
+records a profile may cluster — (root ∪ pool) ∩ history at the current
+embedding version — and ``derive_timbre_roots`` (#162) turns them into
+``Root.category == "timbre"``; see ``timbre.py``'s module docstring.
 """
 
 from __future__ import annotations
@@ -15,10 +15,15 @@ from datetime import UTC, datetime
 
 import numpy as np
 
-from music_intel_mcp.models import ListenEvent, TrackRef
-from music_intel_mcp.shared_store import canonical_track_id
-from music_intel_mcp.store import AudioAnalysisRecord, UserStore
-from music_intel_mcp.timbre import derive_timbre_clusters, derive_timbre_roots
+from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
+from music_intel_mcp.models import ListenEvent, PlayContext, TrackRef
+from music_intel_mcp.store import AudioAnalysisRecord
+from music_intel_mcp.timbre import (
+    TimbreSource,
+    derive_timbre_clusters,
+    derive_timbre_roots,
+    select_timbre_records,
+)
 
 
 def _record(
@@ -106,135 +111,150 @@ def test_derive_timbre_clusters_below_min_size_returns_empty():
 
 
 # --------------------------------------------------------------------------- #
-# derive_timbre_roots (#162) — pool ∩ participant-history -> Root bridge
+# select_timbre_records (#264) -- (root ∪ pool) ∩ history at the current
+# embedding version, plus timbre coverage as a share of valid plays
 # --------------------------------------------------------------------------- #
 
-
-def _store(tmp_path, *, pool: bool = True) -> UserStore:
-    return UserStore(
-        root=tmp_path / "participant",
-        pool_root=(tmp_path / "pool") if pool else None,
-    )
+OLD_VERSION = "discogs-effnet-bsdynamic-1"  # a pre-#194 embedding space
 
 
-def _track_ref(spotify_id: str) -> TrackRef:
+def _ref(spotify_id: str) -> TrackRef:
     return TrackRef(spotify_id=spotify_id, name=spotify_id, artist="artist")
 
 
-def _listen(spotify_id: str) -> ListenEvent:
+def _listen(
+    spotify_id: str, *, ms_played: int | None = None, skipped: bool | None = None
+) -> ListenEvent:
+    context = None
+    if ms_played is not None or skipped is not None:
+        context = PlayContext(ms_played=ms_played, skipped=skipped)
     return ListenEvent(
-        track=_track_ref(spotify_id),
+        track=_ref(spotify_id),
         played_at=datetime(2026, 1, 1, tzinfo=UTC),
         source="test",
+        context=context,
     )
 
 
-def _write_pool_track(store: UserStore, spotify_id: str, embedding: list[float]) -> None:
-    # pool records are keyed by the same canonical id the live pipeline
-    # resolves from a TrackRef -- not a bare "spotify_id" string.
-    store.write_audio_analysis(
-        track_id=canonical_track_id(_track_ref(spotify_id)), embedding=embedding, tags={}
+def _rec(
+    track_id: str,
+    embedding: list[float],
+    *,
+    version: str | None = EMBEDDING_SPACE_VERSION,
+    tags: dict[str, float] | None = None,
+) -> AudioAnalysisRecord:
+    return AudioAnalysisRecord(
+        track_id=track_id, embedding=embedding, tags=tags or {}, model_version=version
     )
 
 
-# AC2: a track present in the pool but NOT in this participant's own history
-# must never surface in any derived root, even if it would otherwise cluster
-# tightly with the participant's own tracks -- reading the whole pool would
-# leak other participants' tracks into every profile. Two separated clusters
-# (a and b) are both in history so HDBSCAN has genuine density contrast to
-# extract from -- a single blob with nothing else is indistinguishable from
-# noise to HDBSCAN's default extraction (no allow_single_cluster).
-def test_derive_timbre_roots_excludes_pool_tracks_outside_history(tmp_path):
-    store = _store(tmp_path)
-    for i in range(3):
-        store.append_events([_listen(f"a{i}")])
-        store.append_events([_listen(f"b{i}")])
-        _write_pool_track(store, f"a{i}", [0.0 + 0.001 * i, 0.0])
-        _write_pool_track(store, f"b{i}", [10.0 + 0.001 * i, 10.0])
-    # foreign pool track: tight to the "a" history cluster in embedding
-    # space, but never listened to by this participant -- must never leak in.
-    _write_pool_track(store, "z", [0.0005, 0.0])
+# AC1: the input to timbre derivation is (root ∪ pool) ∩ this participant's
+# history, restricted to the current embedding version. A pool record and a
+# root record of listened tracks both count; a record from an older embedding
+# space, a record with no version at all, and a record of a track this
+# participant never played are each dropped, and each drop is counted.
+def test_select_timbre_records_keeps_current_version_history_records_from_root_and_pool():
+    events = [_listen("a"), _listen("b"), _listen("c"), _listen("d")]
+    pool = [
+        _rec("spotify:a", [0.0, 0.0]),
+        _rec("spotify:c", [0.0, 0.0], version=OLD_VERSION),
+        _rec("spotify:z", [0.0, 0.0]),  # another participant's track
+    ]
+    root = [
+        _rec("spotify:b", [1.0, 1.0]),
+        _rec("spotify:d", [1.0, 1.0], version=None),  # pre-#194 root record
+    ]
 
-    roots = derive_timbre_roots(store, min_cluster_size=3)
+    selection = select_timbre_records(events, TimbreSource(records=pool + root))
+
+    assert sorted(r.track_id for r in selection.records) == ["spotify:a", "spotify:b"]
+    assert selection.n_candidates == 5
+    assert selection.n_stale_version == 2
+    assert selection.n_outside_history == 1
+
+
+# AC1: one record per track. A track analysed into the root before the pool
+# existed and again into the pool is one track, not two points in the
+# clustering; the first record in the source (the pool's, by the CLI's order)
+# wins. The same holds when the two keys differ only through an alias.
+def test_select_timbre_records_keeps_the_first_record_per_resolved_key():
+    events = [_listen("a"), _listen("b")]
+    aliases = {"spotify:b": "mbid:bbb"}
+    records = [
+        _rec("spotify:a", [1.0, 1.0]),
+        _rec("mbid:bbb", [3.0, 3.0]),
+        _rec("spotify:a", [2.0, 2.0]),
+        _rec("spotify:b", [4.0, 4.0]),
+    ]
+
+    selection = select_timbre_records(
+        events,
+        TimbreSource(records=records, resolve_key=lambda key: aliases.get(key, key)),
+    )
+
+    assert sorted((r.track_id, list(r.embedding)) for r in selection.records) == [
+        ("mbid:bbb", [3.0, 3.0]),
+        ("spotify:a", [1.0, 1.0]),
+    ]
+
+
+# AC4: timbre coverage is a share of valid plays, not of tracks: 5 valid
+# plays (a0 x3, a1, b), of which the 4 on a0/a1 have a selected record ->
+# 0.8. The skipped a0 play and the 10 s b play are not valid plays and count
+# on neither side. Counting tracks would give 2/3; counting every play 5/7.
+def test_select_timbre_records_reports_coverage_as_share_of_valid_plays():
+    events = [
+        _listen("a0"),
+        _listen("a0"),
+        _listen("a0", ms_played=200_000),
+        _listen("a0", skipped=True),
+        _listen("a1"),
+        _listen("b"),
+        _listen("b", ms_played=10_000),
+    ]
+    records = [_rec("spotify:a0", [0.0, 0.0]), _rec("spotify:a1", [0.0, 0.0])]
+
+    selection = select_timbre_records(events, TimbreSource(records=records))
+
+    assert selection.coverage == 0.8
+
+
+def test_select_timbre_records_without_valid_plays_reports_zero_coverage():
+    events = [_listen("a", skipped=True)]
+
+    selection = select_timbre_records(events, TimbreSource(records=[_rec("spotify:a", [0.0])]))
+
+    assert selection.coverage == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# derive_timbre_roots (#162, #264) -- records -> Root(category="timbre")
+# --------------------------------------------------------------------------- #
+
+
+# #162 AC3, moved onto the record iterable by #264 AC1: a real cluster becomes
+# a Root whose label and explanation come from the cluster's top tags, with
+# sample tracks drawn from its own members.
+def test_derive_timbre_roots_emits_label_explanation_and_sample_tracks():
+    electronic = [
+        _rec(f"spotify:e{i}", [0.0 + 0.001 * i, 0.0], tags={"genre---electronic": 0.9})
+        for i in range(4)
+    ]
+    rock = [
+        _rec(f"spotify:r{i}", [10.0 + 0.001 * i, 10.0], tags={"genre---rock": 0.8})
+        for i in range(4)
+    ]
+
+    roots = derive_timbre_roots(electronic + rock, min_cluster_size=3)
 
     assert len(roots) == 2
-    z_id = canonical_track_id(_track_ref("z"))
-    for root in roots:
-        # z sits inside the "a" cluster's embedding neighborhood; if the pool
-        # weren't filtered down to history first, that cluster's evidence
-        # would reflect a cluster of 4, not 3.
-        assert root.evidence.cluster_size == 3
-        sample_ids = {s.get("track_id") for s in root.evidence.sample_tracks}
-        assert z_id not in sample_ids
-
-
-# AC3: real cluster -> Root emission carries a human-readable label/
-# explanation derived from the cluster's top tags, plus sample tracks.
-def test_derive_timbre_roots_emits_label_explanation_and_sample_tracks(tmp_path):
-    store = _store(tmp_path)
-    for i in range(4):
-        store.append_events([_listen(f"e{i}")])
-        store.write_audio_analysis(
-            track_id=canonical_track_id(_track_ref(f"e{i}")),
-            embedding=[0.0 + 0.001 * i, 0.0],
-            tags={"genre---electronic": 0.9},
-        )
-    for i in range(4):
-        store.append_events([_listen(f"r{i}")])
-        store.write_audio_analysis(
-            track_id=canonical_track_id(_track_ref(f"r{i}")),
-            embedding=[10.0 + 0.001 * i, 10.0],
-            tags={"genre---rock": 0.8},
-        )
-
-    roots = derive_timbre_roots(store, min_cluster_size=3)
-
-    assert len(roots) == 2
-    for root in roots:
-        assert root.category == "timbre"
-        assert root.structural_descriptor["label"] in {"Electronic", "Rock"}
-        assert root.structural_descriptor["explanation"]
-        assert root.structural_descriptor["top_tags"]
-        assert root.evidence.sample_tracks
-        assert all(
-            s["track_id"] in {canonical_track_id(_track_ref(f"e{i}")) for i in range(4)}
-            or s["track_id"] in {canonical_track_id(_track_ref(f"r{i}")) for i in range(4)}
-            for s in root.evidence.sample_tracks
-        )
-
-
-# AC4: no prior pilot-topology derivation exists for this store shape, so
-# "same as current derivation" means the honest-empty shape -- [] -- for
-# empty history, for no pool configured, and for a disjoint pool/history.
-def test_derive_timbre_roots_returns_empty_for_empty_history(tmp_path):
-    store = _store(tmp_path)
-    # a real, clusterable pool (>= min_cluster_size) -- so this only stays
-    # empty because history is empty, not because the pool is too small to
-    # cluster on its own.
-    for i in range(4):
-        _write_pool_track(store, f"a{i}", [0.0 + 0.001 * i, 0.0])
-
-    assert derive_timbre_roots(store) == []
-
-
-def test_derive_timbre_roots_returns_empty_when_pool_not_configured(tmp_path):
-    store = _store(tmp_path, pool=False)
-    for i in range(4):
-        store.append_events([_listen(f"a{i}")])
-
-    assert derive_timbre_roots(store) == []
-
-
-def test_derive_timbre_roots_returns_empty_for_disjoint_pool_and_history(tmp_path):
-    store = _store(tmp_path)
-    for i in range(4):
-        store.append_events([_listen(f"a{i}")])
-    # two separated blobs in the pool, both outside history -- HDBSCAN can
-    # extract real clusters from these (unlike a lone blob), so this only
-    # stays empty because the history-intersection filter drops them, not
-    # because the pool itself is unclusterable.
-    for i in range(4):
-        _write_pool_track(store, f"z{i}", [0.0 + 0.001 * i, 0.0])
-        _write_pool_track(store, f"w{i}", [10.0 + 0.001 * i, 10.0])
-
-    assert derive_timbre_roots(store) == []
+    by_label = {root.structural_descriptor["label"]: root for root in roots}
+    assert set(by_label) == {"Electronic", "Rock"}
+    assert all(root.category == "timbre" for root in roots)
+    assert by_label["Electronic"].structural_descriptor["explanation"] == (
+        "4 tracks in your history share a distinct sound profile, most associated with Electronic."
+    )
+    assert by_label["Electronic"].evidence.cluster_size == 4
+    electronic_samples = {s["track_id"] for s in by_label["Electronic"].evidence.sample_tracks}
+    assert len(electronic_samples) == 3
+    assert electronic_samples <= {f"spotify:e{i}" for i in range(4)}

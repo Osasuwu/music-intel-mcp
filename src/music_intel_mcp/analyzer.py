@@ -7,9 +7,10 @@ when a shared store **and** an audio feature source are supplied; the scene
 stage when a shared store **and** a tag source are supplied. The temporal stage
 (#65) runs whenever either upstream stage produced at least one root/tendency to
 condition on — it qualifies those roots by calendar bucket and detects epochs;
-with no upstream members its ordering guard skips it. With no enrichment wired,
-every derived section is empty — a *correct* output under the honest-empty
-invariant, not a failure.
+with no upstream members its ordering guard skips it. The timbre stage (#264)
+runs last, whenever a ``TimbreSource`` is supplied, and is not conditioned by
+temporal. With no enrichment wired, every derived section is empty — a
+*correct* output under the honest-empty invariant, not a failure.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .models import (
     GeneratedFrom,
     ListenEvent,
     MethodParams,
+    QualityLogEntry,
     RootProfile,
     TrackRef,
 )
@@ -36,6 +38,7 @@ from .scene import TagSource, derive_scene_roots, enrich_tags
 from .shared_store import SharedStore, TrackMetadataRecord, canonical_track_id
 from .spotify_extended import SOURCE as SPOTIFY_EXTENDED_SOURCE
 from .temporal import _is_valid, derive_temporal_roots
+from .timbre import TimbreSource, derive_timbre_roots_with_stats, select_timbre_records
 from .timezones import zone_for
 from .validation import DatasetContext, ValidationOutcome
 
@@ -284,6 +287,55 @@ def _dataset_ctx(generated_from: GeneratedFrom) -> DatasetContext:
     )
 
 
+def _timbre_stage(
+    events: Sequence[ListenEvent],
+    source: TimbreSource,
+    generated_from: GeneratedFrom,
+    outcome: ValidationOutcome,
+    *,
+    exclude_agent_originated: bool,
+) -> None:
+    """Timbre roots (#264) from (root ∪ pool) ∩ this participant's history.
+
+    Runs after the temporal stage and is not conditioned by it: timbre roots
+    carry ``temporal_stability="not_evaluated"``. Agent-originated plays
+    (#129) are not history here either. Writes the timbre coverage where
+    ``music-intel purge`` reads it (``coverage_per_category["timbre"]``) and
+    logs a stage that produced no root, with the counts behind it."""
+    if exclude_agent_originated:
+        events = [event for event in events if _is_user_initiated(event.source)]
+    selection = select_timbre_records(events, source)
+    counts = {
+        "candidates": selection.n_candidates,
+        "stale_version": selection.n_stale_version,
+        "outside_history": selection.n_outside_history,
+        "selected": len(selection.records),
+    }
+    generated_from.coverage_per_category["timbre"] = selection.coverage
+    generated_from.enrichment_diagnostics["timbre"] = counts
+    if not selection.records:
+        outcome.quality_log.append(
+            QualityLogEntry(
+                candidate_id="timbre",
+                category="timbre",
+                failed_test="empty_intersection",
+                details={**counts, "embedding_version": source.embedding_version},
+            )
+        )
+        return
+    roots, derivation = derive_timbre_roots_with_stats(selection.records)
+    if not roots:
+        outcome.quality_log.append(
+            QualityLogEntry(
+                candidate_id="timbre",
+                category="timbre",
+                failed_test="no_clusters",
+                details={**counts, "noise": derivation.n_noise},
+            )
+        )
+    outcome.roots.extend(roots)
+
+
 def analyze(
     events: Sequence[ListenEvent],
     *,
@@ -295,6 +347,7 @@ def analyze(
     tag_source: TagSource | None = None,
     resolver: IdentityResolver | None = None,
     exclude_agent_originated: bool = True,
+    timbre_source: TimbreSource | None = None,
 ) -> RootProfile:
     """Run the derivation pipeline over ``events`` and assemble a ``RootProfile``.
 
@@ -305,6 +358,12 @@ def analyze(
     stage (#65) then conditions the surviving roots/tendencies on calendar
     buckets and detects epochs. ``generated_from`` counts are always correct.
 
+    When a ``timbre_source`` is supplied (#264), the timbre stage clusters its
+    records that this history played, at its embedding version only, writes
+    ``coverage_per_category["timbre"]`` and appends ``Root(category="timbre")``
+    entries; an empty selection or one that forms no cluster is logged to
+    ``quality_log``. Without it, timbre coverage is not measured at all.
+
     When a ``resolver`` is supplied (the P9 bridge, #87), the seed/group step
     walks each event up the spotify_id -> ISRC -> MBID waterfall first, so the
     enrichers see the resolved MBID rather than the raw ingest-time identity.
@@ -313,7 +372,7 @@ def analyze(
 
     ``exclude_agent_originated`` (#129, on by default) drops plays sourced
     from agent-originated capture (currently automated playback, #128) before
-    they can contribute audio/scene/temporal evidence — they're coverage
+    they can contribute audio/scene/temporal/timbre evidence — they're coverage
     plays, not genuine listening signal, and must not skew scoring (decision
     ``1c0f37f0``). Pass ``False`` for the opt-in override to count them anyway.
     """
@@ -395,6 +454,15 @@ def analyze(
             for item in (*outcome.roots, *outcome.tendencies):
                 if item.id in temporal.epoch_presence:
                     item.epoch_presence = temporal.epoch_presence[item.id]
+
+    if timbre_source is not None:
+        _timbre_stage(
+            events,
+            timbre_source,
+            generated_from,
+            outcome,
+            exclude_agent_originated=exclude_agent_originated,
+        )
 
     return RootProfile(
         snapshot_id=f"{user_id}/{generated_at.isoformat()}",

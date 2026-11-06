@@ -121,6 +121,7 @@ from .spotify_extended import (
     load_spotify_extended_dir,
 )
 from .store import PoolNotConfiguredError, UserStore, open_user_store
+from .timbre import TimbreSource
 from .youtube_music import (
     SUPERSEDES as YOUTUBE_SUPERSEDES,
 )
@@ -582,6 +583,14 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         audio_source=audio_source,
         tag_source=tag_source,
         resolver=resolver,
+        # #264: every analysis this node holds for the store -- the pool's
+        # first, then the root's (a store analysed before #161 keeps its
+        # records there). The analyzer intersects them with this history, so
+        # other participants' pool tracks never reach the profile.
+        timbre_source=TimbreSource(
+            records=user_store.list_pool_audio_analyses() + user_store.list_audio_analyses(),
+            resolve_key=user_store.resolve_track_key,
+        ),
     )
     path = user_store.write_profile(profile)
 
@@ -594,7 +603,8 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     )
     print(
         f"  coverage: audio={cov.get('audio', 0.0):.2f} "
-        f"scene={cov.get('scene', 0.0):.2f} temporal={cov.get('temporal', 0.0):.2f}"
+        f"scene={cov.get('scene', 0.0):.2f} temporal={cov.get('temporal', 0.0):.2f} "
+        f"timbre={cov.get('timbre', 0.0):.2f}"
     )
     print(
         f"  roots={len(profile.roots)} tendencies={len(profile.tendencies)} "

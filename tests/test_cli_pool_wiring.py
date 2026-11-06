@@ -19,7 +19,12 @@ import pytest
 
 import music_intel_mcp.cli as cli
 import music_intel_mcp.desktop_app as desktop_app
-from music_intel_mcp.inference import ClassifierResult, InMemoryClassifier, InMemoryEmbeddingModel
+from music_intel_mcp.inference import (
+    EMBEDDING_SPACE_VERSION,
+    ClassifierResult,
+    InMemoryClassifier,
+    InMemoryEmbeddingModel,
+)
 from music_intel_mcp.models import ListenEvent, PlayContext, TrackRef
 from music_intel_mcp.replay_queue import MIN_VALID_PLAYS
 from music_intel_mcp.shared_store import canonical_track_id
@@ -150,6 +155,68 @@ def test_analyze_on_a_non_participant_root_runs_without_a_pool(tmp_path):
 
     assert rc == 0
     assert list((root / "profiles").glob("*.json"))
+
+
+# #264 AC1 at the CLI: analyses in the root count toward timbre too, not only
+# the pool's -- a store analysed before #161 has its records there. 2 of 3
+# played tracks analysed in the root -> coverage 2/3.
+def test_analyze_derives_timbre_coverage_from_root_analyses(tmp_path, capsys):
+    root = tmp_path / "data"
+    store = UserStore(root=root)
+    store.append_events(
+        [
+            ListenEvent(
+                track=TrackRef(spotify_id=f"t{i}", name=f"t{i}", artist="a"),
+                played_at=datetime(2026, 1, 1, tzinfo=UTC),
+                source="test",
+            )
+            for i in range(3)
+        ]
+    )
+    for i in range(2):
+        store.write_audio_analysis(
+            track_id=f"spotify:t{i}",
+            embedding=[float(i), 0.0],
+            tags={},
+            model_version=EMBEDDING_SPACE_VERSION,
+        )
+
+    rc = cli.main(["analyze", "--data-dir", str(root)])
+
+    assert rc == 0
+    assert "timbre=0.67" in capsys.readouterr().out
+    assert store.latest_profile().generated_from.coverage_per_category["timbre"] == 2 / 3
+
+
+# #264 AC1 at the CLI: history keys and record keys meet through the recorded
+# aliases (#178). t0 is played under its spotify key but analysed under the
+# mbid it aliases to; without the alias walk only t1 would count -> 0.50.
+def test_analyze_matches_timbre_records_through_recorded_aliases(tmp_path, capsys):
+    root = tmp_path / "data"
+    store = UserStore(root=root)
+    store.append_events(
+        [
+            ListenEvent(
+                track=TrackRef(spotify_id=f"t{i}", name=f"t{i}", artist="a"),
+                played_at=datetime(2026, 1, 1, tzinfo=UTC),
+                source="test",
+            )
+            for i in range(2)
+        ]
+    )
+    (root / "aliases.jsonl").write_text(
+        '{"loser": "spotify:t0", "winner": "mbid:m0", "tier": "metadata_crosswalk"}\n',
+        encoding="utf-8",
+    )
+    for track_id in ["mbid:m0", "spotify:t1"]:
+        store.write_audio_analysis(
+            track_id=track_id, embedding=[0.0, 0.0], tags={}, model_version=EMBEDDING_SPACE_VERSION
+        )
+
+    rc = cli.main(["analyze", "--data-dir", str(root)])
+
+    assert rc == 0
+    assert "timbre=1.00" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
