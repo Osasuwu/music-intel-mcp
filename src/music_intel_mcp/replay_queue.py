@@ -24,9 +24,11 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from .models import ListenEvent, TrackRef
 from .shared_store import canonical_track_id
+from .store import UserStore
 from .temporal import _is_valid
 
 MIN_VALID_PLAYS = 3
@@ -299,3 +301,32 @@ def measure_coverage_ceiling(
         ),
         min_valid_plays_should_be_lifted=not ceiling_meets_target,
     )
+
+
+def replay_queue_path(store: UserStore) -> Path:
+    """Default queue file: ``<data_root>/replay_queue.jsonl`` (#277)."""
+    return store.root / "replay_queue.jsonl"
+
+
+def write_replay_queue_file(path: Path, queue: Iterable[TrackRef]) -> int:
+    """Write ``queue`` as JSONL, one ``TrackRef`` per line in queue order
+    (#277). Overwrites: the file is the current queue, not a log. Returns the
+    number of tracks written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tracks = list(queue)
+    with path.open("w", encoding="utf-8") as f:
+        for track in tracks:
+            f.write(track.model_dump_json() + "\n")
+    return len(tracks)
+
+
+def read_replay_queue_file(path: Path) -> list[TrackRef]:
+    """Load a queue file written by :func:`write_replay_queue_file`, in file
+    order, ready to hand to ``process_replay_queue`` (#277). Blank lines are
+    ignored; a missing file or a malformed line raises."""
+    tracks: list[TrackRef] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            tracks.append(TrackRef.model_validate_json(line))
+    return tracks

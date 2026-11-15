@@ -1052,6 +1052,9 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
         COVERAGE_TARGET,
         measure_coverage_ceiling,
         replay_queue_coverage,
+        replay_queue_path,
+        select_replay_queue,
+        write_replay_queue_file,
         youtube_crosswalk_resolve_mbid,
     )
 
@@ -1082,6 +1085,18 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
         f"({stats.eligible_track_count} eligible, {stats.already_analyzed_count} already analyzed)"
     )
     print(f"  valid-play coverage: {stats.valid_play_coverage:.1%}")
+
+    # #277: the queue is a file, so an interrupted replay run can resume from it.
+    queue = select_replay_queue(
+        events,
+        has_audio_analysis=store.has_audio_analysis,
+        min_valid_plays=args.min_valid_plays,
+        cap=args.cap,
+        resolve_mbid=resolve_mbid,
+    )
+    queue_file = Path(args.queue_file) if args.queue_file else replay_queue_path(store)
+    write_replay_queue_file(queue_file, queue)
+    print(f"  queue file: {queue_file} ({len(queue)} tracks)")
 
     # #170 AC8: measure the achievable ceiling before AC5.1's >=80% criterion
     # is applied to a real capture run, and state which knob -- --cap or
@@ -1895,6 +1910,14 @@ def build_parser() -> argparse.ArgumentParser:
         "resolved ISRC to the MBID the live pipeline keys audio-analysis by, for "
         "cross-pipeline dedup (default: $MUSICBRAINZ_ISRC_INDEX or "
         "$MUSICBRAINZ_DUMP_DIR/isrc_to_mbid.tsv)",
+    )
+    p_replay_queue.add_argument(
+        "--queue-file",
+        dest="queue_file",
+        default=None,
+        help="JSONL file the queue is written to, one track per line in play order; "
+        "a resumed replay run reads it back (#277; default: "
+        "<data root>/replay_queue.jsonl)",
     )
     p_replay_queue.set_defaults(func=_cmd_replay_queue)
 

@@ -133,6 +133,43 @@ def summarize_replay_journal(path: Path) -> dict[str, int]:
     return counts
 
 
+RESUME_SKIP_ATTEMPTS = 2  # silent/short attempts after which a track is given up on
+
+
+def journal_handled_track_ids(path: Path) -> set[str]:
+    """Track ids a resumed run must not play again (#277): any with an ``ok``
+    entry, and any with ``RESUME_SKIP_ATTEMPTS`` ``silent``/``short`` entries
+    (the first attempt plus its one requeue). ``requeued``, ``yielded`` and
+    ``play_failed`` entries do not count. A missing journal handles nothing."""
+    if not path.exists():
+        return set()
+    done: set[str] = set()
+    failures: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        track_id, outcome = entry["track_id"], entry["outcome"]
+        if outcome == "ok":
+            done.add(track_id)
+        elif outcome in ("silent", "short"):
+            failures[track_id] = failures.get(track_id, 0) + 1
+    done.update(t for t, n in failures.items() if n >= RESUME_SKIP_ATTEMPTS)
+    return done
+
+
+def is_track_analysed(store: UserStore, track: TrackRef) -> bool:
+    """#277: a track is analysed when an audio-analysis record exists under
+    its ``spotify:`` key or its ``mbid:`` key (or its canonical key)."""
+    keys = [canonical_track_id(track)]
+    if track.spotify_id:
+        keys.append(f"spotify:{track.spotify_id}")
+    if track.mbid:
+        keys.append(f"mbid:{track.mbid}")
+    return any(store.has_audio_analysis(key) for key in keys)
+
+
 def replay_journal_path(store: UserStore) -> Path:
     return store.root / "replay_journal.jsonl"
 
@@ -300,6 +337,7 @@ def process_replay_queue(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     account: str | None = None,
     ledger_path: Path | None = None,
+    resume: bool = False,
     **run_kwargs,
 ) -> list[ReplayCaptureOutcome]:
     """Drive ``queue`` (mutable, drained in place -- mirrors the CLI's
@@ -309,13 +347,24 @@ def process_replay_queue(
     When ``ledger_path`` is given, the whole invocation's wall-clock span is
     appended as one window to the replay-window ledger (#167 AC1) -- coarser
     than the per-track journal, and appended (never overwritten) so windows
-    survive restarts across separate process invocations."""
+    survive restarts across separate process invocations.
+
+    ``resume=True`` (needs ``journal_path``) first drops every queued track the
+    journal already settles (:func:`journal_handled_track_ids`, #277). Resuming
+    or not, each track is checked with :func:`is_track_analysed` immediately
+    before it is played and skipped, unplayed and unjournaled, when an analysis
+    already exists."""
     results: list[ReplayCaptureOutcome] = []
+    if resume and journal_path is not None:
+        handled = journal_handled_track_ids(journal_path)
+        queue[:] = [t for t in queue if canonical_track_id(t) not in handled]
     requeue_counts: dict[str, int] = {}
     loop_started_at = now()
 
     while queue:
         track = queue.pop(0)
+        if is_track_analysed(store, track):
+            continue
         outcome = run_replay_capture(
             track=track,
             duration_s=track_duration_s(track),
