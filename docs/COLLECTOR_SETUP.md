@@ -12,10 +12,12 @@ resulting file back.
 - Windows 10/11.
 - [Python 3.11 or newer](https://www.python.org/downloads/) (during install,
   check "Add python.exe to PATH").
-- [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/)
+- The audio-capture helper (`wasapi_loopback_helper.exe`) and its SHA-256
+  hash, sent to you by the person running the pilot. If you didn't get one,
+  you build it yourself instead, which needs
+  [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/)
   — under "Tools for Visual Studio". You only need the **"Desktop development
-  with C++"** workload, not the full Visual Studio IDE. This is needed once,
-  to compile a small helper that talks to Windows' audio system.
+  with C++"** workload, not the full Visual Studio IDE.
 - Git (to get the code) — [git-scm.com](https://git-scm.com/downloads).
 
 ## 1. Get the code
@@ -25,17 +27,33 @@ git clone https://github.com/Osasuwu/music-intel-mcp.git
 cd music-intel-mcp
 ```
 
-## 2. Run the setup script
+## 2. Put the helper in place and check it
+
+If you were sent the helper, copy it to
+`native\wasapi_loopback_helper\wasapi_loopback_helper.exe` inside the repo
+folder, then check it is exactly the file that was sent — paste the hash you
+were given between the quotes:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 native\wasapi_loopback_helper\wasapi_loopback_helper.exe).Hash -eq "<hash you were sent>"
+```
+
+It must print `True`. If it prints `False`, don't run anything: delete the
+file and ask for a fresh copy. The setup script doesn't check the hash for
+you — this is the only check.
+
+## 3. Run the setup script
 
 ```powershell
 .\scripts\setup_collector.ps1
 ```
 
-This creates a private Python environment, installs everything needed, and
-builds the audio-capture helper. At the end it'll tell you about one manual
-step (below) before you can start listening.
+This creates a private Python environment and installs everything needed. It
+finds the helper you put in place and skips building it; without one, it
+builds the helper (that's when the C++ Build Tools are needed). At the end
+it'll tell you about one manual step (below) before you can start listening.
 
-## 3. Get the two model files (manual — one-time)
+## 4. Get the two model files (manual — one-time)
 
 The app uses two pretrained models to recognize tracks. They're free to use
 but their license doesn't allow this project to redistribute them, so you
@@ -50,7 +68,7 @@ grab them yourself from the people who publish them:
    cloned (the setup script prints the exact path and re-checks for you if
    you re-run it).
 
-## 4. Start the app
+## 5. Start the app
 
 ```powershell
 .venv\Scripts\python.exe -m music_intel_mcp.desktop_app
@@ -78,5 +96,6 @@ you'll do that explicitly (e.g. zipping that folder and sending it over).
   actually named exactly as listed above and sit directly in
   `.scratch\models\`, not a subfolder.
 - **Setup script fails at the "Building the WASAPI native helper" step** —
-  double check the C++ Build Tools installed the "Desktop development with
+  you are building the helper yourself, so either put the helper you were
+  sent in place (step 2) or double check the C++ Build Tools installed the "Desktop development with
   C++" workload specifically, not just the base installer.
