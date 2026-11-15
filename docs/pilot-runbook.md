@@ -14,6 +14,26 @@ Run through this before a participant starts (type A) or before importing their 
 - **Windows ≥ 2004.** Per-process WASAPI loopback capture (the mechanism behind `capture-spike` / `capture-loop` / `music-intel-desktop`) needs this build or newer. Check with `winver` or Settings → System → About → "OS build". Below 2004, capture cannot run at all — don't onboard until the participant updates.
 - **Desktop Spotify build, not the Microsoft Store package.** The collector's per-process capture has been built and exercised against the Win32 desktop installer only; if the participant has the Store version, have them install the desktop build from [spotify.com](https://www.spotify.com/download/) instead before their capture session.
 - **Replay browser ≠ daily browser.** Replay (below) runs the Spotify web player in a browser tab. It must be a different browser binary from whatever the participant normally browses in, because per-process loopback captures a whole process tree — a shared browser process would mix the participant's own listening into the replay capture (and vice versa). Pick one of `chrome`, `msedge`, `firefox`, `brave`, `opera`, `vivaldi` that they don't already use daily.
+- **Native loopback helper, handed over with its SHA-256.** Per-process capture runs through a compiled helper, `native\wasapi_loopback_helper\wasapi_loopback_helper.exe` (decision `b36dfd4b-2548-4d50-8c0b-edeb9d361a3a`). Building it needs the VS2022 C++ Build Tools, so the operator builds it once and hands the exe over; the participant does not build it.
+
+  Operator, in their checkout:
+
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_wasapi_helper.ps1
+  Get-FileHash -Algorithm SHA256 native\wasapi_loopback_helper\wasapi_loopback_helper.exe
+  ```
+
+  Record the printed hash in the participant's onboarding notes and send it to the participant together with the exe.
+
+  Participant, in their own checkout: put the exe at `native\wasapi_loopback_helper\wasapi_loopback_helper.exe`, then check it **before** running setup:
+
+  ```powershell
+  (Get-FileHash -Algorithm SHA256 native\wasapi_loopback_helper\wasapi_loopback_helper.exe).Hash -eq "<hash from the operator>"
+  ```
+
+  `True` → run `scripts\setup_collector.ps1`. It finds the exe and skips the build (#278), so no C++ toolchain is needed. `False` → do not run setup or the exe: delete it and ask the operator for a fresh copy. Setup does not check the hash itself; this comparison is the only check.
+
+  The helper binary is not published from CI (no GitHub Release asset, no workflow artifact) without the operator's explicit consent. Until that consent exists, the hand-over above is the only way a participant gets it.
 - **Dedicated replay account.** Replay never runs on the participant's own Spotify account or the operator's personal account — it runs on an account from the owner's family plan, used only for replay (decision `909d28fe-109d-4d5b-9460-86659897a322`). This keeps replay plays out of the participant's own listening history (a shared account would poison their next ESH export with replay events, and would train Spotify's recommender on the wrong signal) and off any account the operator uses personally.
 - **Consent file with grantor.** Before running `automated-playback` against a participant's queue, record consent:
 
@@ -22,6 +42,8 @@ Run through this before a participant starts (type A) or before importing their 
   ```
 
   `--grantor` is required by the CLI when granting (it exits 2 without one). The stored consent file carries `{grantor, timestamp, scope}` — `--scope` defaults to `automated-playback`. Revoke at any time with `--revoke`, which stops any running automated-playback session immediately.
+
+  > **TODO (#281, #276):** the replay-capture pilot replaces `automated-playback` with `replay-capture-spotify`, granted with `--scope replay-capture` and checked against that scope exactly. Neither is in place yet: `replay-capture-spotify` is not in `music-intel --help` (#281), and the consent check does not compare scopes (#276). Until both ship, `automated-playback` with the default scope above is the command that exists; rewrite this step and the ToS section below when #281 merges (#282).
 - **Importer skip counts.** Every `import-*` subcommand prints a skip summary when it drops rows (e.g. `import-spotify` reports rows with no track URI; `import-account` reports podcast episodes/audiobooks it can't place). Read that line after every import — a surprisingly high skip count usually means the export directory has the wrong files in it.
 
 ## Day-0 ESH request
