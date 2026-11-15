@@ -31,8 +31,15 @@ Write-Host "Installing music-intel-mcp with live-capture + desktop extras..."
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -e "$repoRoot[live-capture,desktop]"
 
-Write-Host "Building the WASAPI native helper..."
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build_wasapi_helper.ps1")
+# Same path src/music_intel_mcp/_wasapi_loopback.py loads the helper from. A
+# prebuilt exe handed over by the operator means no C++ toolchain is needed (#278).
+$helperExe = Join-Path $repoRoot "native\wasapi_loopback_helper\wasapi_loopback_helper.exe"
+if (Test-Path $helperExe) {
+    Write-Host "WASAPI native helper already present at $helperExe -- skipping the build."
+} else {
+    Write-Host "Building the WASAPI native helper..."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build_wasapi_helper.ps1")
+}
 
 if (Get-Command fpcalc -ErrorAction SilentlyContinue) {
     Write-Host "fpcalc already on PATH -- skipping chromaprint fetch."
