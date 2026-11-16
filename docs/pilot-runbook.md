@@ -99,6 +99,28 @@ The commands below spell out `--pool-dir` so they work either way. With a pool, 
 
 Because purge is the end of the line, **do not purge until delivery is confirmed.** "No re-derivation after purge" is not a warning about a bug — it is the design: the participant's personal data exists on the node only for the time it takes to produce their profile.
 
+## Overlap measurement (gates only #265)
+
+The cross-user overlap coefficient decides whether #265 (moving type A analyses into the node pool) is worth building. It gates nothing else: the operator's own replay starts as soon as #262 works, and a friend starts when their export arrives. It is measurable only between the operator and the Spotify participant.
+
+1. The operator exports salted hashes of their tracks with at least 3 valid plays, in two columns (Spotify track id; normalised track name + album artist):
+
+   ```powershell
+   music-intel overlap-export --data-dir <operator root> --out overlap-export.json
+   ```
+
+2. The operator gives `overlap-export.json` to the friend. The friend runs it against their own history and sends back only the printed numbers:
+
+   ```powershell
+   music-intel overlap-compare --data-dir <friend root> --file overlap-export.json
+   ```
+
+   For each column it prints the overlap coefficient, both set sizes, the intersection, the denominator min(|A|, |B|), and how many tracks could not be compared on that column.
+
+3. The bar and the column it is judged on are in `docs/domain/multi-user-pilot.md` (the #265 bar): the Spotify-id column decides.
+
+**Consent text (read to the friend before step 2).** What leaves the operator's machine: a file of salted hashes of their tracks played at least 3 times, plus the salt. What leaves the friend's machine: only counts (coefficient, set sizes, intersection, denominator, not-comparable counts), no track, artist, id or play. The salt gives no protection against the friend, who receives it with the file: with the salt they can hash guesses and test whether a given track is in the operator's list. Do not share the file with anyone else.
+
 ## Weekly checkpoint
 
 Once participants are active, review the capture journal weekly — one pass over what each active participant's capture/replay session logged that week (successful captures, RMS-gate rejections, re-queues, skip counts from the importer). This is the point to notice a stalled participant (no captures logged, replay queue not advancing) before it costs another week, and to catch schema/import surprises early rather than at delivery time.

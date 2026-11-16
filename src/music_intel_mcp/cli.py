@@ -1113,6 +1113,38 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_overlap_export(args: argparse.Namespace) -> int:
+    from . import overlap
+
+    events = _open_store(args).load_history()
+    out = Path(args.out)
+    columns = overlap.write_export(
+        out, events, salt=overlap.new_salt(), min_valid_plays=args.min_valid_plays
+    )
+    print(f"overlap export written to {out} (>={args.min_valid_plays} valid plays)")
+    for column in overlap.COLUMNS:
+        c = columns[column]
+        print(f"  {column}: {len(c.hashes)} hashes, {c.not_comparable} tracks not comparable")
+    print("The file carries its salt; hand it only to the participant who measures with it.")
+    return 0
+
+
+def _cmd_overlap_compare(args: argparse.Namespace) -> int:
+    from . import overlap
+
+    try:
+        salt, min_plays, own = overlap.read_export(Path(args.file))
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 2
+    events = _open_store(args).load_history()
+    local = overlap.hash_columns(events, salt=salt, min_valid_plays=min_plays)
+    print(f"overlap (>={min_plays} valid plays on both sides)")
+    print(overlap.format_report(overlap.compare(own, local)))
+    print("Send back only the numbers above, nothing else.")
+    return 0
+
+
 def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     from .replay_capture import replay_journal_path, summarize_replay_journal
     from .stream_decode import stream_decode_journal_path
@@ -1915,6 +1947,27 @@ def build_parser() -> argparse.ArgumentParser:
         "<data root>/replay_queue.jsonl)",
     )
     p_replay_queue.set_defaults(func=_cmd_replay_queue)
+
+    p_overlap_export = sub.add_parser(
+        "overlap-export",
+        help="pilot blocker (#266): export salted hashes of the >=3-valid-play tracks "
+        "in two identity columns, for a friend to measure cross-user overlap",
+    )
+    p_overlap_export.add_argument("--data-dir", default=None, help="data root")
+    p_overlap_export.add_argument("--out", required=True, help="export file to write")
+    p_overlap_export.add_argument(
+        "--min-valid-plays", dest="min_valid_plays", type=int, default=MIN_VALID_PLAYS
+    )
+    p_overlap_export.set_defaults(func=_cmd_overlap_export)
+
+    p_overlap_compare = sub.add_parser(
+        "overlap-compare",
+        help="pilot blocker (#266): compare an overlap export with local history and "
+        "print the overlap coefficient per identity column",
+    )
+    p_overlap_compare.add_argument("--data-dir", default=None, help="data root")
+    p_overlap_compare.add_argument("--file", required=True, help="export file received")
+    p_overlap_compare.set_defaults(func=_cmd_overlap_compare)
 
     p_replay_journal_summary = sub.add_parser(
         "replay-journal-summary",
