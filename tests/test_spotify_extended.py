@@ -432,10 +432,11 @@ def test_ledger_windows_from_replay_ledger_file(tmp_path):
     ]
 
 
-def test_cli_import_spotify_prints_ledger_tagged_count(tmp_path, capsys):
-    """#167 AC3: when a replay-window ledger is present at the data root, the
-    importer's printed summary surfaces the ledger-tagged count alongside the
-    existing imported/skip counts."""
+def test_cli_import_spotify_does_not_apply_the_replay_ledger(tmp_path, capsys):
+    """#276 AC2 (grill 2026-11-03 D3, reversing #167 AC2/AC3 for exports):
+    replay runs on a dedicated account, so every row of a participant's own
+    export is organic listening -- a replay-ledger window at the data root
+    must not tag any of them agent-originated."""
     store = UserStore(root=tmp_path)
     append_replay_ledger_entry(
         replay_ledger_path(store),
@@ -459,11 +460,11 @@ def test_cli_import_spotify_prints_ledger_tagged_count(tmp_path, capsys):
     rc = main(["import-spotify", "--from", str(export), "--data-dir", str(tmp_path)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "ledger-tagged 1" in out
+    assert "ledger-tagged" not in out
 
     history = UserStore(root=tmp_path).load_history()
     tagged = {e.track.name: e.source for e in history}
-    assert tagged["Replayed"] == AUTOMATED_PLAYBACK_SOURCE
+    assert tagged["Replayed"] == "spotify_extended"
     assert tagged["Organic"] == "spotify_extended"
 
 

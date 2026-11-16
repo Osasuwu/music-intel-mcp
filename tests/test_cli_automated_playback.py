@@ -52,7 +52,7 @@ def test_automated_playback_consent_grant_persists_it(tmp_path, capsys):
         ]
     )
     assert rc == 0
-    assert UserStore(root=tmp_path).has_automated_playback_consent() is True
+    assert UserStore(root=tmp_path).has_automated_playback_consent("automated-playback") is True
     assert "granted" in capsys.readouterr().out
 
 
@@ -73,7 +73,7 @@ def test_automated_playback_consent_revoke_removes_it(tmp_path):
     rc = main(["automated-playback-consent", "--revoke", "--data-dir", str(tmp_path)])
 
     assert rc == 0
-    assert UserStore(root=tmp_path).has_automated_playback_consent() is False
+    assert UserStore(root=tmp_path).has_automated_playback_consent("automated-playback") is False
 
 
 def test_automated_playback_blocked_without_consent(tmp_path, capsys):

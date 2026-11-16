@@ -571,7 +571,7 @@ def test_read_fingerprint_consults_pool_first_across_participants(tmp_path):
 # explicit, separately-recorded consent action distinct from #127's
 # MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED env-var opt-in.
 def test_automated_playback_consent_is_off_by_default(tmp_path):
-    assert UserStore(root=tmp_path).has_automated_playback_consent() is False
+    assert UserStore(root=tmp_path).has_automated_playback_consent("automated-playback") is False
 
 
 def test_grant_automated_playback_consent_persists_it(tmp_path):
@@ -581,7 +581,7 @@ def test_grant_automated_playback_consent_persists_it(tmp_path):
     )
 
     assert path.exists()
-    assert store.has_automated_playback_consent() is True
+    assert store.has_automated_playback_consent("automated-playback") is True
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["grantor"] == "alice"
     assert payload["timestamp"] == "2026-01-01T00:00:00Z"
@@ -597,13 +597,13 @@ def test_revoke_automated_playback_consent_removes_it(tmp_path):
 
     store.revoke_automated_playback_consent()
 
-    assert store.has_automated_playback_consent() is False
+    assert store.has_automated_playback_consent("automated-playback") is False
 
 
 def test_revoke_automated_playback_consent_is_a_noop_when_never_granted(tmp_path):
     store = UserStore(root=tmp_path)
     store.revoke_automated_playback_consent()  # must not raise
-    assert store.has_automated_playback_consent() is False
+    assert store.has_automated_playback_consent("automated-playback") is False
 
 
 # #165 AC3: the pre-#165 bare {"granted_at": ...} shape carries no grantor or
@@ -620,7 +620,7 @@ def test_old_format_consent_file_is_rejected_with_clear_message(tmp_path):
     )
 
     with pytest.raises(ConsentFormatError) as excinfo:
-        store.has_automated_playback_consent()
+        store.has_automated_playback_consent("automated-playback")
 
     # "Clear" means actionable: the message names the stale file and the exact
     # re-grant command (the `automated-playback-consent` subcommand's
@@ -636,7 +636,7 @@ def test_automated_playback_consent_is_independent_of_backfill_playlist_opt_in(
     # "distinct from S6's playlist opt-in" (#128 issue body) -- setting the
     # unrelated #127 env flag must not itself grant automated-playback consent.
     monkeypatch.setenv("MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED", "true")
-    assert UserStore(root=tmp_path).has_automated_playback_consent() is False
+    assert UserStore(root=tmp_path).has_automated_playback_consent("automated-playback") is False
 
 
 # --- #140 AC5: resolve_key / has_audio_analysis alias-awareness --------- #

@@ -16,11 +16,32 @@ Identity is taken directly from the queue's ``TrackRef`` via
 identity purposes (decision ``2e17aafa``, refined by the #166 AC1 comment
 thread: fpcalc-for-pool-storage is a separate, deferred concern, #140/#161).
 
-``run_replay_capture`` takes an optional ``on_capture_analyzed`` hook, called
-once per *accepted* capture with the analyzed PCM and its inference result.
-It exists so measurement riders (the #169 window-bias probe) can observe a
-real replay session without a parallel capture path of their own; a discarded
-silent/short capture never reaches it.
+Record contract (#276, grill 2026-11-03):
+
+- **Yield.** An optional ``should_yield`` callable is polled before every
+  capture read; when it reports an organic session the attempt pauses,
+  discards its buffer and ends ``yielded``. ``process_replay_queue`` puts a
+  yielded track at the back of the queue without spending its requeue.
+- **Ledger.** With ``ledger_path`` set, every play attempt appends one
+  :class:`ReplayLedgerEntry` -- every outcome, ``play_failed`` and ``yielded``
+  included -- and an empty ``account`` is refused before capture starts. The
+  ledger audits the dedicated replay account's windows; it is not applied to a
+  participant's own history export.
+- **Capture route.** ``capture_route`` (:data:`CaptureRoute`) is required. It
+  goes on the per-user analysis record (the root record) and on the ``ok``
+  journal entry; a pool record gains no field (pool records stay
+  provenance-free, ``446d7d0a``, #197), so under a pool the journal entry is
+  the per-user record of the route.
+- **Window probe.** Every accepted capture appends exactly one
+  :class:`~music_intel_mcp.window_probe.WindowPair` to
+  ``<data_root>/window_probe.jsonl`` -- written here, not by a caller-supplied
+  rider (decision (a) on #276, 16.11, replacing the #169 rider pattern). The
+  long leg reuses this capture's inference embedding; the short leg costs one
+  extra embedding pass over a front truncation of the same buffer.
+
+``on_capture_analyzed`` stays as an optional observer, called once per
+*accepted* capture with the analyzed PCM and its inference result; a
+discarded silent/short/yielded capture never reaches it.
 """
 
 from __future__ import annotations
@@ -30,10 +51,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, get_args, runtime_checkable
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .automated_playback import TrackSkipped
 from .capture import LoopbackSource, RingBufferSink
@@ -46,6 +67,12 @@ from .inference import (
 from .models import TrackRef
 from .shared_store import canonical_track_id
 from .store import UserStore
+from .window_probe import (
+    DEFAULT_SHORT_WINDOW_S,
+    append_window_pair,
+    embed_window_pair,
+    window_probe_path,
+)
 
 # Conservative, uncalibrated constants (issue #166 is `afk:2-plan`: these are
 # judgement calls the plan pins now, not values derived from a real pool --
@@ -56,7 +83,14 @@ DEFAULT_REPLAY_WINDOW_S = 120.0
 SILENCE_POLL_INTERVAL_S = 0.5
 MAX_SILENCE_WAIT_S = 10.0
 
-ReplayOutcome = Literal["ok", "silent", "short", "play_failed", "sample_rate_mismatch"]
+ReplayOutcome = Literal["ok", "silent", "short", "play_failed", "sample_rate_mismatch", "yielded"]
+
+CaptureRoute = Literal["per_app_output", "muted_endpoint", "cable"]
+"""Where the replay browser's audio was routed (grill 2026-11-03 D17b): its
+own per-process output on an unused endpoint, the muted default endpoint, or
+a virtual cable."""
+
+CAPTURE_ROUTES: tuple[str, ...] = get_args(CaptureRoute)
 
 
 @runtime_checkable
@@ -81,17 +115,19 @@ class ReplayJournalEntry(BaseModel):
     started_at: str
     ended_at: str
     reason: str | None = None
+    capture_route: str | None = None  # #276: set on ``ok`` entries only
 
 
 class ReplayLedgerEntry(BaseModel):
-    """One JSONL line per replay-loop invocation (#167 AC1) — a coarser,
-    per-session window distinct from :class:`ReplayJournalEntry`'s per-track
-    granularity. The ESH importer (#167 AC2) reads these windows to tag
-    export rows falling inside one as agent-originated."""
+    """One JSONL line per replay *play attempt* (#276, grill 2026-11-03 D3b;
+    was one per loop invocation under #167 AC1). It audits the dedicated
+    replay account's windows; an entry without an account is refused. Not
+    applied to participants' history exports any more (D3: with a dedicated
+    account every export row is organic listening)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    account: str
+    account: str = Field(min_length=1)
     data_root: str
     started_at: str
     ended_at: str
@@ -192,6 +228,7 @@ def _journal(
     started_at: datetime,
     ended_at: datetime,
     reason: str | None,
+    capture_route: str | None = None,
 ) -> None:
     if journal_path is None:
         return
@@ -203,8 +240,19 @@ def _journal(
             started_at=started_at.isoformat(),
             ended_at=ended_at.isoformat(),
             reason=reason,
+            capture_route=capture_route,
         ),
     )
+
+
+_YIELD_REASON = "organic session playing"
+
+
+def _require_account(ledger_path: Path | None, account: str | None) -> None:
+    """#276 AC2: a ledger entry without an account is refused -- up front,
+    before anything plays, not when the first entry is written."""
+    if ledger_path is not None and not account:
+        raise ValueError("a replay ledger needs the replay account (account is empty)")
 
 
 def run_replay_capture(
@@ -223,13 +271,28 @@ def run_replay_capture(
     max_silence_wait_s: float = MAX_SILENCE_WAIT_S,
     expected_sample_rate: int | None = None,
     on_capture_analyzed: Callable[..., None] | None = None,
+    should_yield: Callable[[], bool] | None = None,
+    account: str | None = None,
+    ledger_path: Path | None = None,
+    probe_short_window_s: float = DEFAULT_SHORT_WINDOW_S,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    capture_route: CaptureRoute,
 ) -> ReplayCaptureOutcome:
     """Run one replay capture attempt for ``track`` (already resolved by the
-    caller's queue selection — no identity resolution happens here)."""
+    caller's queue selection — no identity resolution happens here).
+
+    Raises ``ValueError`` before arming the capture when ``capture_route`` is
+    not a :data:`CaptureRoute` or when ``ledger_path`` is set without an
+    ``account``."""
+    if capture_route not in CAPTURE_ROUTES:
+        raise ValueError(f"capture_route must be one of {CAPTURE_ROUTES}, got {capture_route!r}")
+    _require_account(ledger_path, account)
     track_id = canonical_track_id(track)
     started_at = now()
     window_len = min(duration_s, max_window_s)
+
+    def _yielding() -> bool:
+        return should_yield is not None and should_yield()
 
     def _finish(outcome: ReplayOutcome, *, reason: str | None, analysis_path: Path | None = None):
         ended_at = now()
@@ -240,7 +303,18 @@ def run_replay_capture(
             started_at=started_at,
             ended_at=ended_at,
             reason=reason,
+            capture_route=capture_route if outcome == "ok" else None,
         )
+        if ledger_path is not None:
+            append_replay_ledger_entry(
+                ledger_path,
+                ReplayLedgerEntry(
+                    account=account or "",
+                    data_root=str(store.root),
+                    started_at=started_at.isoformat(),
+                    ended_at=ended_at.isoformat(),
+                ),
+            )
         return ReplayCaptureOutcome(
             track_id=track_id,
             outcome=outcome,
@@ -260,6 +334,9 @@ def run_replay_capture(
         sink: RingBufferSink | None = None
         waited = 0.0
         while waited < max_silence_wait_s:
+            if _yielding():
+                driver.pause()
+                return _finish("yielded", reason=_YIELD_REASON)
             frame = capture.read(poll_interval_s)
             if expected_sample_rate is not None and frame.sample_rate != expected_sample_rate:
                 driver.pause()
@@ -282,6 +359,9 @@ def run_replay_capture(
             return _finish("silent", reason="no signal above threshold before max wait")
 
         while sink.duration_s < window_len:
+            if _yielding():
+                driver.pause()
+                return _finish("yielded", reason=_YIELD_REASON)
             frame = capture.read(poll_interval_s)
             if frame.samples.shape[0] == 0:
                 break
@@ -308,11 +388,25 @@ def run_replay_capture(
         tags=inference.tags,
         model_version=EMBEDDING_SPACE_VERSION,
         input_rms=inference.input_rms,
+        capture_route=capture_route,
+    )
+    # #276 AC5: exactly one window-probe line per accepted capture, written
+    # here rather than by a rider (decision (a), 16.11). Same buffer, and the
+    # long leg is the embedding just computed.
+    append_window_pair(
+        window_probe_path(store),
+        embed_window_pair(
+            track_id=track_id,
+            pcm=pcm,
+            sample_rate=sink.sample_rate,
+            embedding_model=embedding_model,
+            short_window_s=probe_short_window_s,
+            long_embedding=inference.embedding,
+        ),
     )
     if on_capture_analyzed is not None:
-        # Passive observer of an accepted capture -- the #169 window probe rides
-        # here so it re-uses this buffer and this embedding instead of costing a
-        # second capture. Given the analyzed PCM, never the raw frames.
+        # Passive observer of an accepted capture, given the analyzed PCM,
+        # never the raw frames.
         on_capture_analyzed(
             track_id=track_id,
             pcm=pcm,
@@ -338,28 +432,30 @@ def process_replay_queue(
     account: str | None = None,
     ledger_path: Path | None = None,
     resume: bool = False,
+    capture_route: CaptureRoute,
     **run_kwargs,
 ) -> list[ReplayCaptureOutcome]:
     """Drive ``queue`` (mutable, drained in place -- mirrors the CLI's
     existing ``_cmd_automated_playback`` requeue-via-append idiom) through
     :func:`run_replay_capture`, re-queuing a silent/short track once (AC3).
+    A ``yielded`` track goes to the back of the queue and journals
+    ``requeued`` (reason ``yielded``) without spending its requeue (#276).
 
-    When ``ledger_path`` is given, the whole invocation's wall-clock span is
-    appended as one window to the replay-window ledger (#167 AC1) -- coarser
-    than the per-track journal, and appended (never overwritten) so windows
-    survive restarts across separate process invocations.
+    When ``ledger_path`` is given, each play attempt appends one window to the
+    replay ledger (#276; appended, never overwritten, so windows survive
+    restarts); ``account`` is then required, checked before the loop starts.
 
     ``resume=True`` (needs ``journal_path``) first drops every queued track the
     journal already settles (:func:`journal_handled_track_ids`, #277). Resuming
     or not, each track is checked with :func:`is_track_analysed` immediately
     before it is played and skipped, unplayed and unjournaled, when an analysis
     already exists."""
+    _require_account(ledger_path, account)
     results: list[ReplayCaptureOutcome] = []
     if resume and journal_path is not None:
         handled = journal_handled_track_ids(journal_path)
         queue[:] = [t for t in queue if canonical_track_id(t) not in handled]
     requeue_counts: dict[str, int] = {}
-    loop_started_at = now()
 
     while queue:
         track = queue.pop(0)
@@ -375,11 +471,25 @@ def process_replay_queue(
             classifier=classifier,
             journal_path=journal_path,
             now=now,
+            account=account,
+            ledger_path=ledger_path,
+            capture_route=capture_route,
             **run_kwargs,
         )
         results.append(outcome)
 
-        if outcome.outcome in ("silent", "short"):
+        if outcome.outcome == "yielded":
+            queue.append(track)
+            ts = now()
+            _journal(
+                journal_path,
+                track_id=outcome.track_id,
+                outcome="requeued",
+                started_at=ts,
+                ended_at=ts,
+                reason="yielded",
+            )
+        elif outcome.outcome in ("silent", "short"):
             n = requeue_counts.get(outcome.track_id, 0)
             if n < requeue_limit:
                 requeue_counts[outcome.track_id] = n + 1
@@ -393,17 +503,5 @@ def process_replay_queue(
                     ended_at=ts,
                     reason=outcome.outcome,
                 )
-
-    if ledger_path is not None:
-        loop_ended_at = now()
-        append_replay_ledger_entry(
-            ledger_path,
-            ReplayLedgerEntry(
-                account=account or "",
-                data_root=str(store.root),
-                started_at=loop_started_at.isoformat(),
-                ended_at=loop_ended_at.isoformat(),
-            ),
-        )
 
     return results

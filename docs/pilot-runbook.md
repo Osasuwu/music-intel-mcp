@@ -107,9 +107,9 @@ Once participants are active, review the capture journal weekly — one pass ove
 
 Before any participant starts, compare embeddings from a 120 s capture window against 30 s windows on the **owner's own data** — this is a gate, not a nice-to-have (decision `87277764-8173-4d87-a283-b5dc85aff76c`). The pilot's replay capture contract uses a 120 s window (`min(track duration, 120 s)`) to fit more tracks per hour, but the MTG models were trained on short clips, so a bias check against a 30 s window is due diligence before committing every participant's replay hours to the 120 s setting.
 
-The measurement rides on an ordinary replay session rather than costing dedicated hours: `run_replay_capture`/`process_replay_queue` accept an `on_capture_analyzed` hook, and `make_window_probe_recorder` (`window_probe.py`) uses it to embed the *same* accepted PCM buffer a second time, truncated to its first 30 s. Both legs therefore come from one capture — content is held fixed, so the reported distance is a pure window-length effect. The flip side, which the report prints and you must not read past: it contains **no** capture-to-capture variance, so those distances are not a total noise floor.
+The measurement rides on an ordinary replay session rather than costing dedicated hours: `run_replay_capture` (and so `process_replay_queue`) writes one pair to the probe journal for every accepted capture, with nothing to wire (#276), embedding the *same* accepted PCM buffer a second time, truncated to its first 30 s. Both legs therefore come from one capture — content is held fixed, so the reported distance is a pure window-length effect. The flip side, which the report prints and you must not read past: it contains **no** capture-to-capture variance, so those distances are not a total noise floor.
 
-Run the owner's replay queue with the hook wired, then read the gate back:
+Run the owner's replay queue, then read the gate back:
 
 ```powershell
 music-intel window-probe-report --data-dir <owner root>

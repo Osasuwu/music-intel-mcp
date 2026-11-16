@@ -27,7 +27,6 @@ from music_intel_mcp.window_probe import (
     compare_cluster_assignments,
     embed_window_pair,
     load_window_pairs,
-    make_window_probe_recorder,
     pair_cosine_distance,
     render_window_probe_report,
     summarize_distances,
@@ -302,27 +301,28 @@ class _NullDriver:
     def pause(self) -> None: ...
 
 
-def test_replay_capture_feeds_the_probe_recorder_without_a_second_capture(tmp_path):
-    """AC1/AC4 wiring: the probe rides on an ordinary replay session through
-    ``run_replay_capture``'s ``on_capture_analyzed`` hook — the same PCM buffer
-    the pilot embeds, truncated, so no extra replay hour is spent and the pair
-    lands in the gitignored data root."""
+def test_replay_capture_writes_the_probe_pair_itself_from_the_same_buffer(tmp_path):
+    """#276 AC5 (decision (a), 16.11): ``run_replay_capture`` writes the probe
+    pair itself -- no rider passed -- from the same PCM buffer the pilot
+    embeds, truncated, so no extra replay hour is spent and the pair lands in
+    the gitignored data root. The long leg reuses the replay path's own
+    inference embedding: the model is handed the full buffer once (inference)
+    and the truncation once (probe), never the full buffer twice."""
     store = UserStore(root=tmp_path)
     pcm = _loud_second()
-    probe_model = _LengthSensitiveEmbedding()
+    model = _LengthSensitiveEmbedding()
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=TrackRef(mbid="M-1", name="Around the World", artist="Daft Punk"),
         duration_s=1.0,
         capture=_FrameListCapture([pcm]),
         driver=_NullDriver(),
         store=store,
-        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
+        embedding_model=model,
         classifier=InMemoryClassifier(result=ClassifierResult(tags={"genre---electronic": 0.9})),
         poll_interval_s=1.0,
-        on_capture_analyzed=make_window_probe_recorder(
-            store=store, embedding_model=probe_model, short_window_s=0.5
-        ),
+        probe_short_window_s=0.5,
     )
 
     assert outcome.outcome == "ok"
@@ -331,28 +331,33 @@ def test_replay_capture_feeds_the_probe_recorder_without_a_second_capture(tmp_pa
     assert pairs[0].track_id == outcome.track_id
     assert pairs[0].long_window_s == 1.0
     assert pairs[0].short_window_s == 0.5
-    # The long leg reuses the inference embedding already computed by the
-    # replay path; only the short leg costs an extra pass.
-    assert probe_model.durations_s == [0.5]
-    assert pairs[0].long_embedding == pytest.approx([0.1, 0.2])
+    assert model.durations_s == [1.0, 0.5]
+    assert pairs[0].long_embedding == pytest.approx(store.list_audio_analyses()[0].embedding)
 
 
-def test_replay_capture_without_a_probe_hook_writes_no_probe_journal(tmp_path):
+def test_an_on_capture_analyzed_observer_adds_no_second_probe_line(tmp_path):
+    """#276 AC5: the built-in write replaces the #169 recorder rider. A caller's
+    ``on_capture_analyzed`` observer still fires once, and the probe journal
+    still gets exactly one line for the one accepted capture -- not one from
+    the built-in write plus one from a rider."""
     store = UserStore(root=tmp_path)
-    pcm = _loud_second()
+    calls: list[dict] = []
 
     run_replay_capture(
+        capture_route="per_app_output",
         track=TrackRef(mbid="M-1", name="Around the World", artist="Daft Punk"),
         duration_s=1.0,
-        capture=_FrameListCapture([pcm]),
+        capture=_FrameListCapture([_loud_second()]),
         driver=_NullDriver(),
         store=store,
         embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
         classifier=InMemoryClassifier(result=ClassifierResult(tags={})),
         poll_interval_s=1.0,
+        on_capture_analyzed=lambda **kw: calls.append(kw),
     )
 
-    assert not window_probe_path(store).exists()
+    assert len(calls) == 1
+    assert len(load_window_pairs(window_probe_path(store))) == 1
 
 
 def test_a_discarded_capture_never_reaches_the_probe(tmp_path):
@@ -363,31 +368,31 @@ def test_a_discarded_capture_never_reaches_the_probe(tmp_path):
     store = UserStore(root=tmp_path)
     blip = (0.02 * np.ones((160, 1))).astype(np.float32)  # anchors, 0.01 s
     quiet = np.zeros((16000, 1), dtype=np.float32)
-    probe_model = _LengthSensitiveEmbedding()
+    model = _LengthSensitiveEmbedding()
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=TrackRef(mbid="M-1", name="Around the World", artist="Daft Punk"),
         duration_s=1.0,
         capture=_FrameListCapture([blip, quiet]),
         driver=_NullDriver(),
         store=store,
-        embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
+        embedding_model=model,
         classifier=InMemoryClassifier(result=ClassifierResult(tags={})),
         poll_interval_s=1.0,
-        on_capture_analyzed=make_window_probe_recorder(
-            store=store, embedding_model=probe_model, short_window_s=0.5
-        ),
+        probe_short_window_s=0.5,
     )
 
     assert outcome.outcome == "silent"
-    assert probe_model.durations_s == []
+    assert model.durations_s == []
     assert load_window_pairs(window_probe_path(store)) == []
 
 
 def test_the_probe_rides_through_the_whole_replay_queue(tmp_path):
-    """The pilot drives ``process_replay_queue``, not single captures. The hook
-    reaches every track of the queue through it, so a pilot session accumulates
-    the >=100-track sample AC1 asks for without a separate probe run."""
+    """The pilot drives ``process_replay_queue``, not single captures. Every
+    accepted capture of the queue appends exactly one line, with nothing for
+    the caller to wire, so a pilot session accumulates the >=100-track sample
+    AC1 asks for without a separate probe run."""
     store = UserStore(root=tmp_path)
     pcm = _loud_second()
     tracks = [
@@ -397,6 +402,7 @@ def test_the_probe_rides_through_the_whole_replay_queue(tmp_path):
     queue = list(tracks)
 
     process_replay_queue(
+        capture_route="per_app_output",
         queue=queue,
         track_duration_s=lambda t: 1.0,
         capture=_FrameListCapture([pcm, pcm, pcm, pcm]),
@@ -405,9 +411,6 @@ def test_the_probe_rides_through_the_whole_replay_queue(tmp_path):
         embedding_model=InMemoryEmbeddingModel(vector=np.array([0.1, 0.2], dtype=np.float32)),
         classifier=InMemoryClassifier(result=ClassifierResult(tags={})),
         poll_interval_s=1.0,
-        on_capture_analyzed=make_window_probe_recorder(
-            store=store, embedding_model=_LengthSensitiveEmbedding(), short_window_s=0.5
-        ),
     )
 
     assert [p.track_id for p in load_window_pairs(window_probe_path(store))] == [

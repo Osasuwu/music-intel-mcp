@@ -47,6 +47,7 @@ class AudioAnalysisRecord:
     provenance: dict[str, Any] | None = None
     model_version: str | None = None
     input_rms: float | None = None
+    capture_route: str | None = None  # #276: root records written by replay only
 
 
 DEFAULT_DATA_DIR = "data"
@@ -386,6 +387,7 @@ class UserStore:
         provenance: Any | None = None,
         model_version: str | None = None,
         input_rms: float | None = None,
+        capture_route: str | None = None,
     ) -> Path:
         """Write one live-capture inference result under the LOCAL store only
         (#124 AC5). ``UserStore`` never talks to Supabase/SharedStore, so this
@@ -418,7 +420,13 @@ class UserStore:
         produced this record) and ``input_rms`` (the pre-normalization RMS
         applied-gain scalar) round-trip through BOTH branches now -- previously
         ``model_version`` was pool-only, leaving root records with no way to
-        tell which embedding-space version produced them."""
+        tell which embedding-space version produced them.
+
+        #276 AC4: ``capture_route`` (the replay path's
+        :data:`~music_intel_mcp.replay_capture.CaptureRoute`) goes on the root
+        record only, and only when given. The pool branch ignores it -- pool
+        records stay provenance-free (``446d7d0a``; #197 decides the pool
+        side), so it gains no key there, not even ``null``."""
         pool_path = self.pool_audio_analysis_path(track_id)
         if pool_path is not None:
             pool_path.parent.mkdir(parents=True, exist_ok=True)
@@ -439,6 +447,8 @@ class UserStore:
             track_id, embedding, tags, model_version=model_version, input_rms=input_rms
         )
         payload["provenance"] = provenance_payload
+        if capture_route is not None:
+            payload["capture_route"] = capture_route
         return self._atomic_write(path, payload)
 
     @staticmethod
@@ -493,6 +503,7 @@ class UserStore:
                     provenance=payload.get("provenance"),
                     model_version=payload.get("model_version"),
                     input_rms=payload.get("input_rms"),
+                    capture_route=payload.get("capture_route"),
                 )
             )
         records.sort(key=lambda r: r.track_id)
@@ -602,7 +613,7 @@ class UserStore:
     def automated_playback_consent_path(self) -> Path:
         return self.root / "automated_playback_consent.json"
 
-    def has_automated_playback_consent(self) -> bool:
+    def has_automated_playback_consent(self, scope: str) -> bool:
         """#128 AC1: off by default. Deliberately a separate file from any
         env-var opt-in (e.g. #127's ``MUSIC_INTEL_BACKFILL_PLAYLIST_ENABLED``)
         — this drives a real playback session, not just a queue, so it needs
@@ -611,7 +622,11 @@ class UserStore:
         #165 AC3: a pre-#165 file recorded only ``granted_at`` -- no grantor,
         no scope. Reading that as valid consent would grant an authorization
         nobody actually recorded, so it is rejected outright rather than
-        silently treated as either granted or not-granted."""
+        silently treated as either granted or not-granted.
+
+        #276 AC3 (grill 2026-11-03 D8a): ``scope`` is required and compared
+        exactly -- a grant for ``automated-playback`` does not satisfy a check
+        for ``replay-capture``, nor the reverse."""
         if not self.automated_playback_consent_path.exists():
             return False
         payload = json.loads(self.automated_playback_consent_path.read_text(encoding="utf-8"))
@@ -621,7 +636,7 @@ class UserStore:
                 "format (missing grantor/scope) -- revoke it and re-grant with "
                 "`automated-playback-consent --grant --grantor ... --scope ...`"
             )
-        return True
+        return payload["scope"] == scope
 
     def grant_automated_playback_consent(
         self, *, grantor: str, granted_at: str, scope: str
