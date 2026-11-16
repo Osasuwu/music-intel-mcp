@@ -18,10 +18,12 @@ window-length effect. The flip side, stated here because the report must not
 be over-read: this measures **no** capture-to-capture variance, so the cosine
 distances below are not a total-noise floor.
 
-Consequently the probe is a passive rider on an ordinary replay session — see
-:func:`make_window_probe_recorder`, wired through ``run_replay_capture``'s
-``on_capture_analyzed`` hook. It costs one extra embedding pass per track and
-zero extra replay hours.
+Consequently the probe rides on an ordinary replay session: since #276
+(decision (a), 16.11) ``run_replay_capture`` itself appends exactly one pair
+per accepted capture to :func:`window_probe_path` — no caller-supplied rider.
+It costs one extra embedding pass per track and zero extra replay hours.
+:func:`make_window_probe_recorder` remains the rider for the #201
+stream-decode leg, which journals to its own file.
 """
 
 from __future__ import annotations
@@ -357,9 +359,10 @@ def make_window_probe_recorder(
     short_window_s: float = DEFAULT_SHORT_WINDOW_S,
     path: Path | None = None,
 ) -> Callable[..., None]:
-    """An ``on_capture_analyzed`` hook for :func:`~music_intel_mcp.
-    replay_capture.run_replay_capture` that appends one :class:`WindowPair` per
-    successful capture.
+    """An ``on_capture_analyzed`` hook that appends one :class:`WindowPair`
+    per successful capture. Used by the #201 stream-decode leg; do not pass it
+    to :func:`~music_intel_mcp.replay_capture.run_replay_capture`, which writes
+    its own pair since #276 -- a rider there would write a second line.
 
     The long leg is the embedding the replay path already computed, so the
     probe's marginal cost is a single extra inference pass over the first

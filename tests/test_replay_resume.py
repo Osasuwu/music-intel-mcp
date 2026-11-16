@@ -66,6 +66,7 @@ def _analyse(store: UserStore, key: str) -> None:
 
 def _run(store, queue, journal, driver, *, resume=True):
     return process_replay_queue(
+        capture_route="per_app_output",
         queue=queue,
         track_duration_s=lambda t: 0.05,
         capture=_Capture(),

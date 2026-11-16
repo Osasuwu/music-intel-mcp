@@ -101,6 +101,7 @@ def test_run_replay_capture_bypasses_identity_resolution(tmp_path, monkeypatch) 
     store = UserStore(root=tmp_path)
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=0.05,
         capture=capture,
@@ -130,6 +131,7 @@ def test_run_replay_capture_writes_model_version_and_input_rms(tmp_path) -> None
     store = UserStore(root=tmp_path)
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=0.05,
         capture=capture,
@@ -158,6 +160,7 @@ def test_run_replay_capture_arms_before_play_and_anchors_window_on_signal(tmp_pa
     store = UserStore(root=tmp_path)
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=_track(),
         duration_s=0.1,
         capture=capture,
@@ -188,6 +191,7 @@ def test_run_replay_capture_window_length_is_capped_by_max_window_s(tmp_path) ->
     store = UserStore(root=tmp_path)
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=_track(),
         duration_s=1000.0,
         capture=capture,
@@ -216,6 +220,7 @@ def test_run_replay_capture_silent_produces_no_analysis_and_journals_reason(tmp_
     track = _track()
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=0.1,
         capture=capture,
@@ -248,6 +253,7 @@ def test_run_replay_capture_short_buffer_produces_no_analysis_and_journals_reaso
     track = _track()
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=1.0,
         capture=capture,
@@ -279,6 +285,7 @@ def test_process_replay_queue_requeues_silent_track_once(tmp_path) -> None:
     queue = [track]
 
     results = process_replay_queue(
+        capture_route="per_app_output",
         queue=queue,
         track_duration_s=lambda t: 0.1,
         capture=capture,
@@ -315,6 +322,7 @@ def test_run_replay_capture_sample_rate_mismatch_is_journaled_and_discarded(tmp_
     track = _track()
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=0.1,
         capture=capture,
@@ -347,6 +355,7 @@ def test_process_replay_queue_does_not_requeue_sample_rate_mismatch(tmp_path) ->
     queue = [track]
 
     results = process_replay_queue(
+        capture_route="per_app_output",
         queue=queue,
         track_duration_s=lambda t: 0.1,
         capture=capture,
@@ -363,10 +372,11 @@ def test_process_replay_queue_does_not_requeue_sample_rate_mismatch(tmp_path) ->
 
 
 def test_process_replay_queue_appends_window_to_ledger_per_data_root(tmp_path) -> None:
-    """#167 AC1: one call to the replay loop appends a single window
-    (start/end) to a ledger file keyed by the data root -- calling the loop
-    again (a fresh process, i.e. "restart") appends a second window rather
-    than overwriting the first, so windows survive restarts."""
+    """#167 AC1, per attempt since #276: a one-track run appends a single
+    window (start/end) to a ledger file keyed by the data root -- calling the
+    loop again (a fresh process, i.e. "restart") with another track appends a
+    second window rather than overwriting the first, so windows survive
+    restarts."""
     capture = _ScriptedCapture([_tone_frame(800), _tone_frame(800)])
     driver = _ScriptedDriver()
     store = UserStore(root=tmp_path)
@@ -374,6 +384,7 @@ def test_process_replay_queue_appends_window_to_ledger_per_data_root(tmp_path) -
     track = _track()
 
     process_replay_queue(
+        capture_route="per_app_output",
         queue=[track],
         track_duration_s=lambda t: 0.05,
         capture=capture,
@@ -395,7 +406,8 @@ def test_process_replay_queue_appends_window_to_ledger_per_data_root(tmp_path) -
     # second invocation ("restart") appends rather than overwrites
     capture2 = _ScriptedCapture([_tone_frame(800), _tone_frame(800)])
     process_replay_queue(
-        queue=[track],
+        capture_route="per_app_output",
+        queue=[TrackRef(mbid="M-2", name="Da Funk", artist="Daft Punk")],
         track_duration_s=lambda t: 0.05,
         capture=capture2,
         driver=_ScriptedDriver(),
@@ -421,6 +433,7 @@ def test_process_replay_queue_without_ledger_path_writes_no_ledger(tmp_path) -> 
     track = _track()
 
     process_replay_queue(
+        capture_route="per_app_output",
         queue=[track],
         track_duration_s=lambda t: 0.05,
         capture=capture,
@@ -445,6 +458,7 @@ def test_run_replay_capture_play_failure_is_journaled_as_play_failed(tmp_path) -
     track = _track()
 
     outcome = run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=0.1,
         capture=capture,
@@ -473,6 +487,7 @@ def test_summarize_replay_journal_counts_per_outcome(tmp_path) -> None:
 
     for _ in range(2):
         run_replay_capture(
+            capture_route="per_app_output",
             track=track,
             duration_s=0.05,
             capture=_ScriptedCapture([silent_frame] * 4),
@@ -486,6 +501,7 @@ def test_summarize_replay_journal_counts_per_outcome(tmp_path) -> None:
             poll_interval_s=0.01,
         )
     run_replay_capture(
+        capture_route="per_app_output",
         track=track,
         duration_s=0.05,
         capture=_ScriptedCapture([_tone_frame(800)]),

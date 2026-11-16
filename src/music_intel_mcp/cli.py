@@ -117,7 +117,6 @@ from .spotify_extended import (
 )
 from .spotify_extended import (
     SpotifyExtendedStats,
-    load_replay_ledger_windows,
     load_spotify_extended_dir,
 )
 from .store import PoolNotConfiguredError, UserStore, open_user_store
@@ -141,6 +140,8 @@ _SUPABASE_URL_ENV = "SUPABASE_URL"
 _SUPABASE_KEY_ENV = "SUPABASE_KEY"
 _SPOTIFY_CLIENT_ID_ENV = "SPOTIFY_CLIENT_ID"
 _SPOTIFY_CLIENT_SECRET_ENV = "SPOTIFY_CLIENT_SECRET"
+AUTOMATED_PLAYBACK_SCOPE = "automated-playback"
+"""The consent scope `automated-playback` checks, compared exactly (#276 AC3)."""
 
 
 def _open_store(args: argparse.Namespace) -> UserStore:
@@ -298,12 +299,10 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
     store = _open_store(args)
     before = store.load_history()
     stats = SpotifyExtendedStats()
-    # #167 AC2: rows falling inside a replay-loop window are tagged
-    # agent-originated (not dropped) rather than imported as organic history.
-    from .replay_capture import replay_ledger_path
-
-    ledger_windows = load_replay_ledger_windows(replay_ledger_path(store))
-    imported = load_spotify_extended_dir(args.source, stats=stats, ledger_windows=ledger_windows)
+    # #276 AC2 (grill 2026-11-03 D3): replay runs on a dedicated account, so
+    # every row of a participant's own export is organic listening -- the
+    # replay ledger is an audit of the replay account, not applied here.
+    imported = load_spotify_extended_dir(args.source, stats=stats)
     # Source-scoped supersede (decision 23fcf92c): the authoritative Spotify export
     # replaces the thin IFTTT rows and any prior run of this importer — a play
     # logged by both is the *same* play — while events from every other source are
@@ -352,10 +351,6 @@ def _cmd_import_spotify(args: argparse.Namespace) -> int:
         )
         if stats.unparseable_samples:
             print(f"    unparseable e.g.: {stats.unparseable_samples}")
-    if stats.tagged_agent_originated:
-        # #167 AC3: rows inside a replay-loop window (#167 AC1/AC2) were tagged
-        # agent-originated, not dropped -- surfaced separately from the skip counts.
-        print(f"  ledger-tagged {stats.tagged_agent_originated} rows as agent-originated")
     return 0
 
 
@@ -1415,7 +1410,7 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
 
     store = _open_store(args)
     try:
-        has_consent = store.has_automated_playback_consent()
+        has_consent = store.has_automated_playback_consent(AUTOMATED_PLAYBACK_SCOPE)
     except ConsentFormatError as exc:
         print(f"error: {exc}")
         return 2
@@ -1513,7 +1508,7 @@ def _cmd_automated_playback(args: argparse.Namespace) -> int:
         # canonical_track_id(t), which would send an isrc/mbid value where
         # Spotify expects its own track id (#158 identity waterfall).
         track_duration_s=lambda t: playback_client.track_duration_s(f"spotify:{t.spotify_id}"),
-        has_consent=store.has_automated_playback_consent,
+        has_consent=lambda: store.has_automated_playback_consent(AUTOMATED_PLAYBACK_SCOPE),
         on_play=on_play,
         pause=playback_client.pause,
         sleep=time.sleep,
@@ -2057,7 +2052,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_playback_consent.add_argument(
         "--scope",
-        default="automated-playback",
+        default=AUTOMATED_PLAYBACK_SCOPE,
         help="what the consent covers (#165 AC3, default: automated-playback)",
     )
     p_playback_consent.set_defaults(func=_cmd_automated_playback_consent)
