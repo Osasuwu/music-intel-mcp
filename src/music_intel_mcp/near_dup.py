@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .inference import EMBEDDING_SPACE_VERSION
 from .store import UserStore
 
 # --- AC3: fingerprint match rule --------------------------------------- #
@@ -234,8 +235,14 @@ def scan(
     candidates and write a transparent report -- every considered pair,
     including rejections and why, ``accepted: null`` on every entry. This
     never merges anything; that is ``apply``'s job (AC4) over a reviewed copy
-    of this report."""
-    records = store.list_audio_analyses()
+    of this report.
+
+    Only records in the current :data:`EMBEDDING_SPACE_VERSION` are compared:
+    a cosine distance across two embedding spaces measures the front-end
+    change, not the recording (#198). The others are counted in the report's
+    ``skipped_stale_version``, never paired."""
+    all_records = store.list_audio_analyses()
+    records = [r for r in all_records if r.model_version == EMBEDDING_SPACE_VERSION]
     keys = [r.track_id for r in records]
     embeddings = np.array([r.embedding for r in records], dtype=float)
 
@@ -282,6 +289,7 @@ def scan(
         "root": str(store.root),
         "generated_at": generated_at.isoformat(),
         "thresholds": _thresholds_payload(),
+        "skipped_stale_version": len(all_records) - len(records),
         "pairs": pairs_report,
     }
 

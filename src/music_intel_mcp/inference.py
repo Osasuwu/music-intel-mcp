@@ -108,7 +108,8 @@ class ClassifierResult:
 # means every embedding computed before this version is not comparable to one
 # computed after it. Consumers (near_dup.py, the store) key on this string to
 # decide when a record's embedding must be treated as stale.
-EMBEDDING_SPACE_VERSION = "discogs-effnet-bsdynamic-1+rms-norm-v1"
+# #198 bumped it to v2: power spectrum + symmetric Hann (the Essentia match).
+EMBEDDING_SPACE_VERSION = "discogs-effnet-bsdynamic-1+rms-norm+essentia-mel-v2"
 
 
 @dataclass
@@ -198,12 +199,19 @@ def _resolve_model_path(
 
 
 # Mel frontend + patching, matching essentia's TensorflowInputMusiCNN /
-# TensorflowPredictEffnetDiscogs preprocessing (sampleRate=16000, frameSize=512,
-# hopSize=256, numberBands=96, log10(1 + 10000*x) compression), fed to the
-# model as non-overlapping 128-frame patches, mean-pooled into one track-level
-# embedding. Best-effort match to essentia's own DSP (not bit-exact — the
-# model repo does not publish the reference preprocessing as runnable code);
-# adequate for this spike, not for score-level fidelity claims.
+# TensorflowPredictEffnetDiscogs preprocessing, fed to the model as
+# non-overlapping 128-frame patches, mean-pooled into one track-level embedding.
+# TensorflowInputMusiCNN is: sampleRate=16000, frameSize=512, hopSize=256,
+# Windowing(type='hann', normalized=False) -- the *symmetric* Hann (sum 255.5),
+# not librosa's default periodic one -- then Spectrum, then
+# MelBands(numberBands=96, type='power', weighting='linear', normalize='unit_tri',
+# warpingFormula='slaneyMel'), then log10(1 + 10000*x). #198 measured it against
+# Essentia 2.1-beta6-dev itself: MelBands runs on the POWER spectrum (not the
+# magnitude), and Essentia's unit_tri is unit *area*, i.e. exactly librosa's
+# norm='slaney' filterbank (max abs diff 0). With power=2.0 and the symmetric
+# Hann, the log-mel matches Essentia to max abs ~1e-3 (tests/test_inference.py
+# pins it to a checked-in Essentia fixture). Not covered by that fixture:
+# Essentia's patch hop in TensorflowPredictEffnetDiscogs (unverified).
 _MEL_FRAME_SIZE = 512
 _MEL_HOP_SIZE = 256
 _MEL_N_BANDS = 96
@@ -253,7 +261,8 @@ def _mel_patches(pcm: np.ndarray, sample_rate: int) -> tuple[np.ndarray, float]:
         n_fft=_MEL_FRAME_SIZE,
         hop_length=_MEL_HOP_SIZE,
         n_mels=_MEL_N_BANDS,
-        power=1.0,
+        window=np.hanning(_MEL_FRAME_SIZE),  # symmetric Hann, as Essentia's Windowing
+        power=2.0,  # #198: Essentia's MelBands(type='power')
     )
     log_mel = np.log10(1.0 + _MEL_LOG_SCALE * mel).T  # (frames, bands), float64
 
