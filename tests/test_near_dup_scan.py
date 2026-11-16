@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
 from music_intel_mcp.near_dup import (
     HUB_GUARD_NEIGHBOR_COUNT,
     REASON_ABOVE_THRESHOLD,
@@ -39,7 +40,9 @@ def _fp(n: int, seed: int = 0) -> list[int]:
 
 
 def _write(store: UserStore, track_id: str, embedding: list[float]) -> None:
-    store.write_audio_analysis(track_id=track_id, embedding=embedding, tags={})
+    store.write_audio_analysis(
+        track_id=track_id, embedding=embedding, tags={}, model_version=EMBEDDING_SPACE_VERSION
+    )
 
 
 def _find(pairs: list[dict], key_a: str, key_b: str) -> dict:
@@ -190,3 +193,29 @@ def test_scan_reports_named_thresholds(tmp_path):
     assert "cosine_distance_embedding_only" in thresholds
     assert "hub_guard_neighbor_count" in thresholds
     assert "hub_guard_distance_eps" in thresholds
+
+
+# #198: a record from another embedding space is never paired -- its cosine
+# distance to a current record measures the front-end change, not the
+# recording. Planted as the strongest possible duplicate (identical embedding
+# and fingerprint) of a current record, so only the version check keeps it out.
+# A record with no version (pre-#194) is skipped the same way.
+def test_scan_skips_records_from_another_embedding_space(tmp_path):
+    store = UserStore(root=tmp_path / "root")
+    fp = _fp(300, seed=7)
+    _write(store, "spotify:cur", [1.0, 0.0, 0.0])
+    store.write_audio_analysis(
+        track_id="name:cur|artist",
+        embedding=[1.0, 0.0, 0.0],
+        tags={},
+        model_version="discogs-effnet-bsdynamic-1+rms-norm-v1",  # pre-#198 space
+    )
+    store.write_audio_analysis(track_id="name:old|artist", embedding=[1.0, 0.0, 0.0], tags={})
+    for key in ("spotify:cur", "name:cur|artist", "name:old|artist"):
+        store.write_fingerprint(track_id=key, fingerprint=fp, duration_s=30.0)
+
+    json_path = scan(store, now=lambda: datetime(2026, 9, 6, tzinfo=UTC))
+    report = json.loads(json_path.read_text(encoding="utf-8"))
+
+    assert report["pairs"] == []
+    assert report["skipped_stale_version"] == 2

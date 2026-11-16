@@ -228,3 +228,28 @@ def test_mel_patches_clipped_square_wave_is_finite() -> None:
     square = np.sign(np.sin(2 * np.pi * 440.0 * t / 16000.0)).astype(np.float32)
     out, _ = _mel_patches(square, 16000)
     assert np.isfinite(out).all()
+
+
+# #198: the front-end must reproduce Essentia's TensorflowInputMusiCNN -- the
+# input Discogs-EffNet was trained on. The fixture is Essentia's own output
+# (2.1-beta6-dev: FrameGenerator(512, 256, startFromZero=False) ->
+# TensorflowInputMusiCNN per frame) on a fixed 0.512 s, RMS-0.1 signal stored
+# beside it, so the test needs no Essentia at run time. The signal length is a
+# hop multiple (33 frames from both Essentia and librosa center=True) and its
+# RMS is already the normalization target, so _mel_patches' RMS step is ~1.
+# Measured agreement: max abs 1.2e-4 on a log10 surface spanning 0..4.9. The
+# old magnitude-spectrum front-end (power=1.0) is off by up to 1.19 here and
+# the periodic (librosa default) Hann by 0.068, so atol=1e-3 catches both.
+# Regenerate with scripts/gen_essentia_mel_fixture.py (Linux, `pip install essentia`).
+def test_mel_patches_matches_essentia_tensorflow_input_musicnn() -> None:
+    from pathlib import Path
+
+    fixture = np.load(Path(__file__).parent / "fixtures" / "essentia_tensorflow_input_musicnn.npz")
+    signal, reference = fixture["signal"], fixture["logmel"]
+    assert reference.shape == (33, 96)
+
+    patches, _ = _mel_patches(signal, 16000)
+
+    # one zero-padded 128-frame patch; the first 33 frames are the signal's
+    assert patches.shape == (1, 128, 96)
+    np.testing.assert_allclose(patches[0, :33], reference, rtol=0, atol=1e-3)
