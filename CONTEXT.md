@@ -38,7 +38,7 @@ gets its own `docs/domain/` file and a line here; new terms go straight into the
 - [Multi-user pilot — centralized processing node (grill 2026-09-05/06, AC locked)](docs/domain/multi-user-pilot.md) — read when touching the processing node, participant data roots, the anonymous pool, replay capture, or purge.
 - [Near-duplicate key reconciliation — offline embedding-space batch merge (#140, grill 2026-09-06)](docs/domain/near-duplicate-reconciliation.md) — read when touching `near_dup.py`, `aliases.jsonl`, fingerprint comparison, or `resolve_key`.
 - [YouTube Music stream-decode capture + browser SMTC identity (#170, grill 2026-09-07)](docs/domain/youtube-music-stream-decode.md) — read when touching YouTube replay capture by stream decode (`stream_decode.py`) or browser SMTC identity.
-- [Gain-invariant mel front-end (#194, grill 2026-09-07)](docs/domain/gain-invariant-mel.md) — read when touching the mel front-end or amplitude normalization in `inference.py`.
+- [Gain-invariant mel front-end (#194, grill 2026-09-07; Essentia match #198)](docs/domain/gain-invariant-mel.md) — read when touching the mel front-end, its Essentia fixture or amplitude normalization in `inference.py`.
 - [Architectural decisions](docs/domain/architectural-decisions.md) — read when looking up a decision id, or why a past architectural choice was made.
 - [Open questions](docs/domain/open-questions.md) — read when deciding something that may already be an open or resolved question.
 
