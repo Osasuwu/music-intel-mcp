@@ -18,10 +18,12 @@ thread: fpcalc-for-pool-storage is a separate, deferred concern, #140/#161).
 
 Record contract (#276, grill 2026-11-03):
 
-- **Yield.** An optional ``should_yield`` callable is polled before every
-  capture read; when it reports an organic session the attempt pauses,
-  discards its buffer and ends ``yielded``. ``process_replay_queue`` puts a
-  yielded track at the back of the queue without spending its requeue.
+- **Yield.** A pause from run control (#279: a pause handled inside
+  :class:`~music_intel_mcp.replay_control.RunControl`, polled before every
+  capture read) ends the attempt ``yielded`` and discards its buffer.
+  ``process_replay_queue`` puts a yielded track at the back of the queue
+  without spending its requeue. (#276 shipped this as a ``should_yield``
+  callable; #279 folded it into run control -- one control path.)
 - **Ledger.** With ``ledger_path`` set, every play attempt appends one
   :class:`ReplayLedgerEntry` -- every outcome, ``play_failed`` and ``yielded``
   included -- and an empty ``account`` is refused before capture starts. The
@@ -39,6 +41,13 @@ Record contract (#276, grill 2026-11-03):
   long leg reuses this capture's inference embedding; the short leg costs one
   extra embedding pass over a front truncation of the same buffer.
 
+Run control (#279, decision ``81859701``): one ``control_source`` polled in
+the queue loop and before every capture read, stop rules over consecutive
+attempt outcomes, every ``Exception`` from the driver or the capture as a
+journaled ``error`` outcome, keep-awake held only while a capture is in
+progress, and one ``run_stopped`` journal line with the stop reason. See
+:mod:`~music_intel_mcp.replay_control` and :func:`process_replay_queue`.
+
 ``on_capture_analyzed`` stays as an optional observer, called once per
 *accepted* capture with the analyzed PCM and its inference result; a
 discarded silent/short/yielded capture never reaches it.
@@ -47,6 +56,8 @@ discarded silent/short/yielded capture never reaches it.
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,6 +76,15 @@ from .inference import (
     run_inference,
 )
 from .models import TrackRef
+from .replay_control import (
+    DEFAULT_PAUSE_POLL_S,
+    FAILURE_STREAK_LIMIT,
+    SILENT_STREAK_LIMIT,
+    ControlSignal,
+    KeepAwake,
+    NullKeepAwake,
+    RunControl,
+)
 from .shared_store import canonical_track_id
 from .store import UserStore
 from .window_probe import (
@@ -73,6 +93,8 @@ from .window_probe import (
     embed_window_pair,
     window_probe_path,
 )
+
+logger = logging.getLogger(__name__)
 
 # Conservative, uncalibrated constants (issue #166 is `afk:2-plan`: these are
 # judgement calls the plan pins now, not values derived from a real pool --
@@ -83,7 +105,16 @@ DEFAULT_REPLAY_WINDOW_S = 120.0
 SILENCE_POLL_INTERVAL_S = 0.5
 MAX_SILENCE_WAIT_S = 10.0
 
-ReplayOutcome = Literal["ok", "silent", "short", "play_failed", "sample_rate_mismatch", "yielded"]
+ReplayOutcome = Literal[
+    "ok",
+    "silent",
+    "short",
+    "play_failed",
+    "sample_rate_mismatch",
+    "yielded",
+    "error",
+    "stopped",
+]
 
 CaptureRoute = Literal["per_app_output", "muted_endpoint", "cable"]
 """Where the replay browser's audio was routed (grill 2026-11-03 D17b): its
@@ -246,6 +277,14 @@ def _journal(
 
 
 _YIELD_REASON = "organic session playing"
+_STOP_REASON = "control stop"
+RUN_TRACK_ID = "__run__"
+"""``track_id`` of the one journal line a run writes when it ends (#279)."""
+
+RunStopReason = Literal["silent_streak", "failure_streak", "control_stop", "queue_empty"]
+
+_FAILURE_OUTCOMES = frozenset({"play_failed", "sample_rate_mismatch", "error", "short"})
+_REQUEUED_OUTCOMES = frozenset({"silent", "short", "error"})
 
 
 def _require_account(ledger_path: Path | None, account: str | None) -> None:
@@ -271,7 +310,8 @@ def run_replay_capture(
     max_silence_wait_s: float = MAX_SILENCE_WAIT_S,
     expected_sample_rate: int | None = None,
     on_capture_analyzed: Callable[..., None] | None = None,
-    should_yield: Callable[[], bool] | None = None,
+    control: RunControl | None = None,
+    keep_awake: KeepAwake | None = None,
     account: str | None = None,
     ledger_path: Path | None = None,
     probe_short_window_s: float = DEFAULT_SHORT_WINDOW_S,
@@ -281,18 +321,27 @@ def run_replay_capture(
     """Run one replay capture attempt for ``track`` (already resolved by the
     caller's queue selection — no identity resolution happens here).
 
+    ``control`` (#279) is polled before every capture read: ``stop`` ends the
+    attempt ``stopped``; a pause handled inside it (its ``pause_epoch``
+    moved) ends the attempt ``yielded``. Either way the buffer is discarded.
+    ``keep_awake`` is held from the moment the capture is armed until the
+    attempt's ``finally``. Any ``Exception`` from the driver or the capture
+    ends the attempt ``error`` (reason ``"<ExcType>: <msg>"``); the
+    ``finally`` attempts ``driver.pause()`` once play was attempted, and a
+    failure there is logged, not raised. ``KeyboardInterrupt`` propagates
+    after the same cleanup.
+
     Raises ``ValueError`` before arming the capture when ``capture_route`` is
     not a :data:`CaptureRoute` or when ``ledger_path`` is set without an
     ``account``."""
     if capture_route not in CAPTURE_ROUTES:
         raise ValueError(f"capture_route must be one of {CAPTURE_ROUTES}, got {capture_route!r}")
     _require_account(ledger_path, account)
+    keep_awake = keep_awake if keep_awake is not None else NullKeepAwake()
     track_id = canonical_track_id(track)
     started_at = now()
     window_len = min(duration_s, max_window_s)
-
-    def _yielding() -> bool:
-        return should_yield is not None and should_yield()
+    epoch0 = control.pause_epoch if control is not None else 0
 
     def _finish(outcome: ReplayOutcome, *, reason: str | None, analysis_path: Path | None = None):
         ended_at = now()
@@ -324,22 +373,45 @@ def run_replay_capture(
             ended_at=ended_at,
         )
 
-    capture.start()
+    playing = False  # play was attempted and did not report TrackSkipped
+    paused = False  # the driver was paused on this attempt's own path
+
+    def _pause() -> None:
+        nonlocal paused
+        driver.pause()
+        paused = True
+
+    def _interrupted() -> ReplayOutcome | None:
+        """Poll ``control`` before a read: ``stopped``, ``yielded`` or None."""
+        nonlocal paused
+        if control is None:
+            return None
+        if control.poll() == "stop":
+            _pause()
+            return "stopped"
+        if control.pause_epoch != epoch0:
+            paused = True  # RunControl paused the driver when the pause began
+            return "yielded"
+        return None
+
+    sink: RingBufferSink | None = None
     try:
+        capture.start()
+        keep_awake.acquire()
+        playing = True
         try:
             driver.play(track)
         except TrackSkipped as exc:
+            playing = False
             return _finish("play_failed", reason=str(exc) or "play failed")
 
-        sink: RingBufferSink | None = None
         waited = 0.0
         while waited < max_silence_wait_s:
-            if _yielding():
-                driver.pause()
-                return _finish("yielded", reason=_YIELD_REASON)
+            if (stop := _interrupted()) is not None:
+                return _finish(stop, reason=_STOP_REASON if stop == "stopped" else _YIELD_REASON)
             frame = capture.read(poll_interval_s)
             if expected_sample_rate is not None and frame.sample_rate != expected_sample_rate:
-                driver.pause()
+                _pause()
                 return _finish(
                     "sample_rate_mismatch",
                     reason=f"got {frame.sample_rate}Hz, expected {expected_sample_rate}Hz",
@@ -355,21 +427,31 @@ def run_replay_capture(
             waited += poll_interval_s
 
         if sink is None:
-            driver.pause()
+            _pause()
             return _finish("silent", reason="no signal above threshold before max wait")
 
         while sink.duration_s < window_len:
-            if _yielding():
-                driver.pause()
-                return _finish("yielded", reason=_YIELD_REASON)
+            if (stop := _interrupted()) is not None:
+                return _finish(stop, reason=_STOP_REASON if stop == "stopped" else _YIELD_REASON)
             frame = capture.read(poll_interval_s)
             if frame.samples.shape[0] == 0:
                 break
             sink.write(frame)
 
-        driver.pause()
+        _pause()
+    except Exception as exc:  # #279 AC4: never escapes the run; BaseException does
+        return _finish("error", reason=f"{type(exc).__name__}: {exc}")
     finally:
-        capture.stop()
+        if playing and not paused:
+            try:
+                driver.pause()
+            except Exception:
+                logger.exception("driver.pause() failed in the capture's finally")
+        try:
+            capture.stop()
+        except Exception:
+            logger.exception("capture.stop() failed in the capture's finally")
+        keep_awake.release()
 
     pcm = sink.read_all()
     if sink.duration_s + 1e-9 < window_len:
@@ -433,13 +515,31 @@ def process_replay_queue(
     ledger_path: Path | None = None,
     resume: bool = False,
     capture_route: CaptureRoute,
+    control_source: Callable[[], ControlSignal] | None = None,
+    keep_awake: KeepAwake | None = None,
+    pause_poll_s: float = DEFAULT_PAUSE_POLL_S,
+    sleep: Callable[[float], None] = time.sleep,
     **run_kwargs,
 ) -> list[ReplayCaptureOutcome]:
     """Drive ``queue`` (mutable, drained in place -- mirrors the CLI's
     existing ``_cmd_automated_playback`` requeue-via-append idiom) through
-    :func:`run_replay_capture`, re-queuing a silent/short track once (AC3).
-    A ``yielded`` track goes to the back of the queue and journals
-    ``requeued`` (reason ``yielded``) without spending its requeue (#276).
+    :func:`run_replay_capture`, re-queuing a ``silent``/``short``/``error``
+    track up to ``requeue_limit`` times (AC3; ``error`` spends a requeue,
+    Пётр 16.11). A ``yielded`` track goes to the back of the queue and
+    journals ``requeued`` (reason ``yielded``) without spending its requeue
+    (#276); a ``stopped`` one is not requeued.
+
+    Run control (#279): ``control_source`` is wrapped in one
+    :class:`~music_intel_mcp.replay_control.RunControl`, polled before each
+    track and before every capture read; ``stop`` ends the run. The run also
+    stops after :data:`SILENT_STREAK_LIMIT` consecutive ``silent`` attempts
+    or :data:`FAILURE_STREAK_LIMIT` consecutive ``play_failed`` /
+    ``sample_rate_mismatch`` / ``error`` / ``short`` ones; ``ok`` resets both
+    streaks, ``yielded`` and ``stopped`` leave them. ``keep_awake`` is
+    released at run end whatever happens. With ``journal_path`` set, the run
+    ends with one journal line, ``track_id`` :data:`RUN_TRACK_ID`, outcome
+    ``run_stopped`` and a :data:`RunStopReason` -- not written when an
+    exception (``KeyboardInterrupt``) propagates.
 
     When ``ledger_path`` is given, each play attempt appends one window to the
     replay ledger (#276; appended, never overwritten, so windows survive
@@ -451,57 +551,101 @@ def process_replay_queue(
     before it is played and skipped, unplayed and unjournaled, when an analysis
     already exists."""
     _require_account(ledger_path, account)
+    keep_awake = keep_awake if keep_awake is not None else NullKeepAwake()
+    control = (
+        RunControl(
+            control_source,
+            driver=driver,
+            keep_awake=keep_awake,
+            pause_poll_s=pause_poll_s,
+            sleep=sleep,
+        )
+        if control_source is not None
+        else None
+    )
+    run_started_at = now()
     results: list[ReplayCaptureOutcome] = []
     if resume and journal_path is not None:
         handled = journal_handled_track_ids(journal_path)
         queue[:] = [t for t in queue if canonical_track_id(t) not in handled]
     requeue_counts: dict[str, int] = {}
+    silent_streak = 0
+    failure_streak = 0
+    stop_reason: RunStopReason = "queue_empty"
 
-    while queue:
-        track = queue.pop(0)
-        if is_track_analysed(store, track):
-            continue
-        outcome = run_replay_capture(
-            track=track,
-            duration_s=track_duration_s(track),
-            capture=capture,
-            driver=driver,
-            store=store,
-            embedding_model=embedding_model,
-            classifier=classifier,
-            journal_path=journal_path,
-            now=now,
-            account=account,
-            ledger_path=ledger_path,
-            capture_route=capture_route,
-            **run_kwargs,
+    def _requeued(track: TrackRef, track_id: str, reason: str) -> None:
+        queue.append(track)
+        ts = now()
+        _journal(
+            journal_path,
+            track_id=track_id,
+            outcome="requeued",
+            started_at=ts,
+            ended_at=ts,
+            reason=reason,
         )
-        results.append(outcome)
 
-        if outcome.outcome == "yielded":
-            queue.append(track)
-            ts = now()
-            _journal(
-                journal_path,
-                track_id=outcome.track_id,
-                outcome="requeued",
-                started_at=ts,
-                ended_at=ts,
-                reason="yielded",
+    try:
+        while queue:
+            if control is not None and control.poll() == "stop":
+                stop_reason = "control_stop"
+                break
+            track = queue.pop(0)
+            if is_track_analysed(store, track):
+                continue
+            outcome = run_replay_capture(
+                track=track,
+                duration_s=track_duration_s(track),
+                capture=capture,
+                driver=driver,
+                store=store,
+                embedding_model=embedding_model,
+                classifier=classifier,
+                journal_path=journal_path,
+                now=now,
+                account=account,
+                ledger_path=ledger_path,
+                capture_route=capture_route,
+                control=control,
+                keep_awake=keep_awake,
+                **run_kwargs,
             )
-        elif outcome.outcome in ("silent", "short"):
-            n = requeue_counts.get(outcome.track_id, 0)
-            if n < requeue_limit:
-                requeue_counts[outcome.track_id] = n + 1
-                queue.append(track)
-                ts = now()
-                _journal(
-                    journal_path,
-                    track_id=outcome.track_id,
-                    outcome="requeued",
-                    started_at=ts,
-                    ended_at=ts,
-                    reason=outcome.outcome,
-                )
+            results.append(outcome)
+
+            if outcome.outcome == "stopped":
+                stop_reason = "control_stop"
+                break
+            if outcome.outcome == "ok":
+                silent_streak = failure_streak = 0
+            elif outcome.outcome == "silent":
+                silent_streak += 1
+            elif outcome.outcome in _FAILURE_OUTCOMES:
+                failure_streak += 1
+
+            if outcome.outcome == "yielded":
+                _requeued(track, outcome.track_id, "yielded")
+            elif outcome.outcome in _REQUEUED_OUTCOMES:
+                n = requeue_counts.get(outcome.track_id, 0)
+                if n < requeue_limit:
+                    requeue_counts[outcome.track_id] = n + 1
+                    _requeued(track, outcome.track_id, outcome.outcome)
+
+            if silent_streak >= SILENT_STREAK_LIMIT:
+                stop_reason = "silent_streak"
+                break
+            if failure_streak >= FAILURE_STREAK_LIMIT:
+                stop_reason = "failure_streak"
+                break
+
+        _journal(
+            journal_path,
+            track_id=RUN_TRACK_ID,
+            outcome="run_stopped",
+            started_at=run_started_at,
+            ended_at=now(),
+            reason=stop_reason,
+        )
+    finally:
+        keep_awake.release()
 
     return results
