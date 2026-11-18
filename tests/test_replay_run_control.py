@@ -380,6 +380,51 @@ def test_a_driver_or_capture_exception_is_a_journaled_error_and_the_run_goes_on(
     assert keep_awake.held is False
 
 
+@pytest.mark.parametrize("step", ["run_inference", "write_audio_analysis"])
+def test_a_post_capture_exception_is_a_journaled_error_and_the_queue_moves_on(
+    tmp_path, monkeypatch, step
+):
+    """#279 AC4 (review finding): a failure after the capture (inference,
+    the analysis write) is that track's ``error``, not an escape from the run."""
+    import music_intel_mcp.replay_capture as rc
+
+    store = UserStore(root=tmp_path)
+    keep_awake = _KeepAwake()
+    capture = _Capture(keep_awake)
+    driver = _Driver(capture)
+    calls = {"n": 0}
+    real_inference = rc.run_inference
+    real_write = UserStore.write_audio_analysis
+
+    def _flaky_inference(*a, **kw):
+        calls["n"] += 1
+        if step == "run_inference" and calls["n"] == 1:
+            raise RuntimeError("inference blew up")
+        return real_inference(*a, **kw)
+
+    def _flaky_write(self, **kw):
+        if step == "write_audio_analysis" and calls["n"] == 1:
+            raise OSError("disk full")
+        return real_write(self, **kw)
+
+    monkeypatch.setattr(rc, "run_inference", _flaky_inference)
+    monkeypatch.setattr(UserStore, "write_audio_analysis", _flaky_write)
+
+    results = _run(
+        store,
+        [_t("loud", 0), _t("loud", 1)],
+        capture=capture,
+        driver=driver,
+        keep_awake=keep_awake,
+        requeue_limit=0,
+    )
+
+    assert [r.outcome for r in results] == ["error", "ok"]
+    reason = "RuntimeError: inference blew up" if step == "run_inference" else "OSError: disk full"
+    assert [e["reason"] for e in _journal(store) if e["outcome"] == "error"] == [reason]
+    assert keep_awake.held is False
+
+
 def test_a_capture_start_exception_is_a_journaled_error(tmp_path):
     store = UserStore(root=tmp_path)
     capture = _Capture(start_error=True)

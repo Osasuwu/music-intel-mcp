@@ -328,8 +328,10 @@ def run_replay_capture(
     attempt's ``finally``. Any ``Exception`` from the driver or the capture
     ends the attempt ``error`` (reason ``"<ExcType>: <msg>"``); the
     ``finally`` attempts ``driver.pause()`` once play was attempted, and a
-    failure there is logged, not raised. ``KeyboardInterrupt`` propagates
-    after the same cleanup.
+    failure there is logged, not raised. The same holds for the steps after
+    the capture (inference, the analysis write, the window-pair probe line,
+    ``on_capture_analyzed``): an ``Exception`` there is that track's ``error``.
+    ``KeyboardInterrupt`` propagates after the same cleanup.
 
     Raises ``ValueError`` before arming the capture when ``capture_route`` is
     not a :data:`CaptureRoute` or when ``ledger_path`` is set without an
@@ -461,41 +463,47 @@ def run_replay_capture(
     if _rms(pcm) < rms_threshold:
         return _finish("silent", reason=f"rms below threshold {rms_threshold}")
 
-    inference = run_inference(
-        pcm, sample_rate=sink.sample_rate, embedding_model=embedding_model, classifier=classifier
-    )
-    analysis_path = store.write_audio_analysis(
-        track_id=track_id,
-        embedding=inference.embedding,
-        tags=inference.tags,
-        model_version=EMBEDDING_SPACE_VERSION,
-        input_rms=inference.input_rms,
-        capture_route=capture_route,
-    )
-    # #276 AC5: exactly one window-probe line per accepted capture, written
-    # here rather than by a rider (decision (a), 16.11). Same buffer, and the
-    # long leg is the embedding just computed.
-    append_window_pair(
-        window_probe_path(store),
-        embed_window_pair(
-            track_id=track_id,
-            pcm=pcm,
+    try:
+        inference = run_inference(
+            pcm,
             sample_rate=sink.sample_rate,
             embedding_model=embedding_model,
-            short_window_s=probe_short_window_s,
-            long_embedding=inference.embedding,
-        ),
-    )
-    if on_capture_analyzed is not None:
-        # Passive observer of an accepted capture, given the analyzed PCM,
-        # never the raw frames.
-        on_capture_analyzed(
+            classifier=classifier,
+        )
+        analysis_path = store.write_audio_analysis(
             track_id=track_id,
-            pcm=pcm,
-            sample_rate=sink.sample_rate,
             embedding=inference.embedding,
             tags=inference.tags,
+            model_version=EMBEDDING_SPACE_VERSION,
+            input_rms=inference.input_rms,
+            capture_route=capture_route,
         )
+        # #276 AC5: exactly one window-probe line per accepted capture, written
+        # here rather than by a rider (decision (a), 16.11). Same buffer, and the
+        # long leg is the embedding just computed.
+        append_window_pair(
+            window_probe_path(store),
+            embed_window_pair(
+                track_id=track_id,
+                pcm=pcm,
+                sample_rate=sink.sample_rate,
+                embedding_model=embedding_model,
+                short_window_s=probe_short_window_s,
+                long_embedding=inference.embedding,
+            ),
+        )
+        if on_capture_analyzed is not None:
+            # Passive observer of an accepted capture, given the analyzed PCM,
+            # never the raw frames.
+            on_capture_analyzed(
+                track_id=track_id,
+                pcm=pcm,
+                sample_rate=sink.sample_rate,
+                embedding=inference.embedding,
+                tags=inference.tags,
+            )
+    except Exception as exc:  # #279 AC4: a post-capture failure is this track's error
+        return _finish("error", reason=f"{type(exc).__name__}: {exc}")
     return _finish("ok", reason=None, analysis_path=analysis_path)
 
 
