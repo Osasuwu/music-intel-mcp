@@ -294,6 +294,14 @@ def _require_account(ledger_path: Path | None, account: str | None) -> None:
         raise ValueError("a replay ledger needs the replay account (account is empty)")
 
 
+def _release_keep_awake(keep_awake: KeepAwake) -> None:
+    """Release in cleanup: a failure is logged, never raised (#279 AC4)."""
+    try:
+        keep_awake.release()
+    except Exception:
+        logger.exception("keep_awake.release() failed")
+
+
 def run_replay_capture(
     *,
     track: TrackRef,
@@ -328,7 +336,9 @@ def run_replay_capture(
     attempt's ``finally``. Any ``Exception`` from the driver or the capture
     ends the attempt ``error`` (reason ``"<ExcType>: <msg>"``); the
     ``finally`` attempts ``driver.pause()`` once play was attempted, and a
-    failure there is logged, not raised. The same holds for the steps after
+    failure there is logged, not raised, as is a failing pause on the
+    attempt's own path (stop, sample-rate mismatch, end of window) and a
+    failing keep-awake release: none of them changes the outcome. The same holds for the steps after
     the capture (inference, the analysis write, the window-pair probe line,
     ``on_capture_analyzed``): an ``Exception`` there is that track's ``error``.
     ``KeyboardInterrupt`` propagates after the same cleanup.
@@ -379,9 +389,15 @@ def run_replay_capture(
     paused = False  # the driver was paused on this attempt's own path
 
     def _pause() -> None:
+        # A failed pause is logged, never raised (as in RunControl.poll()): it
+        # must not turn a stop/ok/mismatch attempt into ``error``. It counts as
+        # attempted, so the ``finally`` does not pause a second time.
         nonlocal paused
-        driver.pause()
         paused = True
+        try:
+            driver.pause()
+        except Exception:
+            logger.exception("driver.pause() failed on the capture's own path")
 
     def _interrupted() -> ReplayOutcome | None:
         """Poll ``control`` before a read: ``stopped``, ``yielded`` or None."""
@@ -453,7 +469,7 @@ def run_replay_capture(
             capture.stop()
         except Exception:
             logger.exception("capture.stop() failed in the capture's finally")
-        keep_awake.release()
+        _release_keep_awake(keep_awake)
 
     pcm = sink.read_all()
     if sink.duration_s + 1e-9 < window_len:
@@ -654,6 +670,6 @@ def process_replay_queue(
             reason=stop_reason,
         )
     finally:
-        keep_awake.release()
+        _release_keep_awake(keep_awake)
 
     return results

@@ -116,7 +116,10 @@ class RunControl:
             self._driver.pause()
         except Exception:  # a failed pause must not end the run from here
             logger.exception("driver.pause() failed while pausing for control")
-        self._keep_awake.release()
+        try:
+            self._keep_awake.release()
+        except Exception:  # same: a failed release must not end the run
+            logger.exception("keep_awake.release() failed while pausing for control")
         while True:
             self._sleep(self._pause_poll_s)
             signal = self._source()

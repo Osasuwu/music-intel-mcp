@@ -261,6 +261,54 @@ def test_a_stop_from_control_mid_capture_ends_the_attempt_and_the_run(tmp_path):
     assert len(replay_ledger_path(store).read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_a_stop_stays_a_stop_when_the_driver_pause_fails(tmp_path):
+    """Review finding: ``driver.pause()`` raising on the stop path is logged,
+    like in ``RunControl.poll()``; the attempt still ends ``stopped`` and the
+    run halts, even though the source reports ``stop`` only once."""
+    store = UserStore(root=tmp_path)
+    capture = _Capture()
+    driver = _Driver(capture, pause_error=True)
+    queue = [_t("loud", 1), _t("loud", 2)]
+
+    results = _run(
+        store,
+        queue,
+        capture=capture,
+        driver=driver,
+        source=_Source(["continue", "stop"]),
+        requeue_limit=1,
+    )
+
+    assert [r.outcome for r in results] == ["stopped"]
+    assert driver.played == ["loud-1"]
+    assert driver.pauses == 1  # attempted once on the stop path, not again in finally
+    assert queue == [_t("loud", 2)]
+    assert [e["outcome"] for e in _journal(store) if e["outcome"] == "error"] == []
+    assert _stop_line(store)["reason"] == "control_stop"
+
+
+def test_a_failing_keep_awake_release_does_not_end_the_run(tmp_path):
+    store = UserStore(root=tmp_path)
+    keep_awake = _KeepAwake()
+
+    def _boom() -> None:
+        raise OSError("SetThreadExecutionState failed")
+
+    keep_awake.release = _boom  # type: ignore[method-assign]
+    capture = _Capture()
+
+    results = _run(
+        store,
+        [_t("loud", 1), _t("loud", 2)],
+        capture=capture,
+        driver=_Driver(capture),
+        keep_awake=keep_awake,
+    )
+
+    assert [r.outcome for r in results] == ["ok", "ok"]
+    assert _stop_line(store)["reason"] == "queue_empty"
+
+
 def test_a_stop_before_a_track_plays_nothing(tmp_path):
     store = UserStore(root=tmp_path)
     capture = _Capture()
