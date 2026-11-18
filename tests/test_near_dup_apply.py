@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import json
 
+from music_intel_mcp.inference import EMBEDDING_SPACE_VERSION
 from music_intel_mcp.near_dup import apply, scan
 from music_intel_mcp.store import UserStore
 
 
 def _write(store: UserStore, track_id: str, embedding: list[float]) -> None:
-    store.write_audio_analysis(track_id=track_id, embedding=embedding, tags={})
+    store.write_audio_analysis(
+        track_id=track_id, embedding=embedding, tags={}, model_version=EMBEDDING_SPACE_VERSION
+    )
 
 
 def _build_store_with_scan_report(tmp_path):
