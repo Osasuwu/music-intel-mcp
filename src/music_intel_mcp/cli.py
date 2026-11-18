@@ -1113,6 +1113,12 @@ def _cmd_replay_queue(args: argparse.Namespace) -> int:
     return 0
 
 
+# Journal outcomes that are bookkeeping, not capture attempts: a requeue line
+# repeats an attempt already counted, and the per-run `__run__` line (#279)
+# records why a run ended.
+_NOT_ATTEMPTS = ("requeued", "run_stopped")
+
+
 def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     from .replay_capture import replay_journal_path, summarize_replay_journal
     from .stream_decode import stream_decode_journal_path
@@ -1122,7 +1128,7 @@ def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
     if not counts:
         print("replay journal: no attempts recorded yet")
     else:
-        attempts = sum(count for outcome, count in counts.items() if outcome != "requeued")
+        attempts = sum(count for outcome, count in counts.items() if outcome not in _NOT_ATTEMPTS)
         print(f"replay journal: {attempts} attempts")
         for outcome, count in sorted(counts.items()):
             print(f"  {outcome}: {count}")
@@ -1137,7 +1143,7 @@ def _cmd_replay_journal_summary(args: argparse.Namespace) -> int:
         print("stream-decode journal: no attempts recorded yet")
     else:
         stream_attempts = sum(
-            count for outcome, count in stream_counts.items() if outcome != "requeued"
+            count for outcome, count in stream_counts.items() if outcome not in _NOT_ATTEMPTS
         )
         print(f"stream-decode journal: {stream_attempts} attempts")
         for outcome, count in sorted(stream_counts.items()):

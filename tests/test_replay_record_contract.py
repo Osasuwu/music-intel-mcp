@@ -28,6 +28,7 @@ from music_intel_mcp.replay_capture import (
     replay_ledger_path,
     run_replay_capture,
 )
+from music_intel_mcp.replay_control import NullKeepAwake, RunControl
 from music_intel_mcp.shared_store import canonical_track_id
 from music_intel_mcp.store import UserStore
 
@@ -77,16 +78,25 @@ class _Driver:
         self.pauses += 1
 
 
-class _YieldOnce:
-    """An organic session shows up once (the first poll), then never again --
-    the always-yielding 30 s wait is S4's, out of scope here."""
+def _scripted(script: list[str]):
+    """A control source playing ``script``, then ``continue`` for ever. Since
+    #279 a yield is a pause from run control (``RunControl``), not #276's
+    ``should_yield`` callable; the source that detects an organic session and
+    the 30 s wait are S4's, out of scope here."""
+    script = list(script)
+    return lambda: script.pop(0) if script else "continue"
 
-    def __init__(self) -> None:
-        self.polls = 0
 
-    def __call__(self) -> bool:
-        self.polls += 1
-        return self.polls == 1
+def _yield_once(driver, *, after: int = 0) -> RunControl:
+    """Run control that pauses once, on the poll after ``after`` continues
+    (an organic session appears, then goes away)."""
+    return RunControl(
+        _scripted(["continue"] * after + ["pause", "continue"]),
+        driver=driver,
+        keep_awake=NullKeepAwake(),
+        pause_poll_s=0.0,
+        sleep=lambda s: None,
+    )
 
 
 def _track(name: str = "Around the World") -> TrackRef:
@@ -128,7 +138,7 @@ def test_a_yield_discards_the_capture_and_journals_yielded(tmp_path):
         store=store,
         capture_route="per_app_output",
         journal_path=replay_journal_path(store),
-        should_yield=_YieldOnce(),
+        control=_yield_once(driver),
         **_models(),
         **_fast(),
     )
@@ -144,16 +154,16 @@ def test_a_yield_mid_window_discards_the_partial_buffer(tmp_path):
     """The poll also runs while the window fills: a session appearing after
     the anchor frame still throws the partial buffer away."""
     store = UserStore(root=tmp_path)
-    polls = iter([False, True])
+    driver = _Driver()
 
     outcome = run_replay_capture(
         track=_track(),
         duration_s=0.1,
         capture=_Capture([_tone(), _tone()]),
-        driver=_Driver(),
+        driver=driver,
         store=store,
         capture_route="per_app_output",
-        should_yield=lambda: next(polls, False),
+        control=_yield_once(driver, after=1),
         **_models(),
         max_window_s=0.1,
         poll_interval_s=0.01,
@@ -181,7 +191,10 @@ def test_a_yielded_track_requeues_without_spending_its_requeue(tmp_path):
         capture_route="per_app_output",
         journal_path=replay_journal_path(store),
         requeue_limit=1,
-        should_yield=_YieldOnce(),
+        # queue poll, then a pause at the first capture poll
+        control_source=_scripted(["continue", "pause", "continue"]),
+        pause_poll_s=0.0,
+        sleep=lambda s: None,
         **_models(),
         **_fast(),
     )
@@ -200,15 +213,16 @@ def test_resume_replays_a_track_whose_only_attempt_yielded(tmp_path):
     settle the track, so the resumed run plays it again."""
     store = UserStore(root=tmp_path)
     journal = replay_journal_path(store)
+    first = _Driver()
     run_replay_capture(
         track=_track(),
         duration_s=0.05,
         capture=_Capture([_tone()]),
-        driver=_Driver(),
+        driver=first,
         store=store,
         capture_route="per_app_output",
         journal_path=journal,
-        should_yield=_YieldOnce(),
+        control=_yield_once(first),
         **_models(),
         **_fast(),
     )
@@ -365,7 +379,7 @@ def test_the_per_user_record_carries_its_capture_route(tmp_path, route):
     payload = json.loads(results[0].analysis_path.read_text(encoding="utf-8"))
     assert payload["capture_route"] == route
     assert store.list_audio_analyses()[0].capture_route == route
-    assert _journal(store)[-1]["capture_route"] == route
+    assert [e["capture_route"] for e in _journal(store) if e["outcome"] == "ok"] == [route]
 
 
 def test_a_pool_record_gains_no_capture_route_and_the_journal_keeps_it(tmp_path):

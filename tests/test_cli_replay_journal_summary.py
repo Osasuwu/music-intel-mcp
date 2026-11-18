@@ -67,6 +67,31 @@ def test_replay_journal_summary_excludes_requeue_bookkeeping_from_attempt_count(
     assert "requeued: 1" in out
 
 
+def test_replay_journal_summary_excludes_run_stop_line_from_attempt_count(tmp_path, capsys):
+    """The per-run `__run__` / `run_stopped` line (#279) records why a run
+    ended, not a capture attempt -- counting it overstates the total by one
+    per run (AutoCraft Opus review of PR #292)."""
+    store = UserStore(root=tmp_path)
+    path = replay_journal_path(store)
+    for track_id, outcome in (("mbid:a", "ok"), ("mbid:b", "silent"), ("__run__", "run_stopped")):
+        append_replay_journal_entry(
+            path,
+            ReplayJournalEntry(
+                track_id=track_id,
+                outcome=outcome,
+                started_at="2026-01-01T00:00:00+00:00",
+                ended_at="2026-01-01T00:02:00+00:00",
+            ),
+        )
+
+    rc = main(["replay-journal-summary", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "replay journal: 2 attempts" in out
+    assert "run_stopped: 1" in out
+
+
 def test_replay_journal_summary_handles_missing_journal(tmp_path, capsys):
     rc = main(["replay-journal-summary", "--data-dir", str(tmp_path)])
 
