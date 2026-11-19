@@ -17,7 +17,7 @@ Product details, data sources, pipelines, architectural decisions and open quest
 
 ## Stop-points (gates)
 
-1. **`/grill` before code that decides product behavior.** The domain model is filled in — the V0 engine and the pilot slices were each grilled and their resolved state is in `CONTEXT.md` / `docs/domain/` — so the gate is per change, not a one-time project gate. Setup-level work (workflows, AGENTS.md, labels, deps) is fine. Anything that decides product behavior (recommendation strategy, similarity scoring, data schema, MCP tool surface, a new pipeline or ingestion source) runs the grill trigger checkbox in `~/.claude/reference/engineering-principles.md` (§ *Grill trigger checkbox*): ≥1 yes ⇒ `/grill` first. Setup itself is 0 yes ⇒ proceed.
+1. **`/grill` before code that decides product behavior.** The domain model is filled in — the V0 engine and the pilot slices were each grilled and their resolved state is in `CONTEXT.md` / `docs/domain/` — so the gate is per change, not a one-time project gate. Setup-level work (workflows, AGENTS.md, labels, deps) is fine. Anything that decides product behavior (recommendation strategy, similarity scoring, data schema, MCP tool surface, a new pipeline or ingestion source) runs the grill trigger checkbox in `~/.claude/plugins/marketplaces/jarvis-private/reference/engineering-principles.md` (§ *Grill trigger checkbox*): ≥1 yes ⇒ `/grill` first. Setup itself is 0 yes ⇒ proceed.
 
 2. **No mechanical port from the `legacy/java` branch** (also tagged `v0-uni`; not a directory on `main` — read it with `git show origin/legacy/java:<path>`). Java code is uni-grade reference for *what existed*, not a TZ for what to build. Read it for credentials/data layout only.
 
